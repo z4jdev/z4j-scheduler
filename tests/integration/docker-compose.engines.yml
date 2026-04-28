@@ -1,0 +1,58 @@
+# Live-broker test harness for z4j-scheduler engine matrix.
+#
+# Spin up a real Redis (used by celery, rq, arq) so the
+# ``test_engine_matrix_redis_e2e.py`` suite can exercise live
+# task execution end-to-end against a real broker.
+#
+# Usage (host shell):
+#
+#   docker compose -f packages/z4j-scheduler/tests/integration/docker-compose.engines.yml up -d
+#   REDIS_URL=redis://localhost:6390 \
+#     /j/z4j/.venv/Scripts/python.exe -m pytest \
+#       packages/z4j-scheduler/tests/integration/test_engine_matrix_redis_e2e.py
+#   docker compose -f packages/z4j-scheduler/tests/integration/docker-compose.engines.yml down
+#
+# Port 6390 is used (not 6379) to avoid colliding with a host
+# Redis the operator may have running.
+#
+# CI integration: the GitHub Actions workflow at
+# ``packages/z4j-scheduler/.github/workflows/engine-matrix-live.yml``
+# starts this compose stack as a service container before pytest
+# (see commit log for the workflow add).
+#
+# Why no celery / rq / arq worker containers? Each engine adapter's
+# worker side runs as a per-test in-process worker (``SimpleWorker``,
+# ``arq.Worker``, etc.). This file provides only the broker; the
+# tests themselves spawn workers that drain it.
+
+version: "3.9"
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: z4j-engine-test-redis
+    ports:
+      - "6390:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+    restart: unless-stopped
+
+  # Dramatiq + RabbitMQ option for operators who want to verify
+  # the dramatiq adapter against a real RabbitMQ broker (the
+  # in-process StubBroker test in test_engine_matrix_live_e2e.py
+  # already covers the in-memory case).
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: z4j-engine-test-rabbitmq
+    ports:
+      - "5680:5672"   # AMQP
+      - "15680:15672" # management UI
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped

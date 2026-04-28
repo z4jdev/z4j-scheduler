@@ -1,0 +1,118 @@
+[project]
+name = "z4j-scheduler"
+version = "1.1.0"
+description = "Engine-agnostic dynamic scheduler for the z4j stack (Apache 2.0)"
+readme = "README.md"
+requires-python = ">=3.13"
+license = { text = "Apache-2.0" }
+authors = [{ name = "z4j contributors" }]
+keywords = [
+    "z4j",
+    "scheduler",
+    "cron",
+    "celery",
+    "rq",
+    "dramatiq",
+    "task",
+    "queue",
+    "distributed",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Framework :: AsyncIO",
+    "Framework :: FastAPI",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Distributed Computing",
+    "Typing :: Typed",
+]
+dependencies = [
+    # Reuses z4j-core Pydantic models (Schedule, Command, Event,
+    # error hierarchy) directly - no protobuf duplication inside
+    # the Python codebase. Floor matches what the Schedule model
+    # additions (catch_up, source, source_hash) ship at.
+    "z4j-core>=1.1.0,<1.2",
+    # Async HTTP server for /health, /ready, /metrics, /info.
+    # Same FastAPI as z4j-brain so contributors carry over patterns.
+    "fastapi>=0.135",
+    "uvicorn[standard]>=0.32",
+    # uvloop is Linux/macOS only; Windows falls back to default
+    # asyncio loop. Per spec §16.2 / §20 / §28 q11.
+    "uvloop>=0.21; sys_platform != 'win32'",
+    # gRPC server + client (brain <-> scheduler). Async API used
+    # throughout. Stubs are committed in src/z4j_scheduler/proto/
+    # so the toolchain is build-time only.
+    "grpcio>=1.68",
+    "protobuf>=5.28",
+    # asyncpg directly for advisory locks. No SQLAlchemy at the
+    # scheduler level - DB usage is narrow (lock + emergency read).
+    "asyncpg>=0.30",
+    # Validation + settings - pinned to match the rest of z4j.
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    # Cron parsing. Wrapped in src/z4j_scheduler/tick/cron.py so we
+    # can swap if needed without touching call sites.
+    "croniter>=3.0",
+    # Astronomical event computation for solar schedules
+    # (sunrise / sunset / dawn / dusk / noon / midnight at a given
+    # lat/lon). docs/SCHEDULER.md §5.1 lists solar in the v1 kind
+    # surface. Pure Python, ~50KB, no native deps.
+    "astral>=3.2",
+    # Pinned IANA tzdata so deployments are deterministic across
+    # base images that may ship stale /usr/share/zoneinfo.
+    "tzdata>=2024.2",
+    # Same logging stack as the rest of z4j - structured JSON in
+    # prod, pretty console in dev.
+    "structlog>=25.1",
+    # Standard Prometheus exposition.
+    "prometheus-client>=0.21",
+    # Typer-driven CLI (z4j-scheduler serve, import, schedules ...).
+    "typer>=0.13",
+    # For migration importers that need to call brain's REST API
+    # (vs the scheduler's own gRPC channel which is for hot-path
+    # only). Same httpx as the rest of z4j.
+    "httpx>=0.28",
+]
+
+[project.optional-dependencies]
+# Importers from each source scheduler. Optional so users only
+# install what they need - the celery-beat importer pulls in
+# celery itself, which is heavyweight.
+celery-import = ["celery>=5.6", "django-celery-beat>=2.7"]
+rq-import = ["rq>=2.0", "rq-scheduler>=0.14"]
+apscheduler-import = ["apscheduler>=3.10"]
+
+[project.scripts]
+z4j-scheduler = "z4j_scheduler.cli:main"
+
+[project.urls]
+Changelog = "https://github.com/z4jdev/z4j-scheduler/blob/main/CHANGELOG.md"
+Documentation = "https://z4j.dev/scheduler"
+Homepage = "https://z4j.com"
+Issues = "https://github.com/z4jdev/z4j-scheduler/issues"
+Source = "https://github.com/z4jdev/z4j-scheduler"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/z4j_scheduler"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/z4j_scheduler",
+    "proto/*.proto",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "pyproject.toml",
+]

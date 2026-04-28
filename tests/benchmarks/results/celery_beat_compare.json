@@ -1,0 +1,76 @@
+{
+  "generated": "2026-04-27T16:39:40.019802+00:00",
+  "celery_available": true,
+  "next_fire_cost": {
+    "iterations": 1000,
+    "per_cron": {
+      "every-minute": {
+        "expression": "* * * * *",
+        "z4j_us_p50": 41.1,
+        "z4j_us_p99": 158.6,
+        "celery_us_p50": 11.3,
+        "celery_us_p99": 16.1
+      },
+      "every-5-min": {
+        "expression": "*/5 * * * *",
+        "z4j_us_p50": 73.0,
+        "z4j_us_p99": 146.5,
+        "celery_us_p50": 9.4,
+        "celery_us_p99": 17.5
+      },
+      "hourly": {
+        "expression": "0 * * * *",
+        "z4j_us_p50": 48.3,
+        "z4j_us_p99": 101.8,
+        "celery_us_p50": 10.1,
+        "celery_us_p99": 19.7
+      },
+      "daily-3am": {
+        "expression": "0 3 * * *",
+        "z4j_us_p50": 49.2,
+        "z4j_us_p99": 118.0,
+        "celery_us_p50": 9.7,
+        "celery_us_p99": 16.5
+      },
+      "weekly-mon": {
+        "expression": "0 9 * * 1",
+        "z4j_us_p50": 60.8,
+        "z4j_us_p99": 148.0,
+        "celery_us_p50": 9.7,
+        "celery_us_p99": 16.4
+      }
+    }
+  },
+  "tick_at_scale": {
+    "per_scale": {
+      "100": {
+        "schedules": 100,
+        "z4j_tick_ms": 1.38,
+        "z4j_due_count": 100,
+        "celery_tick_ms": 2.09,
+        "celery_due_count": 0
+      },
+      "1000": {
+        "schedules": 1000,
+        "z4j_tick_ms": 13.19,
+        "z4j_due_count": 1000,
+        "celery_tick_ms": 19.65,
+        "celery_due_count": 0
+      },
+      "10000": {
+        "schedules": 10000,
+        "z4j_tick_ms": 131.35,
+        "z4j_due_count": 10000,
+        "celery_tick_ms": 200.47,
+        "celery_due_count": 0
+      }
+    }
+  },
+  "memory_per_schedule": {
+    "schedules": 10000,
+    "z4j_total_mb": 6.04,
+    "z4j_bytes_per_schedule": 633.7,
+    "celery_total_mb": 60.81,
+    "celery_bytes_per_schedule": 6376.7
+  }
+}

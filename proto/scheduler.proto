@@ -1,0 +1,181 @@
+// z4j-scheduler <-> z4j-brain gRPC contract.
+//
+// This .proto file is the single source of truth for the wire shape
+// between the scheduler and the brain. Both sides compile from this
+// file via `grpcio-tools`; the generated Python stubs are committed
+// at:
+//
+//   z4j-scheduler:  src/z4j_scheduler/proto/scheduler_pb2{,_grpc}.py
+//   z4j-brain:      backend/src/z4j_brain/scheduler_grpc/proto/scheduler_pb2{,_grpc}.py
+//
+// Authentication: mTLS. No bearer tokens. The scheduler is treated
+// as a peer service inside the operator's trusted network, not as
+// an untrusted agent. See docs/SCHEDULER.md §22.
+//
+// Versioning: protobuf field numbers are stable. Add new fields by
+// reserving a new number; never reuse a number for a different
+// meaning. Major version changes happen by bumping the package
+// version in the import path (z4j.scheduler.v2.SchedulerService).
+
+syntax = "proto3";
+
+package z4j.scheduler.v1;
+
+import "google/protobuf/timestamp.proto";
+
+
+// SchedulerService is implemented by both sides depending on
+// direction:
+//
+//  - Brain implements: ListSchedules, WatchSchedules, FireSchedule,
+//    AcknowledgeFireResult, Ping. Scheduler is the gRPC client for
+//    these.
+//
+//  - Scheduler implements: TriggerSchedule (operator-initiated
+//    manual fires originating from the dashboard). Brain is the
+//    gRPC client for this one.
+//
+// In practice this is two separate gRPC services on different
+// ports; we declare them as one logical service here for clarity.
+service SchedulerService {
+    // Initial sync: scheduler asks brain for every schedule it
+    // should tick. Server-streams paginated results so the
+    // scheduler can begin populating its in-memory cache
+    // incrementally.
+    rpc ListSchedules(ListSchedulesRequest) returns (stream Schedule);
+
+    // Subscribe to schedule changes. Server-streaming. Brain pushes
+    // events on every create/update/delete so the scheduler updates
+    // its in-memory tick wheel within 100ms.
+    rpc WatchSchedules(WatchSchedulesRequest) returns (stream ScheduleEvent);
+
+    // Scheduler tells brain to fire a schedule. Brain creates a
+    // Command row and dispatches via the existing CommandDispatcher
+    // through the agent's WebSocket. Returns the command_id; the
+    // agent's actual completion comes back via AcknowledgeFireResult.
+    rpc FireSchedule(FireScheduleRequest) returns (FireScheduleResponse);
+
+    // Operator-initiated manual fire. Same wire effect as
+    // FireSchedule but tagged differently in the audit log so the
+    // operator-clicked vs schedule-tick distinction is preserved.
+    // Brain calls scheduler (reverse direction).
+    rpc TriggerSchedule(TriggerScheduleRequest) returns (TriggerScheduleResponse);
+
+    // Brain calls back when the agent has acknowledged + executed
+    // the fire. Scheduler updates last_run_at + computes next_run_at
+    // for the schedule.
+    rpc AcknowledgeFireResult(AcknowledgeFireResultRequest)
+        returns (AcknowledgeFireResultResponse);
+
+    // Health check.
+    rpc Ping(PingRequest) returns (PingResponse);
+}
+
+
+message ListSchedulesRequest {
+    // Empty string = list every schedule across every project the
+    // scheduler is enrolled to serve. UUID string = restrict to one
+    // project.
+    string project_id = 1;
+    int32 page_size = 2;          // default 100
+}
+
+message WatchSchedulesRequest {
+    string project_id = 1;
+    // Optional - lets the scheduler resume the stream after a
+    // reconnect without missing events. Brain returns events with
+    // a resume_token; scheduler stashes the latest and re-presents
+    // it on reconnect. Empty token = start from current state.
+    string resume_token = 2;
+}
+
+message Schedule {
+    string id = 1;
+    string project_id = 2;
+    string engine = 3;
+    string name = 4;
+    string task_name = 5;
+    // "cron" | "interval" | "one_shot" - matches the brain's
+    // schedule_kind enum.
+    string kind = 6;
+    string expression = 7;
+    string timezone = 8;
+    string queue = 9;
+    bytes args_json = 10;          // raw JSON
+    bytes kwargs_json = 11;        // raw JSON
+    bool is_enabled = 12;
+    // "skip" | "fire_one_missed" | "fire_all_missed"
+    string catch_up = 13;
+    // "dashboard" | "declarative" | "imported_celerybeat" | ...
+    string source = 14;
+    google.protobuf.Timestamp last_run_at = 15;
+    google.protobuf.Timestamp next_run_at = 16;
+    int64 total_runs = 17;
+    string source_hash = 18;
+}
+
+message ScheduleEvent {
+    enum Kind {
+        CREATED = 0;
+        UPDATED = 1;
+        DELETED = 2;
+    }
+    Kind kind = 1;
+    Schedule schedule = 2;
+    // Populated only when kind == DELETED.
+    string deleted_id = 3;
+    // Updated after each event to support stream resume.
+    string resume_token = 4;
+}
+
+message FireScheduleRequest {
+    string schedule_id = 1;
+    // Scheduler-generated, used as idempotency key. The brain's
+    // command row will carry idempotency_key="schedule:<sched>:fire:<fire>"
+    // so duplicate FireSchedule calls (from network retries) become
+    // no-ops.
+    string fire_id = 2;
+    google.protobuf.Timestamp scheduled_for = 3;
+    google.protobuf.Timestamp fired_at = 4;
+}
+
+message FireScheduleResponse {
+    string command_id = 1;         // populated on success
+    string error_code = 2;         // populated on failure
+    string error_message = 3;
+    // True if brain stored the fire in the pending_fires buffer
+    // because no agent was online (and the schedule's catch_up
+    // policy supports buffering).
+    bool buffered = 4;
+}
+
+message TriggerScheduleRequest {
+    string schedule_id = 1;
+    // Operator who clicked trigger - audit-log attribution.
+    string user_id = 2;
+    string idempotency_key = 3;
+}
+
+message TriggerScheduleResponse {
+    string command_id = 1;
+    string error_code = 2;
+    string error_message = 3;
+}
+
+message AcknowledgeFireResultRequest {
+    string fire_id = 1;
+    string command_id = 2;
+    // "success" | "failed" | "timeout"
+    string status = 3;
+    string new_task_id = 4;
+    string error = 5;
+}
+
+message AcknowledgeFireResultResponse {}
+
+message PingRequest {}
+
+message PingResponse {
+    string brain_version = 1;
+    google.protobuf.Timestamp brain_time = 2;
+}
