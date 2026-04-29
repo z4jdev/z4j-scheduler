@@ -107,6 +107,132 @@ def version() -> None:
 
 
 @app.command()
+def check(
+    brain_grpc_url: str = typer.Option(
+        None,
+        "--brain-grpc-url",
+        envvar="Z4J_SCHEDULER_BRAIN_GRPC_URL",
+        help="brain gRPC URL to probe",
+    ),
+    brain_rest_url: str = typer.Option(
+        None,
+        "--brain-rest-url",
+        envvar="Z4J_SCHEDULER_BRAIN_REST_URL",
+        help="brain REST URL for /health probe",
+    ),
+) -> None:
+    """Compact pass/fail health check (1.1.2+).
+
+    Same brain-reachability probes as ``doctor`` but emits one
+    line per failed check (or a single OK line) - suitable for
+    cron jobs, deploy gates, and Nagios-style monitors. Exit 0 =
+    healthy, exit 1 = at least one check failed.
+    """
+    import socket  # noqa: PLC0415
+    from urllib.parse import urlparse  # noqa: PLC0415
+    from urllib.request import urlopen  # noqa: PLC0415
+
+    fails: list[str] = []
+
+    if not brain_grpc_url:
+        fails.append("Z4J_SCHEDULER_BRAIN_GRPC_URL: not set")
+    else:
+        try:
+            parsed = urlparse(
+                brain_grpc_url
+                if "://" in brain_grpc_url
+                else f"//{brain_grpc_url}",
+            )
+            host, port = parsed.hostname, parsed.port or 443
+            if not host:
+                fails.append(f"grpc URL: malformed ({brain_grpc_url})")
+            else:
+                with socket.create_connection((host, port), timeout=3.0):
+                    pass
+        except OSError as exc:
+            fails.append(f"grpc TCP: {exc}")
+
+    if brain_rest_url:
+        try:
+            with urlopen(  # noqa: S310
+                brain_rest_url.rstrip("/") + "/health",
+                timeout=3.0,
+            ) as resp:
+                if resp.status >= 400:
+                    fails.append(f"rest /health: HTTP {resp.status}")
+        except OSError as exc:
+            fails.append(f"rest /health: {exc}")
+
+    if fails:
+        for f in fails:
+            typer.echo(f"z4j-scheduler check: {f}", err=True)
+        raise typer.Exit(code=1)
+    typer.echo("z4j-scheduler check: all green")
+
+
+@app.command()
+def status() -> None:
+    """One-line introspection (1.1.2+).
+
+    Reports the installed z4j-scheduler version, configured brain
+    URLs (from env), and process supervisor hint. Doesn't probe
+    the brain - use ``check`` for that. Useful for "what version
+    is on this host?" type questions during incident triage.
+    """
+    import os as _os  # noqa: PLC0415
+    typer.echo(f"z4j-scheduler status:")
+    typer.echo(f"  version:           {__version__}")
+    typer.echo(
+        f"  brain_grpc_url:    "
+        f"{_os.environ.get('Z4J_SCHEDULER_BRAIN_GRPC_URL', '<unset>')}",
+    )
+    typer.echo(
+        f"  brain_rest_url:    "
+        f"{_os.environ.get('Z4J_SCHEDULER_BRAIN_REST_URL', '<unset>')}",
+    )
+    typer.echo(
+        f"  embedded mode:     "
+        f"{_os.environ.get('Z4J_EMBEDDED_SCHEDULER', '<unset>')}",
+    )
+    typer.echo(
+        "  process control:   restart via your supervisor "
+        "(systemctl restart z4j-scheduler, or restart the brain if "
+        "running embedded with Z4J_EMBEDDED_SCHEDULER=true).",
+    )
+
+
+@app.command()
+def restart() -> None:
+    """Stub for symmetry (1.1.2+).
+
+    z4j-scheduler runs as a standalone process (or as a supervised
+    subprocess of z4j-brain when ``Z4J_EMBEDDED_SCHEDULER=true``);
+    in neither case does the scheduler manage its own connection
+    pool the way framework agents do. Restart it via your process
+    supervisor instead.
+
+    This command exists for surface-area parity with other z4j
+    packages (``z4j-django restart``, ``z4j-flask restart``, etc.)
+    and prints the canonical command for each common deploy
+    pattern. Exit code 1 because nothing was actually restarted.
+    """
+    typer.echo(
+        "z4j-scheduler restart: not directly supported.\n"
+        "\n"
+        "  Restart via your process supervisor:\n"
+        "    systemctl restart z4j-scheduler        # systemd\n"
+        "    supervisorctl restart z4j-scheduler    # supervisord\n"
+        "    docker restart <z4j-scheduler-container>\n"
+        "\n"
+        "  Or if running embedded (Z4J_EMBEDDED_SCHEDULER=true):\n"
+        "    systemctl restart z4j                  # restart the brain\n"
+        "    z4j-django restart                     # if launched by Django\n",
+        err=True,
+    )
+    raise typer.Exit(code=1)
+
+
+@app.command()
 def info() -> None:
     """Print resolved settings + runtime status. Phase 1."""
     typer.echo(

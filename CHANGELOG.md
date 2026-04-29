@@ -6,6 +6,27 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.1.2] - 2026-04-28
+
+### Added
+
+- **`z4j-scheduler check`** - compact pass/fail health check
+  (1.1.2+). Same brain-reachability probes as `doctor` but emits
+  one line per failed check. Exit 0/1 contract for cron, deploy
+  gates, and Nagios-style monitors.
+- **`z4j-scheduler status`** - one-line introspection. Reports
+  installed version, configured brain URLs, embedded-mode flag,
+  and the canonical restart command for each common deploy
+  pattern.
+- **`z4j-scheduler restart`** - documentation stub (1.1.2+). The
+  scheduler runs as a standalone process or as a brain-supervised
+  subprocess; restart goes through the operator's process
+  supervisor (systemctl / supervisord / docker / brain restart
+  for embedded mode). Exists for surface-area parity with
+  `z4j-django restart` etc.
+
+## [Pending features] (slated for 1.2.0)
+
 ### Added
 
 - **Solar schedule support (kind="solar").** Closes the §5.1 v1
