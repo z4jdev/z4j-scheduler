@@ -1,6 +1,6 @@
 [project]
 name = "z4j-scheduler"
-version = "1.1.2"
+version = "1.3.0"
 description = "Engine-agnostic dynamic scheduler for the z4j stack (Apache 2.0)"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -39,7 +39,13 @@ dependencies = [
     # error hierarchy) directly - no protobuf duplication inside
     # the Python codebase. Floor matches what the Schedule model
     # additions (catch_up, source, source_hash) ship at.
-    "z4j-core>=1.1.0,<1.2",
+    # Audit fix CRIT-5 (1.2.2 seventh-pass): broaden upper bound
+    # to ``<2`` so installs that pin z4j-core==1.2.2 (the wave
+    # that introduced declarative reconciler + audit
+    # api_key_id) don't fail/downgrade. z4j-scheduler doesn't
+    # depend on any 1.2-specific API surface, so the broader
+    # range is safe.
+    "z4j-core>=1.3.0,<2",
     # Async HTTP server for /health, /ready, /metrics, /info.
     # Same FastAPI as z4j-brain so contributors carry over patterns.
     "fastapi>=0.135",
