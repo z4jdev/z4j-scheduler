@@ -77,7 +77,7 @@ def derive_fire_id(schedule_id: UUID, scheduled_for: datetime) -> UUID:
     seconds before hashing. Pre-fix the cron module returned
     microsecond-zero datetimes but the interval module truncated
     via ``int(timestamp())`` and the one-shot module came straight
-    from ``datetime.fromisoformat`` (full microseconds) — and
+    from ``datetime.fromisoformat`` (full microseconds), and
     after a scheduler restart, a slot reloaded from Postgres can
     have full microsecond precision while the in-memory recompute
     has zero microseconds. The two ISO strings differ → the

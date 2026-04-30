@@ -90,7 +90,7 @@ class TriggerGrpcServer:
         )
         # Round-9 audit fix R9-Sched-H4 (Apr 2026): keepalive opts.
         # Pre-fix the scheduler-side TriggerGrpc server had no
-        # keepalive — a half-open NAT/proxy could silently wedge
+        # keepalive, a half-open NAT/proxy could silently wedge
         # the brain's persistent ``TriggerScheduleClient`` channel
         # for hours before the 10s deadline tripped, manifesting
         # as "fire now" buttons that hang for the full timeout
@@ -104,7 +104,7 @@ class TriggerGrpcServer:
             ("grpc.keepalive_timeout_ms", 10_000),
             # Permit pings even when no calls are in flight.
             ("grpc.keepalive_permit_without_calls", 1),
-            # Don't penalise a client that pings frequently — the
+            # Don't penalise a client that pings frequently, the
             # default 0 ban-strikes setting closes a connection
             # after just two too-frequent pings; kept lax here.
             ("grpc.http2.max_ping_strikes", 0),

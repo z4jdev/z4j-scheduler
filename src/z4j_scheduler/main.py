@@ -437,7 +437,7 @@ class SchedulerApp:
 #: holds strong references to in-flight stop() tasks spawned by
 #: signal handlers. Pre-fix the handler did
 #: ``loop.create_task(app.stop())`` without keeping a reference,
-#: so the asyncio loop could GC the task mid-shutdown — CPython
+#: so the asyncio loop could GC the task mid-shutdown, CPython
 #: surfaced this as the noisy "Task was destroyed while pending"
 #: warning, but the practical consequence was that on a slow
 #: drain (Postgres advisory locks, gRPC graceful close) the

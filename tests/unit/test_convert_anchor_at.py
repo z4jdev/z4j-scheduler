@@ -8,13 +8,13 @@ sentinel when the brain payload had no ``last_run_at``. The
 :func:`interval.next_fire` first-fire calculation then returned a
 year-2000 timestamp. The tick engine saw ``next_fire_at`` in the
 past, fired the schedule, advanced ``last_fire_at`` by the interval
-(still in the past), and immediately re-evaluated as due — a hot
+(still in the past), and immediately re-evaluated as due, a hot
 loop on the first schedule the dispatcher could reach.
 
 Fix: anchor at ``next_run_at`` if brain pre-computed one, else at
 ``datetime.now(UTC)``. A fresh interval-15 schedule now first fires
 at the next 15s boundary AFTER its arrival, and its subsequent
-``last_fire_at + interval`` walks forward in time normally — the
+``last_fire_at + interval`` walks forward in time normally, the
 tick engine round-robins all due schedules at their respective
 cadences.
 
@@ -97,7 +97,7 @@ class TestAnchorAtSelectsRecentTime:
             last_fire_at=None,  # fresh schedule
             anchor_at=entry.anchor_at,
         )
-        # Next fire must be within a 15-second future window —
+        # Next fire must be within a 15-second future window -
         # the next 15s boundary after now.
         now = datetime.now(UTC)
         assert nxt > now - timedelta(seconds=2), (
@@ -158,7 +158,7 @@ class TestNoHotLoopAfterFirstFire:
         )
         # The second fire is exactly one interval after the first.
         assert second_fire == first_fire + timedelta(seconds=15)
-        # And it is within the next 30 seconds of wall-clock now —
+        # And it is within the next 30 seconds of wall-clock now -
         # NOT 26 years in the past (the pre-fix bug).
         now = datetime.now(UTC)
         assert second_fire > now - timedelta(seconds=2)

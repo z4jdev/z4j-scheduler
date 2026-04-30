@@ -400,7 +400,7 @@ class TickEngine:
             # Round-8 audit fix R8-Time-H1 (Apr 2026): solar
             # schedules are first-class per docs/SCHEDULER.md §5.1
             # and the API ``_KIND_VOCAB`` accepts them, but this
-            # dispatch table never branched on them — every solar
+            # dispatch table never branched on them, every solar
             # schedule fell through to the "unknown kind" path
             # below, landing on ``_pending_disables`` on the very
             # first tick. The schedule appeared created in the
@@ -485,7 +485,7 @@ class TickEngine:
         # the past it is; pre-fix the catch-up branch then ran
         # ``plan_catch_up("skip", ...)`` which returned ``[]``, the
         # engine advanced ``last_fire_at`` to ``scheduled_for``, and
-        # the next ``next_fire`` call returned None — the one-shot
+        # the next ``next_fire`` call returned None, the one-shot
         # was permanently consumed without ever firing. For
         # one-shot we always fire exactly once regardless of
         # lateness; the caller's ``catch_up`` policy is meaningless
@@ -644,7 +644,7 @@ class TickEngine:
         #
         # Round-8 audit fix R8-Time-H4 (Apr 2026): compare in UTC.
         # During DST fall-back (Nov first-Sunday in US/Eastern, the
-        # 1am-2am window exists twice — once at fold=0 in DST, once
+        # 1am-2am window exists twice, once at fold=0 in DST, once
         # at fold=1 standard). ``fires_between`` returns both
         # ambiguous slots; ``scheduled_for`` is one of them. The
         # naive ``slots[-1] != scheduled_for`` compares wall-clock

@@ -134,7 +134,7 @@ class BrainClient:
         shield the underlying ``self._channel.close()`` so a
         lifespan cancel mid-close doesn't leave the gRPC sockets
         open while ``self._channel = None`` clears the only
-        reference — that combination leaked file descriptors
+        reference, that combination leaked file descriptors
         across restarts.
         """
         if self._channel is None:

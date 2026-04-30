@@ -264,7 +264,7 @@ class PostgresAdvisoryLockLeaderGate:
         # Round-8 audit fix R8-Async-H1 (Apr 2026): shield the
         # advisory-lock release + connection close. Pre-fix a
         # lifespan cancel mid-release left the lock held until the
-        # asyncpg session timeout — standby instances were blocked
+        # asyncpg session timeout, standby instances were blocked
         # from leadership for tens of seconds, opening a HA
         # split-brain gap on rolling redeploy.
         if self._is_leader:

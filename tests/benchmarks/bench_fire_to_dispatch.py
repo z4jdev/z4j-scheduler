@@ -1,4 +1,4 @@
-"""Fire-to-dispatch latency benchmark — closes the §23 unmeasured target.
+"""Fire-to-dispatch latency benchmark, closes the §23 unmeasured target.
 
 §23 lists "Fire-to-broker latency p50/p99 < 100 / 250 ms." We
 broke that target into two halves:

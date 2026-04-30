@@ -1,7 +1,7 @@
 """Engine-agnostic matrix smoke test for the schedule.fire dispatcher.
 
 The user's ask (Apr 2026): "we will need to smoke test and verify
-this claim before we ship it" — referring to the marketing claim
+this claim before we ship it", referring to the marketing claim
 that z4j-scheduler works with celery, rq, dramatiq, huey, arq, and
 taskiq.
 

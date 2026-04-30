@@ -461,12 +461,12 @@ def render_report(
         "",
     ]
     if report.ok:
-        lines.append("OK — both sides predict identical fires for the window.")
+        lines.append("OK, both sides predict identical fires for the window.")
         lines.append("")
         lines.append("Safe to flip the canonical scheduler.")
         return "\n".join(lines) + "\n"
 
-    lines.append(f"DIVERGENCE — flip is NOT safe yet. First "
+    lines.append(f"DIVERGENCE, flip is NOT safe yet. First "
                  f"{min(max_divergences, len(report.divergences))} "
                  f"of {len(report.divergences)}:")
     lines.append("")
