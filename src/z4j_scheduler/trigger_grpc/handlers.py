@@ -13,12 +13,19 @@ a tick-driven fire. Single code path = single place to debug.
 
 The ``user_id`` and ``idempotency_key`` from the request are
 threaded into the audit/log breadcrumbs so the operator who clicked
-is preserved on both sides.
+is preserved on both sides. The ``idempotency_key`` is also
+honored for dedup (audit fix S002, 1.4.0): brain's
+``TriggerScheduleClient`` retries exactly once on UNAVAILABLE /
+DEADLINE_EXCEEDED, which is precisely the case where the first
+call may have succeeded but the response was lost. Without a
+dedup cache, that retry caused a duplicate fire because
+``trigger_now`` mints a fresh ``uuid4`` per call.
 """
 
 from __future__ import annotations
 
 import logging
+import time
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -32,6 +39,21 @@ if TYPE_CHECKING:  # pragma: no cover
     from z4j_scheduler.storage.cache import ScheduleCache
 
 logger = logging.getLogger("z4j.scheduler.trigger_grpc.handlers")
+
+
+# TTL for the idempotency cache. Audit fix S002 (1.4.0): brain's
+# TriggerScheduleClient uses a 10s per-call deadline and retries
+# at most once on UNAVAILABLE / DEADLINE_EXCEEDED, so the
+# worst-case duplicate-fire window is ~20s. 60s gives 3x margin
+# without growing the in-memory cache unbounded.
+_IDEM_TTL_SECONDS = 60.0
+
+# Sweep budget: cap the per-call cleanup work so a slow operator
+# session doesn't accumulate millions of expired keys before the
+# next request arrives. The cache is per-process and per-scheduler-
+# instance so realistic working set is small (one entry per
+# operator click in the last minute), but we cap the pass anyway.
+_IDEM_SWEEP_BUDGET = 64
 
 
 class TriggerScheduleServicer(pb_grpc.SchedulerServiceServicer):
@@ -53,6 +75,13 @@ class TriggerScheduleServicer(pb_grpc.SchedulerServiceServicer):
     fix returns ``not_leader`` so brain can retry against the actual
     leader, mirroring the pattern brain already implements for
     tick-driven fires.
+
+    Audit fix S002 (1.4.0): the servicer now honors the
+    ``idempotency_key`` from the request for dedup. A repeated
+    call within ``_IDEM_TTL_SECONDS`` (60s) returns the cached
+    ``command_id`` from the first call instead of issuing a fresh
+    fire. Empty ``idempotency_key`` (legacy callers) bypasses the
+    cache entirely, preserving the previous behavior.
     """
 
     def __init__(
@@ -65,6 +94,15 @@ class TriggerScheduleServicer(pb_grpc.SchedulerServiceServicer):
         self._cache = cache
         self._dispatcher = dispatcher
         self._leader_gate = leader_gate
+        # Idempotency cache: (schedule_id_str, idempotency_key) ->
+        # (cached_at_monotonic, command_id_str). Per-process; not
+        # shared across scheduler instances because brain pins each
+        # trigger retry to the same scheduler instance via the
+        # leader gate (a retry that hits a different instance gets
+        # ``not_leader``, not a fresh fire, so no cache miss leaks).
+        self._idem_cache: dict[
+            tuple[str, str], tuple[float, str],
+        ] = {}
 
     async def TriggerSchedule(  # noqa: N802 - gRPC-generated name
         self,
@@ -128,17 +166,63 @@ class TriggerScheduleServicer(pb_grpc.SchedulerServiceServicer):
             request.idempotency_key or "(none)",
         )
 
+        # Audit fix S002 (1.4.0): idempotency cache check. Only
+        # honored when brain supplies a non-empty key; legacy
+        # callers (empty key) bypass the cache and always fire.
+        idem_key = request.idempotency_key or ""
+        cache_key = (request.schedule_id, idem_key) if idem_key else None
+        if cache_key is not None:
+            self._sweep_expired_idem_entries()
+            cached = self._idem_cache.get(cache_key)
+            if cached is not None:
+                cached_at, cached_command_id = cached
+                if (time.monotonic() - cached_at) < _IDEM_TTL_SECONDS:
+                    logger.info(
+                        "z4j.scheduler.trigger_grpc: idempotency hit "
+                        "schedule_id=%s key=%s command_id=%s "
+                        "(skipping duplicate fire)",
+                        schedule_id, idem_key, cached_command_id,
+                    )
+                    return pb.TriggerScheduleResponse(
+                        command_id=cached_command_id,
+                    )
+
         result = await self._dispatcher.trigger_now(
             schedule_id=schedule_id,
         )
         if result.success:
-            return pb.TriggerScheduleResponse(
-                command_id=str(result.command_id),
-            )
+            command_id_str = str(result.command_id)
+            if cache_key is not None:
+                self._idem_cache[cache_key] = (
+                    time.monotonic(), command_id_str,
+                )
+            return pb.TriggerScheduleResponse(command_id=command_id_str)
         return pb.TriggerScheduleResponse(
             error_code=result.error_code or "unknown",
             error_message=result.error_message or "",
         )
+
+    def _sweep_expired_idem_entries(self) -> None:
+        """Drop expired idempotency-cache entries opportunistically.
+
+        Bounded by ``_IDEM_SWEEP_BUDGET`` so a single call's
+        cleanup work is constant-time even if the cache somehow
+        accumulated thousands of expired entries (it shouldn't,
+        given the realistic operator-click rate; this is purely
+        defensive against a pathological state).
+        """
+        if not self._idem_cache:
+            return
+        now = time.monotonic()
+        # Iterate snapshot so we can mutate the dict.
+        expired: list[tuple[str, str]] = []
+        for key, (cached_at, _command_id) in self._idem_cache.items():
+            if (now - cached_at) >= _IDEM_TTL_SECONDS:
+                expired.append(key)
+                if len(expired) >= _IDEM_SWEEP_BUDGET:
+                    break
+        for key in expired:
+            self._idem_cache.pop(key, None)
 
 
 __all__ = ["TriggerScheduleServicer"]

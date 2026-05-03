@@ -6,7 +6,7 @@ The audit landed three fixes; the scheduler side is affected by:
   same bug as the brain side. Fixed via ``removeprefix``.
 
 The brain-side fixes are pinned in
-``packages/z4j-brain/backend/tests/unit/test_audit_phase2_fixes.py``.
+``packages/z4j/backend/tests/unit/test_audit_phase2_fixes.py``.
 """
 
 from __future__ import annotations

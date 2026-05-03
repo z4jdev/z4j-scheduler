@@ -23,8 +23,20 @@ router = APIRouter(tags=["operational"])
 async def info(request: Request) -> dict[str, Any]:
     """Snapshot of current runtime state.
 
-    Excludes anything secret-shaped (TLS cert paths are paths only,
-    not contents; the metrics auth token is never echoed).
+    Audit fix S003 (1.4.0): payload is intentionally minimal and
+    does NOT include topology fields (``brain_grpc_url``,
+    ``projects``) that previously leaked the upstream brain URL
+    and per-instance project bindings to any unauthenticated
+    caller able to reach the scheduler's HTTP port.
+
+    Operators see those values in their own deployment config;
+    attackers don't get a free topology dump from the dashboard
+    polling endpoint. The dashboard's Schedulers admin page
+    already handles missing fields with ``?? "-"`` fallbacks, so
+    redaction is not a behavior change for legitimate users.
+
+    Excludes anything secret-shaped (TLS cert paths and the
+    metrics auth token were never echoed even pre-fix).
     """
     state: SchedulerState = request.app.state.scheduler_state
     schedule_count = len(state.cache) if state.cache is not None else 0
@@ -33,8 +45,6 @@ async def info(request: Request) -> dict[str, Any]:
         "instance_id": state.settings.instance_id,
         "uptime_seconds": round(state.uptime_seconds(), 2),
         "started_at": state.started_at.isoformat(),
-        "brain_grpc_url": state.settings.brain_grpc_url,
-        "projects": state.settings.projects,
         "ready": state.ready,
         "subsystems": {
             "brain_client_connected": state.brain_client_connected,

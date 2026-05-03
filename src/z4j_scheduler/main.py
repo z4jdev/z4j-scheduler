@@ -415,6 +415,19 @@ class SchedulerApp:
     ) -> uvicorn.Server:
         """Construct the uvicorn Server for the HTTP surface."""
         app = create_app(state)
+        # Audit fix S003 (1.4.0): log the bind interface at INFO so
+        # operators see in their boot logs exactly what surface
+        # they're exposing (``0.0.0.0`` = all interfaces; a
+        # specific IP = that NIC; ``127.0.0.1`` = loopback only).
+        # The ``/info`` endpoint is now redacted of topology data,
+        # but this transparency matters if a future change adds
+        # any non-trivial response to /health, /ready, or /metrics.
+        logger.info(
+            "z4j.scheduler.api: binding HTTP server to %s:%d "
+            "(/info, /health, /ready, /metrics)",
+            self.settings.bind_host,
+            self.settings.bind_port,
+        )
         config = uvicorn.Config(
             app,
             host=self.settings.bind_host,

@@ -1,7 +1,7 @@
 """Regression tests for the scheduler-side Phase-3 audit findings.
 
 Brain-side fixes are pinned in
-``packages/z4j-brain/backend/tests/unit/test_audit_phase3_fixes.py``.
+``packages/z4j/backend/tests/unit/test_audit_phase3_fixes.py``.
 
 Scheduler-side fix:
 

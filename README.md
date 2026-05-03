@@ -7,7 +7,7 @@
 The engine-agnostic dynamic scheduler for [z4j](https://z4j.com).
 
 One service drives Celery, RQ, Dramatiq, Huey, arq, and TaskIQ from
-a single dashboard. Schedules live in z4j-brain's database, you edit
+a single dashboard. Schedules live in z4j's database, you edit
 them live without restarting anything, every change is recorded in
 an HMAC-chained audit log, and importers + exporters keep the door
 open in either direction. This is the canonical scheduler when you
@@ -24,7 +24,7 @@ that matter day to day:
   Python task engine. A project running Celery for legacy services
   and arq for a FastAPI rewrite uses the same scheduler for both,
   with one dashboard and one audit trail.
-- **Live editing.** Schedules live in z4j-brain's Postgres database.
+- **Live editing.** Schedules live in z4j's Postgres database.
   Create, edit, pause, resume, rename, and delete from the dashboard
   or REST API without a daemon restart. celery-beat needs a
   beat-process restart for static-config edits, rq-scheduler stores
@@ -71,10 +71,10 @@ pip install z4j-scheduler
 z4j-scheduler serve
 ```
 
-Embedded inside z4j-brain (recommended for homelab and small teams):
+Embedded inside z4j (recommended for homelab and small teams):
 
 ```bash
-pip install 'z4j-brain[scheduler-embedded]'
+pip install 'z4j[scheduler-embedded]'
 # enable in brain settings: Z4J_EMBEDDED_SCHEDULER=true
 ```
 
@@ -126,7 +126,7 @@ walks the importer + dashboard verification path step by step.
 ## License
 
 Apache-2.0, see [LICENSE](LICENSE). Importing z4j-scheduler does
-not affect your application's licensing. The brain (server +
+not affect your application's licensing. z4j (server +
 dashboard + API) is AGPL v3, isolated in its own process; the
 scheduler is separate.
 

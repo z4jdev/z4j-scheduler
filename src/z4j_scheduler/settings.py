@@ -97,8 +97,19 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # Binding 0.0.0.0 is intentional for an infrastructure service
     # that operators expose via reverse proxy / service mesh / k8s
-    # Service. Operators who want to bind loopback override via the
+    # Service. Operators who want loopback-only override via the
     # Z4J_SCHEDULER_BIND_HOST env var.
+    #
+    # Audit note (S003, 1.4.0): an earlier draft of this fix
+    # flipped the default to ``127.0.0.1`` for defense in depth.
+    # That broke the standard container / k8s / same-host-but-
+    # different-laptop operator-polls-dashboard topology. The
+    # control that closes S003 is the ``/info`` payload redaction
+    # at ``api/info.py`` (no longer leaks ``brain_grpc_url`` or
+    # the projects list). Keeping 0.0.0.0 here preserves
+    # deployment ergonomics; the ``/info`` redaction means the
+    # network exposure carries no useful intelligence to an
+    # unauthenticated caller.
     bind_host: str = "0.0.0.0"  # noqa: S104  - intentional, see comment
     bind_port: int = Field(default=7800, ge=1, le=65535)
 
@@ -169,6 +180,14 @@ class Settings(BaseSettings):
         description="CA bundle used to validate brain's client cert",
     )
     trigger_grpc_allowed_cns: list[str] = Field(default_factory=list)
+    #: When True, the trigger gRPC server refuses to start unless
+    #: ``trigger_grpc_allowed_cns`` is non-empty. Audit fix S004
+    #: (1.4.0): defaults False to preserve "trust the CA"
+    #: deployments; operators wanting fail-closed defense-in-depth
+    #: set ``Z4J_SCHEDULER_TRIGGER_GRPC_REQUIRE_ALLOWLIST=true``
+    #: and the scheduler raises on startup if the allow-list was
+    #: forgotten.
+    trigger_grpc_require_allowlist: bool = False
     trigger_grpc_grace_seconds: float = Field(
         default=5.0, ge=0.1, le=60.0,
     )

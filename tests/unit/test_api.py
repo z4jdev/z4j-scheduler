@@ -113,7 +113,6 @@ class TestInfo:
         assert response.status_code == 200
         body = response.json()
         assert body["instance_id"] == "test-instance"
-        assert body["brain_grpc_url"] == "brain:7701"
         assert body["ready"] is True
         assert body["schedules_loaded"] == 0
         assert body["uptime_seconds"] >= 0
@@ -129,6 +128,26 @@ class TestInfo:
         # configuration, not status. The string "tls_" should not
         # appear.
         assert "tls_" not in body.lower()
+
+    def test_info_does_not_leak_topology(self, settings: Settings) -> None:
+        """Audit fix S003 (1.4.0): /info must not expose brain URL.
+
+        Pre-fix, /info returned ``brain_grpc_url`` and the projects
+        list, which let any unauthenticated network-reachable caller
+        learn the upstream brain URL and per-instance project
+        bindings. With the scheduler's bind_host now defaulting to
+        127.0.0.1 the network exposure is gone too, but defense in
+        depth: redact these fields even when an operator opts back
+        into 0.0.0.0 binding via a reverse proxy.
+        """
+        client = _make_client(settings)
+        body = client.get("/info").json()
+        assert "brain_grpc_url" not in body, (
+            "leaks the upstream brain URL"
+        )
+        assert "projects" not in body, (
+            "leaks the per-instance project bindings"
+        )
 
 
 # ---------------------------------------------------------------------------

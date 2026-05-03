@@ -3,7 +3,7 @@ live in the z4j-scheduler package (cron exporter / cron importer /
 rq importer / shadow comparator).
 
 Brain-side fixes are pinned in
-``packages/z4j-brain/backend/tests/unit/test_security_audit_apr_2026.py``.
+``packages/z4j/backend/tests/unit/test_security_audit_apr_2026.py``.
 """
 
 from __future__ import annotations

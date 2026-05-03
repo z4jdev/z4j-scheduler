@@ -82,11 +82,41 @@ class TriggerGrpcServer:
             )
             return
 
+        # Audit fix S004 (1.4.0): mirror the brain-side fail-closed
+        # opt-in. Empty allow-list keeps the legacy "trust the CA"
+        # behavior with a loud startup warning; operators wanting
+        # defense in depth set the require_allowlist flag and the
+        # scheduler refuses to start without an explicit list.
+        allowed_cns = tuple(self._settings.trigger_grpc_allowed_cns)
+        if not allowed_cns:
+            if self._settings.trigger_grpc_require_allowlist:
+                raise RuntimeError(
+                    "trigger_grpc_require_allowlist is true but "
+                    "Z4J_SCHEDULER_TRIGGER_GRPC_ALLOWED_CNS is "
+                    "empty -- refusing to start the gRPC server "
+                    "in 'trust the CA' mode. Either populate the "
+                    "allow-list or set "
+                    "Z4J_SCHEDULER_TRIGGER_GRPC_REQUIRE_ALLOWLIST"
+                    "=false to explicitly opt back in to the "
+                    "legacy default.",
+                )
+            logger.warning(
+                "trigger_grpc_open_ca: "
+                "Z4J_SCHEDULER_TRIGGER_GRPC_ALLOWED_CNS is empty "
+                "-- any client cert signed by the configured CA "
+                "(Z4J_SCHEDULER_TRIGGER_GRPC_TLS_CA) can issue "
+                "TriggerSchedule. This is the 'trust the CA' "
+                "deployment model. For defense in depth, "
+                "populate the env var with the brain's client "
+                "cert CN. To fail closed instead, set "
+                "Z4J_SCHEDULER_TRIGGER_GRPC_REQUIRE_ALLOWLIST"
+                "=true.",
+                extra={"event": "trigger_grpc_open_ca"},
+            )
+
         creds = _build_server_credentials(self._settings)
         interceptors = (
-            TriggerAllowlistInterceptor(
-                allowed_cns=tuple(self._settings.trigger_grpc_allowed_cns),
-            ),
+            TriggerAllowlistInterceptor(allowed_cns=allowed_cns),
         )
         # Round-9 audit fix R9-Sched-H4 (Apr 2026): keepalive opts.
         # Pre-fix the scheduler-side TriggerGrpc server had no

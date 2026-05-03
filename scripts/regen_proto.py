@@ -9,7 +9,7 @@ This script:
 
 1. Compiles the .proto file via ``grpc_tools.protoc`` into both:
    - ``packages/z4j-scheduler/src/z4j_scheduler/proto/``
-   - ``packages/z4j-brain/backend/src/z4j_brain/scheduler_grpc/proto/``
+   - ``packages/z4j/backend/src/z4j_brain/scheduler_grpc/proto/``
    so brain and scheduler always stay in sync on the wire shape.
 
 2. Rewrites the relative ``import scheduler_pb2`` line that

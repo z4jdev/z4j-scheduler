@@ -7,6 +7,6 @@ version`` CLI subcommand. Keep in sync with ``pyproject.toml``'s
 
 from __future__ import annotations
 
-__version__: str = "1.3.0"
+__version__: str = "1.4.0"
 
 __all__ = ["__version__"]
