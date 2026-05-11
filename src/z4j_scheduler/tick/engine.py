@@ -57,6 +57,17 @@ logger = logging.getLogger("z4j.scheduler.tick")
 #: producer bugs that mutate state without firing the event).
 _MAX_SLEEP_SECONDS = 30.0
 
+#: Cooperative sleep duration when the watch stream is unhealthy and
+#: the engine is skipping dispatch this iteration. Long enough for the
+#: watch reconnect task to make progress, short enough that recovery
+#: is sub-second once the watch stream comes back. Without a non-zero
+#: sleep here, ``_sleep_until_next`` could return immediately when
+#: past-due schedules sit in the cache, and the engine would spin
+#: without ever yielding to the watch reconnect task -- the silent
+#: deadlock that load testing surfaced as a 352-second silent dispatch
+#: outage after a brain restart.
+_UNHEALTHY_SLEEP_SECONDS = 1.0
+
 #: Grace window for distinguishing "on-time" fires from "missed"
 #: fires. A fire whose ``scheduled_for`` is within this many seconds
 #: of ``now`` is treated as on-time and dispatched unconditionally;
@@ -148,8 +159,8 @@ class TickEngine:
         self._clock = clock
         self._max_sleep_seconds = max_sleep_seconds
         self._stop_event = asyncio.Event()
-        # Round-4 audit fix (Apr 2026): when the watch stream is
-        # down, the cache may hold stale state (e.g. an operator
+        # When the watch stream is down, the cache may hold stale
+        # state (e.g. an operator
         # disabled a schedule mid-outage; the disable event is
         # pending delivery). Refusing to fire during an unhealthy
         # window converts "fire stale state for ~30s" into
@@ -160,7 +171,7 @@ class TickEngine:
         self._watch_healthy: Callable[[], bool] = (
             watch_healthy if watch_healthy is not None else (lambda: True)
         )
-        # Round-4 audit fix (Apr 2026): per-schedule in-flight
+        # Per-schedule in-flight
         # guard. The dispatcher.dispatch await releases the event
         # loop for the duration of a gRPC round-trip (~5-50ms,
         # longer with retries). During that await a watch-stream
@@ -176,7 +187,7 @@ class TickEngine:
         # the second a no-op. Defence in depth: skip in-engine if
         # the schedule is already firing.
         self._in_flight: set[UUID] = set()
-        # Round-7 audit fix R7-MED (race) (Apr 2026): the sync
+        # The sync
         # ``_next_fire_for`` helper used to mutate
         # ``entry.is_enabled = False`` directly when an expression
         # failed to parse. That mutation could land on an orphaned
@@ -232,13 +243,22 @@ class TickEngine:
 
     async def _iteration(self) -> None:
         """One pass of the tick loop. Public for testing."""
+        # Cooperative yield. Guarantees every iteration of the run()
+        # loop releases the event loop at least once, even when this
+        # iteration's logic returns synchronously (no real awaits).
+        # Without this, a tight no-await branch -- such as the unhealthy-
+        # watch path below when cache contains past-due entries -- can
+        # starve the watch reconnect task and the scheduler deadlocks
+        # by starvation. Cheap (tens of microseconds).
+        await asyncio.sleep(0)
+
         # Step 1: every entry needs a next_fire_at; compute on-demand
         # for fresh ones.
         await self._compute_pending_next_fires()
 
         # Step 2: dispatch anything that's due now.
-        # Round-4 audit fix (Apr 2026): skip schedules already in
-        # flight from a previous iteration. See ``self._in_flight``
+        # Skip schedules already in flight from a previous iteration.
+        # See ``self._in_flight``
         # docstring in __init__ for the full race description.
         # Also: refuse to fire if the watch stream is unhealthy -
         # cache state may be stale (operator-disabled schedules
@@ -248,7 +268,23 @@ class TickEngine:
                 "z4j.scheduler.tick: watch stream unhealthy; "
                 "skipping dispatch this iteration",
             )
-            await self._sleep_until_next()
+            # Fixed-duration cooperative wait so the watch reconnect
+            # task and other asyncio coroutines can run. Past-due
+            # schedules in the cache cause _sleep_until_next to
+            # return immediately (no await), so without this branch
+            # the engine spins on its own task indefinitely: watch
+            # never reconnects, /metrics never responds, the engine
+            # never escapes the unhealthy state. Manual scheduler
+            # restart is the only recovery -- which is exactly the
+            # silent-data-loss-on-brain-restart symptom that load
+            # testing surfaced.
+            try:
+                await asyncio.wait_for(
+                    self._stop_event.wait(),
+                    timeout=_UNHEALTHY_SLEEP_SECONDS,
+                )
+            except (asyncio.TimeoutError, TimeoutError):
+                pass
             return
         now = self._clock()
         due = await self._cache.all_due(before=now)
@@ -273,12 +309,11 @@ class TickEngine:
         schedules whose previous next_fire_at was just consumed get
         a new value before the next sleep.
 
-        Audit fix (Apr 2026 follow-up): mutations go through
+        Mutations go through
         :meth:`ScheduleCache.update_fire_state` so a concurrent
         watch upsert can't leave us writing on an evicted entry.
-
-        Round-7 audit fix R7-MED (race) (Apr 2026): also drains
-        ``self._pending_disables`` through the same atomic helper.
+        ``self._pending_disables`` is drained through the same
+        atomic helper.
         """
         for entry in await self._cache.snapshot():
             if entry.next_fire_at is None and entry.is_enabled:
@@ -306,14 +341,13 @@ class TickEngine:
     ) -> datetime | None:
         """Compute next-fire for a single entry. None for completed one-shots.
 
-        Round-4 audit fix (Apr 2026): callers can now pass an
-        explicit ``as_of_last_fire_at`` to override what the
-        function sees as the last fire moment - without having to
-        mutate ``entry.last_fire_at`` first. The previous
+        Callers can pass an explicit ``as_of_last_fire_at`` to
+        override what the function sees as the last fire moment -
+        without having to mutate ``entry.last_fire_at`` first. A
         "temporarily mutate the entry" pattern in
-        ``_advance_after_fire`` was a non-atomic write on the
-        cache's live entry; concurrent readers (`all_due`, `next_
-        due`) could observe the half-applied state. Now the
+        ``_advance_after_fire`` would be a non-atomic write on
+        the cache's live entry; concurrent readers (`all_due`,
+        `next_due`) could observe the half-applied state. The
         anchor is purely a local function arg.
 
         ``as_of_last_fire_at=None`` (Python None) is a sentinel
@@ -342,8 +376,7 @@ class TickEngine:
                 # Disable in the local cache so we don't spin on it.
                 # Brain will surface the error via the schedule's
                 # validation; the operator's fix re-enables via watch.
-                # Round-7 audit fix R7-MED (race) (Apr 2026): record
-                # the disable on the SHARED set the caller drains
+                # Record the disable on the SHARED set the caller drains
                 # rather than mutating ``entry.is_enabled`` directly
                 # on the cache's live object. Concurrent
                 # ``cache.upsert`` from the WatchStream replaces the
@@ -365,8 +398,7 @@ class TickEngine:
                     "schedule_id=%s; disabling locally",
                     entry.id,
                 )
-                # Round-7 audit fix R7-MED (race) (Apr 2026): record
-                # the disable on the SHARED set the caller drains
+                # Record the disable on the SHARED set the caller drains
                 # rather than mutating ``entry.is_enabled`` directly
                 # on the cache's live object. Concurrent
                 # ``cache.upsert`` from the WatchStream replaces the
@@ -375,19 +407,18 @@ class TickEngine:
                 # silently lost on the next iteration.
                 self._pending_disables.add(entry.id)
                 return None
-        if entry.kind == "one_shot":
+        if entry.kind in ("clocked", "one_shot"):
             try:
                 return one_shot_mod.next_fire(
                     entry.expression, last_fire_at=last,
                 )
             except one_shot_mod.OneShotExpressionError:
                 logger.exception(
-                    "z4j.scheduler.tick: invalid one-shot expression for "
+                    "z4j.scheduler.tick: invalid clocked expression for "
                     "schedule_id=%s; disabling locally",
                     entry.id,
                 )
-                # Round-7 audit fix R7-MED (race) (Apr 2026): record
-                # the disable on the SHARED set the caller drains
+                # Record the disable on the SHARED set the caller drains
                 # rather than mutating ``entry.is_enabled`` directly
                 # on the cache's live object. Concurrent
                 # ``cache.upsert`` from the WatchStream replaces the
@@ -397,8 +428,7 @@ class TickEngine:
                 self._pending_disables.add(entry.id)
                 return None
         if entry.kind == "solar":
-            # Round-8 audit fix R8-Time-H1 (Apr 2026): solar
-            # schedules are first-class per docs/SCHEDULER.md §5.1
+            # Solar schedules are first-class per docs/SCHEDULER.md §5.1
             # and the API ``_KIND_VOCAB`` accepts them, but this
             # dispatch table never branched on them, every solar
             # schedule fell through to the "unknown kind" path
@@ -443,7 +473,7 @@ class TickEngine:
         # instances still recompute next_fire_at so they're hot if
         # they take over.
         if not self._leader_gate.is_leader(entry.project_id):
-            # Audit fix C-3 (Apr 2026 follow-up): non-leader
+            # Non-leader
             # instances must NOT advance ``last_fire_at`` to the
             # tick they did not actually fire. We DO recompute
             # ``next_fire_at`` so the standby doesn't spin on the
@@ -452,7 +482,7 @@ class TickEngine:
             # (because last_fire_at stayed None / the prior
             # value).
             #
-            # Round-4 audit consideration (Apr 2026, M-2): for
+            # For
             # FRESH schedules (last_fire_at is None) the slot
             # the standby was about to fire IS lost on
             # promotion-after-this-tick, because there is no
@@ -478,7 +508,7 @@ class TickEngine:
         # window in the past is "missed" - we were down or behind, and
         # the schedule's catch_up policy decides what to do.
         lateness_seconds = (now - scheduled_for).total_seconds()
-        # Round-8 audit fix R8-Time-H3 (Apr 2026): one-shot schedules
+        # One-shot schedules
         # are intentionally past-dated by importers / migrators / a
         # restored-backup workflow. ``one_shot.next_fire`` always
         # returns the configured timestamp regardless of how far in
@@ -490,19 +520,18 @@ class TickEngine:
         # one-shot we always fire exactly once regardless of
         # lateness; the caller's ``catch_up`` policy is meaningless
         # for a single-fire schedule.
-        if entry.kind == "one_shot":
+        if entry.kind in ("clocked", "one_shot"):
             plan = [scheduled_for]
         elif lateness_seconds <= _ON_TIME_GRACE_SECONDS:
             plan = [scheduled_for]
         else:
-            # Audit fix (Apr 2026 follow-up): for cron schedules
-            # with ``fire_all_missed``, materialise the full
-            # backlog of missed slots between the last known fire
-            # and the current scheduled_for. Pre-fix the missed
-            # list was always a single element, so all three
-            # catch_up policies (skip / fire_one_missed /
-            # fire_all_missed) produced indistinguishable behavior
-            # for cron - a silent contract violation.
+            # For cron schedules with ``fire_all_missed``,
+            # materialise the full backlog of missed slots between
+            # the last known fire and the current scheduled_for.
+            # Without this, the missed list would always be a
+            # single element, so all three catch_up policies
+            # (skip / fire_one_missed / fire_all_missed) would
+            # produce indistinguishable behavior for cron.
             #
             # ``fires_between`` returns every cron slot in the
             # window; the planner then trims per policy:
@@ -559,13 +588,13 @@ class TickEngine:
     ) -> None:
         """Update entry's last_fire_at + recompute next_fire_at.
 
-        Round-4 audit fix (Apr 2026): the engine NEVER mutates the
-        live cache entry directly. Pre-fix
-        ``entry.last_fire_at = last_fire_at`` ran outside the
-        cache lock, so a concurrent reader (`all_due`,
-        `next_due`) saw a half-applied state. The fix passes the
-        new anchor through ``_next_fire_for(as_of_last_fire_at=...)``
-        and lets ``cache.update_fire_state`` write under its lock.
+        The engine NEVER mutates the live cache entry directly:
+        ``entry.last_fire_at = last_fire_at`` would run outside
+        the cache lock, so a concurrent reader (`all_due`,
+        `next_due`) could observe a half-applied state. Instead
+        we pass the new anchor through
+        ``_next_fire_for(as_of_last_fire_at=...)`` and let
+        ``cache.update_fire_state`` write under its lock.
 
         ``last_fire_at=None`` is a meaningful "leave it alone"
         signal from the non-leader path (we did NOT actually fire,
@@ -642,7 +671,7 @@ class TickEngine:
         # ``fires_between`` already returned it (boundary cases) the
         # de-dup keeps the list strictly increasing.
         #
-        # Round-8 audit fix R8-Time-H4 (Apr 2026): compare in UTC.
+        # Compare in UTC.
         # During DST fall-back (Nov first-Sunday in US/Eastern, the
         # 1am-2am window exists twice, once at fold=0 in DST, once
         # at fold=1 standard). ``fires_between`` returns both
@@ -699,7 +728,7 @@ class TickEngine:
                 return_when=asyncio.FIRST_COMPLETED,
             )
         finally:
-            # Round-8 audit fix R8-Async-MED (Apr 2026): cancel
+            # Cancel
             # AND await the loser tasks so the asyncio loop's
             # "Task was destroyed but it is pending" warning
             # doesn't fire under shutdown, and the cache.changed

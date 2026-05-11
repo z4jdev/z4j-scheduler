@@ -22,7 +22,7 @@ from uuid import UUID
 
 #: Schedule kinds the tick engine knows how to compute next-fire
 #: for. Matches the brain ``schedule_kind`` enum.
-ScheduleKind = Literal["cron", "interval", "one_shot"]
+ScheduleKind = Literal["cron", "interval", "clocked", "one_shot", "solar"]
 
 #: Catch-up policies. Matches :data:`z4j_scheduler.tick.catch_up.VALID_POLICIES`.
 CatchUpPolicy = Literal["skip", "fire_one_missed", "fire_all_missed"]

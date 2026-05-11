@@ -91,7 +91,7 @@ def _render_one(sched: ExportedSchedule) -> list[str]:
             parts = parts[:5]
         cron_str = " ".join(parts)
         label_entry = {"cron": cron_str}
-    elif sched.kind == "one_shot":
+    elif sched.kind in ("clocked", "one_shot"):
         label_entry = {"time": sched.expression}
     else:
         return [

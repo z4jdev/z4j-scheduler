@@ -73,17 +73,16 @@ def derive_fire_id(schedule_id: UUID, scheduled_for: datetime) -> UUID:
     The scheduled_for is normalised to UTC ISO-8601 before hashing
     so callers in any timezone produce the same id.
 
-    Round-8 audit fix R8-Time-MED (Apr 2026): truncate to whole
-    seconds before hashing. Pre-fix the cron module returned
-    microsecond-zero datetimes but the interval module truncated
-    via ``int(timestamp())`` and the one-shot module came straight
-    from ``datetime.fromisoformat`` (full microseconds), and
-    after a scheduler restart, a slot reloaded from Postgres can
-    have full microsecond precision while the in-memory recompute
-    has zero microseconds. The two ISO strings differ → the
-    deterministic ``fire_id`` no longer matches → brain's
-    idempotency_key dedup misses → same logical fire creates
-    two Commands. Truncating closes the gap.
+    The scheduled_for is also truncated to whole seconds before
+    hashing. Cron returns microsecond-zero datetimes but interval
+    truncates via ``int(timestamp())`` and one-shot comes from
+    ``datetime.fromisoformat`` with full microseconds; after a
+    scheduler restart, a slot reloaded from Postgres can have
+    full microsecond precision while the in-memory recompute has
+    zero microseconds. Without the second-truncation the two ISO
+    strings would differ → deterministic ``fire_id`` no longer
+    matches → brain's idempotency_key dedup misses → same logical
+    fire creates two Commands.
     """
     if scheduled_for.tzinfo is None:
         raise ValueError("derive_fire_id requires tz-aware scheduled_for")

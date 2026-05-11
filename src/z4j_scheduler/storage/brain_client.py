@@ -65,7 +65,20 @@ def _build_credentials(settings: Settings) -> grpc.ChannelCredentials:
     at construction time, kept off the asyncio event loop. The certs
     are operator-provisioned and rotation requires a scheduler
     restart.
+
+    Raises ``RuntimeError`` if any of the three cert paths is None;
+    the Settings model_validator should have caught this before, but
+    we re-check here to fail loud if something slipped through.
     """
+    if (
+        settings.tls_ca is None
+        or settings.tls_cert is None
+        or settings.tls_key is None
+    ):
+        raise RuntimeError(
+            "z4j-scheduler: _build_credentials called without a "
+            "complete TLS bundle - this is a Settings validator bug",
+        )
     ca_pem = settings.tls_ca.read_bytes()
     cert_pem = settings.tls_cert.read_bytes()
     key_pem = settings.tls_key.read_bytes()
@@ -115,12 +128,28 @@ class BrainClient:
             ("grpc.max_send_message_length", 1024 * 1024),
         ]
 
-        credentials = _build_credentials(self._settings)
-        self._channel = grpc.aio.secure_channel(
-            self._settings.brain_grpc_url,
-            credentials,
-            options=options,
-        )
+        if self._settings.insecure_grpc:
+            # Insecure-channel path. The Settings model_validator
+            # enforces this is only allowed when environment is not
+            # 'production'. Loud log line so operators see the
+            # security trade-off in their startup output.
+            logger.warning(
+                "z4j.scheduler.brain_client: using INSECURE gRPC "
+                "channel to %s (insecure_grpc=true). Use only on "
+                "trusted loopback or container networks.",
+                self._settings.brain_grpc_url,
+            )
+            self._channel = grpc.aio.insecure_channel(
+                self._settings.brain_grpc_url,
+                options=options,
+            )
+        else:
+            credentials = _build_credentials(self._settings)
+            self._channel = grpc.aio.secure_channel(
+                self._settings.brain_grpc_url,
+                credentials,
+                options=options,
+            )
         self._stub = pb_grpc.SchedulerServiceStub(self._channel)
         logger.info(
             "z4j.scheduler.brain_client: connected to %s",
@@ -130,11 +159,10 @@ class BrainClient:
     async def close(self) -> None:
         """Close the channel cleanly. Idempotent.
 
-        Round-8 audit fix R8-Async-MED + R9-Sched-LOW (Apr 2026):
-        shield the underlying ``self._channel.close()`` so a
+        Shields the underlying ``self._channel.close()`` so a
         lifespan cancel mid-close doesn't leave the gRPC sockets
         open while ``self._channel = None`` clears the only
-        reference, that combination leaked file descriptors
+        reference; that combination would leak file descriptors
         across restarts.
         """
         if self._channel is None:

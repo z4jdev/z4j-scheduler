@@ -100,17 +100,17 @@ class WatchStream:
         self._full_resync_interval_seconds = max(
             0.0, full_resync_interval_seconds,
         )
-        # Round-4 audit fix (Apr 2026): expose a ``is_healthy``
-        # flag the tick engine reads on every iteration. Pre-fix,
-        # if the watch stream dropped (network blip, brain
-        # restart) the cache held its last-known state until
-        # reconnect+resync. An operator who disabled a schedule
-        # during the outage saw the schedule still fire because
-        # the disable-event was on the wire but never delivered.
-        # Now: stream-down → engine refuses to fire (catch_up will
-        # handle the gap on recovery). False during the
-        # backoff/reconnect window; flips True the moment a stream
-        # iteration succeeds.
+        # Expose a ``is_healthy`` flag the tick engine reads on
+        # every iteration. If the watch stream drops (network
+        # blip, brain restart) the cache holds its last-known
+        # state until reconnect+resync; without this gate, an
+        # operator who disabled a schedule during the outage
+        # would still see the schedule fire because the
+        # disable-event was on the wire but never delivered.
+        # With the gate: stream-down → engine refuses to fire
+        # (catch_up will handle the gap on recovery). False
+        # during the backoff/reconnect window; flips True the
+        # moment a stream iteration succeeds.
         self._is_healthy = False
 
     # ------------------------------------------------------------------
@@ -154,11 +154,11 @@ class WatchStream:
         """True iff the live stream has connected at least once and
         is not currently in the backoff/reconnect window.
 
-        Round-4 audit fix (Apr 2026): the tick engine consults
-        this flag and refuses to dispatch when False. Bounds the
-        "stale cache" exposure during a stream drop to "wait until
-        next reconnect" instead of "fire whatever the cache last
-        saw, possibly minutes old."
+        The tick engine consults this flag and refuses to
+        dispatch when False. Bounds the "stale cache" exposure
+        during a stream drop to "wait until next reconnect"
+        instead of "fire whatever the cache last saw, possibly
+        minutes old."
         """
         return self._is_healthy
 
@@ -241,15 +241,15 @@ class WatchStream:
     async def _sync_then_watch(self) -> None:
         """One full cycle: list-sync, then watch until disconnect.
 
-        Audit fix (Apr 2026 follow-up): after the full sync, the
-        resume token is forwarded to ``now()`` so the subsequent
-        WatchSchedules stream does NOT replay events older than
-        ``sync_started_at``. Pre-fix, every reconnect produced 2x
-        delivery of every event in the (resume_token, sync_done)
-        window because the stream's catch-up replayed the same
-        rows the full sync just landed. The cache's ``upsert``
-        was idempotent so behavior was correct, but the duplicate
-        I/O tripled load on a flapping connection.
+        After the full sync, the resume token is forwarded to
+        ``now()`` so the subsequent WatchSchedules stream does
+        NOT replay events older than ``sync_started_at``.
+        Otherwise every reconnect would produce 2x delivery of
+        every event in the (resume_token, sync_done) window
+        because the stream's catch-up replays the same rows the
+        full sync just landed. The cache's ``upsert`` is
+        idempotent so behavior would still be correct, but the
+        duplicate I/O would triple load on a flapping connection.
 
         We capture ``sync_started_at`` BEFORE the sync starts so
         any event committed during the sync window is still
@@ -286,18 +286,17 @@ class WatchStream:
            is removed. Catches DELETED events that were missed during
            a stream outage or while the watch reconnect was racing.
 
-        Round-4 audit fix (Apr 2026): the sweep set is computed
-        relative to a snapshot taken BEFORE the list_schedules call
-        starts, not the current cache. Pre-fix, a brand-new
-        schedule that the live ``_stream`` upserted DURING the
-        list_schedules read window would be in the post-sync
-        snapshot but NOT in ``fresh_ids`` (because list_schedules
-        returned before brain wrote that row), and the sweep would
-        evict it. The next periodic full-resync (15 min) would
-        rediscover it - until then the schedule was invisible to
-        the scheduler. Now we sweep only ids that already existed
-        before the sync started; anything that landed concurrently
-        is left alone.
+        The sweep set is computed relative to a snapshot taken
+        BEFORE the list_schedules call starts, not the current
+        cache. Otherwise a brand-new schedule that the live
+        ``_stream`` upserted DURING the list_schedules read
+        window would be in the post-sync snapshot but NOT in
+        ``fresh_ids`` (because list_schedules returned before
+        brain wrote that row), and the sweep would evict it. The
+        next periodic full-resync (15 min) would rediscover it -
+        until then the schedule would be invisible to the
+        scheduler. Sweeping only ids that already existed before
+        the sync started leaves concurrent landings alone.
 
         Serialised behind ``_sync_lock`` so a periodic-timer sync
         racing the on-reconnect sync can't issue overlapping

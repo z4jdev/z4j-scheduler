@@ -82,7 +82,7 @@ class TriggerGrpcServer:
             )
             return
 
-        # Audit fix S004 (1.4.0): mirror the brain-side fail-closed
+        # Mirror the brain-side fail-closed
         # opt-in. Empty allow-list keeps the legacy "trust the CA"
         # behavior with a loud startup warning; operators wanting
         # defense in depth set the require_allowlist flag and the
@@ -118,14 +118,13 @@ class TriggerGrpcServer:
         interceptors = (
             TriggerAllowlistInterceptor(allowed_cns=allowed_cns),
         )
-        # Round-9 audit fix R9-Sched-H4 (Apr 2026): keepalive opts.
-        # Pre-fix the scheduler-side TriggerGrpc server had no
-        # keepalive, a half-open NAT/proxy could silently wedge
-        # the brain's persistent ``TriggerScheduleClient`` channel
-        # for hours before the 10s deadline tripped, manifesting
-        # as "fire now" buttons that hang for the full timeout
-        # before the client retries. Mirrors the brain-side
-        # SchedulerService server keepalive policy.
+        # Keepalive opts. Without server-side keepalive a
+        # half-open NAT/proxy could silently wedge the brain's
+        # persistent ``TriggerScheduleClient`` channel for hours
+        # before the 10s deadline tripped, manifesting as "fire
+        # now" buttons that hang for the full timeout before the
+        # client retries. Mirrors the brain-side SchedulerService
+        # server keepalive policy.
         _keepalive_opts = (
             # Server pings the client every 30s if the connection
             # has been idle (no data either direction).

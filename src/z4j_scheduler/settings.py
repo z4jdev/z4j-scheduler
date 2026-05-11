@@ -15,7 +15,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -59,11 +59,35 @@ class Settings(BaseSettings):
     )
 
     # ------------------------------------------------------------------
-    # Required - mTLS
+    # Required - mTLS (unless ``insecure_grpc`` is True)
     # ------------------------------------------------------------------
-    tls_cert: Path = Field(..., description="mTLS client cert for gRPC")
-    tls_key: Path = Field(..., description="mTLS client key for gRPC")
-    tls_ca: Path = Field(..., description="mTLS CA for verifying brain server cert")
+    tls_cert: Path | None = Field(
+        default=None, description="mTLS client cert for gRPC",
+    )
+    tls_key: Path | None = Field(
+        default=None, description="mTLS client key for gRPC",
+    )
+    tls_ca: Path | None = Field(
+        default=None, description="mTLS CA for verifying brain server cert",
+    )
+
+    # ------------------------------------------------------------------
+    # Insecure-gRPC opt-in for local dev / CI / fixture-test scenarios.
+    # When True the scheduler's gRPC client uses an insecure channel
+    # (no TLS, no client cert). Refused when ``environment`` is
+    # ``"production"`` to make the security posture explicit. The
+    # brain side must also be configured for insecure listening
+    # via ``Z4J_SCHEDULER_GRPC_INSECURE=true`` for the connection to
+    # succeed.
+    # ------------------------------------------------------------------
+    insecure_grpc: bool = Field(
+        default=False,
+        description=(
+            "DEV/TEST ONLY: skip mTLS on the gRPC channel to brain. "
+            "Refused in production environments. Use only on trusted "
+            "loopback or container networks."
+        ),
+    )
 
     # ------------------------------------------------------------------
     # Required for HA - Postgres for advisory lock
@@ -214,6 +238,19 @@ class Settings(BaseSettings):
     metrics_auth_token: SecretStr | None = None
 
     # ------------------------------------------------------------------
+    # Environment - controls security gating
+    # ------------------------------------------------------------------
+    environment: str = Field(
+        default="production",
+        description=(
+            "Deployment environment: 'production' (the default) "
+            "refuses insecure_grpc; 'dev', 'test', or any other "
+            "non-production value allows it. Mirrors the brain's "
+            "Z4J_ENVIRONMENT semantics."
+        ),
+    )
+
+    # ------------------------------------------------------------------
     # Pro features
     # ------------------------------------------------------------------
     pro_license_key: SecretStr | None = Field(
@@ -225,6 +262,50 @@ class Settings(BaseSettings):
             "installed alongside."
         ),
     )
+
+    @model_validator(mode="after")
+    def _enforce_grpc_tls_or_insecure(self) -> "Settings":
+        """Require either complete TLS bundle OR explicit insecure opt-in.
+
+        The combinations:
+
+        - TLS bundle complete (cert + key + ca): production-shaped,
+          allowed in any environment.
+        - ``insecure_grpc=True`` + non-production environment:
+          allowed for dev / test / CI / fixture-cert-less workflows.
+        - ``insecure_grpc=True`` + production environment: REFUSED.
+          Insecure transport is never acceptable in production.
+        - All TLS fields missing AND ``insecure_grpc=False``:
+          REFUSED. Pre-1.5 the TLS fields were required-by-Pydantic;
+          we now allow None to support the insecure path, but the
+          model_validator catches the misconfiguration where neither
+          path was selected.
+        """
+        tls_complete = (
+            self.tls_cert is not None
+            and self.tls_key is not None
+            and self.tls_ca is not None
+        )
+        if self.insecure_grpc:
+            if self.environment.strip().lower() == "production":
+                raise ValueError(
+                    "z4j-scheduler: insecure_grpc=True is refused in "
+                    "production. Either set Z4J_SCHEDULER_INSECURE_GRPC="
+                    "false and provide a valid TLS bundle "
+                    "(Z4J_SCHEDULER_TLS_CERT/KEY/CA), or set "
+                    "Z4J_SCHEDULER_ENVIRONMENT=dev (acknowledging the "
+                    "trade-off) for non-production deployments.",
+                )
+            return self
+        if not tls_complete:
+            raise ValueError(
+                "z4j-scheduler: gRPC channel requires either a complete "
+                "mTLS bundle (Z4J_SCHEDULER_TLS_CERT, "
+                "Z4J_SCHEDULER_TLS_KEY, Z4J_SCHEDULER_TLS_CA all set) "
+                "or insecure_grpc=true (Z4J_SCHEDULER_INSECURE_GRPC=true) "
+                "for non-production environments.",
+            )
+        return self
 
 
 __all__ = ["Settings"]

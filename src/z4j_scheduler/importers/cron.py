@@ -88,8 +88,7 @@ def read_crontab(
             other system crontabs that include a username field
             between the schedule and the command).
     """
-    # Audit fix 5.1 + 5.2 (Apr 2026): defend against symlink
-    # redirection and unbounded file size.
+    # Defend against symlink redirection and unbounded file size.
     #
     # Without O_NOFOLLOW: an attacker who controls the path
     # (e.g., a shared upload directory) can swap the file for a

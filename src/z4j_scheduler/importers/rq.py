@@ -53,14 +53,13 @@ def read_rq_scheduler(
             "rq importer requires `pip install redis rq-scheduler`",
         ) from exc
 
-    # Audit fix 6.1 (Apr 2026): wrap the Redis connection in a
-    # try/except so any error (auth failure, DNS failure, refused
-    # connection) doesn't bubble up with the URL - which contains
-    # the password if the operator passed
-    # ``redis://:password@host`` - in the traceback. Pre-fix the
-    # raw exception text included the URL as part of the
-    # ConnectionError repr, so a CI log pasted to a public issue
-    # tracker leaked the password.
+    # Wrap the Redis connection in a try/except so any error
+    # (auth failure, DNS failure, refused connection) doesn't
+    # bubble up with the URL - which contains the password if the
+    # operator passed ``redis://:password@host`` - in the
+    # traceback. The raw exception text would otherwise include
+    # the URL as part of the ConnectionError repr, so a CI log
+    # pasted to a public issue tracker would leak the password.
     try:
         redis_conn = Redis.from_url(redis_url)
         scheduler = Scheduler(connection=redis_conn)

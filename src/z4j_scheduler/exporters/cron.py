@@ -69,8 +69,8 @@ def render(schedules: Iterable[ExportedSchedule]) -> str:
     return "\n".join(lines) + "\n"
 
 
-# Audit fix 1.1 (Apr 2026): the cron exporter renders SHELL lines
-# that the operator installs into a real crontab. Any field
+# The cron exporter renders SHELL lines that the operator installs
+# into a real crontab. Any field
 # interpolated raw becomes a shell-injection vector when cron
 # evaluates the line via /bin/sh.
 #
@@ -103,7 +103,7 @@ def _is_safe_cron_expression(expression: str) -> bool:
 
 
 def _render_one(sched: ExportedSchedule) -> list[str]:
-    # Round-3 audit fix (Apr 2026): strip control chars from
+    # Strip control chars from
     # ``task_name`` BEFORE ``shlex.quote``. ``shlex.quote`` wraps
     # the value in single quotes, which preserve newlines
     # literally - so a task_name carrying ``"x\n* * * * * curl
@@ -123,8 +123,8 @@ def _render_one(sched: ExportedSchedule) -> list[str]:
     # by /bin/sh when the WRAPPER fires - a remote-code-execution
     # vector. Audit-Phase3-3 caught this.
     safe_task_name = shlex.quote(cleaned_task_name)
-    # Audit fix 1.2 (Apr 2026): comments are technically inert but
-    # a name with an embedded newline could break out of the
+    # Comments are technically inert but a name with an embedded
+    # newline could break out of the
     # comment and inject an active crontab line below. Sanitize
     # the name to a single line of printable characters; if the
     # operator wants exotic names they live in the dashboard,
@@ -151,8 +151,8 @@ def _render_one(sched: ExportedSchedule) -> list[str]:
 
     if sched.kind == "cron":
         expression = sched.expression
-        # Audit fix 1.1 (Apr 2026): refuse to render a cron line
-        # whose expression contains shell metacharacters. The
+        # Refuse to render a cron line whose expression contains
+        # shell metacharacters. The
         # operator's source-of-truth (brain DB or migrated
         # crontab) might have an attacker-controlled expression
         # field - validating at emit time is the last line of
@@ -187,7 +187,7 @@ def _render_one(sched: ExportedSchedule) -> list[str]:
             "",
         ]
 
-    if sched.kind == "one_shot":
+    if sched.kind in ("clocked", "one_shot"):
         return [
             f"# {safe_name}: one_shot at {safe_expression!r} - system cron",
             f"# has no native one-shot. Use ``at`` or run manually.",

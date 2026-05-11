@@ -25,7 +25,7 @@ from z4j_scheduler.importers._core import BrainImportClient, ImportedSchedule
 
 logger = logging.getLogger("z4j.scheduler.declarative")
 
-ScheduleKind = Literal["cron", "interval", "one_shot"]
+ScheduleKind = Literal["cron", "interval", "clocked", "one_shot", "solar"]
 CatchUpPolicy = Literal["skip", "fire_one_missed", "fire_all_missed"]
 
 

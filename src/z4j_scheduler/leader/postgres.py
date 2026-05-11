@@ -261,12 +261,12 @@ class PostgresAdvisoryLockLeaderGate:
                 except (asyncio.CancelledError, Exception):  # noqa: BLE001
                     pass
             self._task = None
-        # Round-8 audit fix R8-Async-H1 (Apr 2026): shield the
-        # advisory-lock release + connection close. Pre-fix a
-        # lifespan cancel mid-release left the lock held until the
-        # asyncpg session timeout, standby instances were blocked
-        # from leadership for tens of seconds, opening a HA
-        # split-brain gap on rolling redeploy.
+        # Shield the advisory-lock release + connection close
+        # against lifespan cancel - otherwise a cancel mid-release
+        # leaves the lock held until the asyncpg session timeout,
+        # blocking standby instances from leadership for tens of
+        # seconds and opening a HA split-brain gap on rolling
+        # redeploy.
         if self._is_leader:
             try:
                 await asyncio.shield(self._backend.release(self._key))
@@ -465,10 +465,9 @@ class PerProjectLeaderGate:
                 except (asyncio.CancelledError, Exception):  # noqa: BLE001
                     pass
             self._task = None
-        # Round-8 audit fix R8-Async-H1 (Apr 2026): shield each
-        # release + the backend close so a lifespan cancel mid-
-        # release can't leave per-project locks dangling and
-        # blocking standby promotion.
+        # Shield each release + the backend close so a lifespan
+        # cancel mid-release can't leave per-project locks dangling
+        # and blocking standby promotion.
         for key in list(self._held.values()):
             try:
                 await asyncio.shield(self._backend.release(key))

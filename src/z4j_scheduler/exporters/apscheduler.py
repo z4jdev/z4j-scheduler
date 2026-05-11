@@ -83,7 +83,7 @@ def _render_one(sched: ExportedSchedule) -> list[str]:
             f"        replace_existing=True{enabled_kw},",
             f"    )",
         ]
-    if sched.kind == "one_shot":
+    if sched.kind in ("clocked", "one_shot"):
         return [
             f"    scheduler.add_job(",
             f"        {json.dumps(sched.task_name)},",

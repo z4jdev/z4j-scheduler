@@ -97,7 +97,7 @@ async def fetch_schedules(
         response.raise_for_status()
         body = response.json()
 
-    # Round-4 audit fix (Apr 2026): brain v1.1.0 paginated the
+    # Brain v1.1.0 paginated the
     # ``GET /schedules`` endpoint - the response is now a dict
     # ``{"items": [...], "next_cursor": "..."}`` instead of a
     # flat list. Tolerate both shapes so an old brain (flat list)

@@ -143,12 +143,12 @@ class SchedulerApp:
             ),
         )
 
-        # 5b. Tick engine. Round-4 audit fix (Apr 2026): pass the
-        # watch's ``is_healthy`` probe so the engine refuses to
-        # fire while the cache is stale (stream-down window). The
-        # engine never holds a reference to the watch stream
-        # itself - just to its bool getter - so test fixtures can
-        # plug in their own.
+        # 5b. Tick engine. The engine receives the watch's
+        # ``is_healthy`` probe so it refuses to fire while the
+        # cache is stale (stream-down window). The engine never
+        # holds a reference to the watch stream itself - just to
+        # its bool getter - so test fixtures can plug in their
+        # own.
         self._tick_engine = TickEngine(
             cache=self._cache,
             leader_gate=_GaugePublishingLeaderGate(self._leader_gate),
@@ -350,9 +350,9 @@ class SchedulerApp:
 
         assert self._cache is not None
         assert self._dispatcher is not None
-        # Audit fix C-2 (Apr 2026): pass the leader gate so the
-        # TriggerScheduleServicer can reject standby-side trigger
-        # calls. Single-instance deployments use the always-True
+        # Pass the leader gate so the TriggerScheduleServicer can
+        # reject standby-side trigger calls. Single-instance
+        # deployments use the always-True
         # SingleInstanceLeaderGate so behavior is unchanged; HA
         # deployments use PostgresAdvisoryLockLeaderGate which
         # correctly returns False on standbys.
@@ -415,7 +415,7 @@ class SchedulerApp:
     ) -> uvicorn.Server:
         """Construct the uvicorn Server for the HTTP surface."""
         app = create_app(state)
-        # Audit fix S003 (1.4.0): log the bind interface at INFO so
+        # Log the bind interface at INFO so
         # operators see in their boot logs exactly what surface
         # they're exposing (``0.0.0.0`` = all interfaces; a
         # specific IP = that NIC; ``127.0.0.1`` = loopback only).
@@ -446,15 +446,13 @@ class SchedulerApp:
 # ---------------------------------------------------------------------------
 
 
-#: Round-9 audit fix R9-Sched-H3 (Apr 2026): module-level set
-#: holds strong references to in-flight stop() tasks spawned by
-#: signal handlers. Pre-fix the handler did
-#: ``loop.create_task(app.stop())`` without keeping a reference,
-#: so the asyncio loop could GC the task mid-shutdown, CPython
-#: surfaced this as the noisy "Task was destroyed while pending"
-#: warning, but the practical consequence was that on a slow
-#: drain (Postgres advisory locks, gRPC graceful close) the
-#: cleanup never completed and standby promotion stalled.
+#: Module-level set holds strong references to in-flight stop()
+#: tasks spawned by signal handlers. Without keeping a reference,
+#: ``loop.create_task(app.stop())`` lets the asyncio loop GC the
+#: task mid-shutdown, CPython surfaces this as the noisy "Task
+#: was destroyed while pending" warning, and on a slow drain
+#: (Postgres advisory locks, gRPC graceful close) the cleanup
+#: never completes and standby promotion stalls.
 _SIGNAL_STOP_TASKS: set[asyncio.Task[None]] = set()
 
 
@@ -474,8 +472,7 @@ def install_signal_handlers(
             "z4j.scheduler.main: received signal %d, requesting stop",
             signum,
         )
-        # Round-9 audit fix R9-Sched-H3 (Apr 2026): retain a
-        # strong reference until the stop() task completes.
+        # Retain a strong reference until the stop() task completes.
         task = target_loop.create_task(
             app.stop(), name=f"z4j-scheduler-stop-sig{signum}",
         )

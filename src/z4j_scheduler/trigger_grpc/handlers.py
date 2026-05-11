@@ -136,7 +136,7 @@ class TriggerScheduleServicer(pb_grpc.SchedulerServiceServicer):
                 error_message="schedule is disabled",
             )
 
-        # Audit fix C-2: leader gate. Standbys reject the trigger so
+        # Leader gate. Standbys reject the trigger so
         # brain can retry against the leader. Single-instance
         # deployments use ``SingleInstanceLeaderGate`` whose
         # ``is_leader`` is unconditionally True - no behavior change.
@@ -166,7 +166,7 @@ class TriggerScheduleServicer(pb_grpc.SchedulerServiceServicer):
             request.idempotency_key or "(none)",
         )
 
-        # Audit fix S002 (1.4.0): idempotency cache check. Only
+        # Idempotency cache check. Only
         # honored when brain supplies a non-empty key; legacy
         # callers (empty key) bypass the cache and always fire.
         idem_key = request.idempotency_key or ""

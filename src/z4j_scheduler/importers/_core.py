@@ -81,11 +81,10 @@ class ImportedSchedule:
     def compute_hash(self) -> str:
         """Stable content hash for re-import idempotency.
 
-        Audit fix (Apr 2026 follow-up): the hash now covers every
-        field that affects fire behavior. Pre-fix it covered only
-        7 of the 13 schedule fields (name, kind, expression,
-        timezone, task_name, args, kwargs) - so an importer with
-        write access could:
+        The hash covers every field that affects fire behavior.
+        If it covered only the user-facing fields (name, kind,
+        expression, timezone, task_name, args, kwargs), an
+        importer with write access could:
 
         - flip ``engine: celery -> rq`` without changing the hash
           (brain treats it as ``unchanged``, no audit row, but the

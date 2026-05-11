@@ -118,16 +118,15 @@ class ScheduleCache:
     ) -> bool:
         """Mutate the current cache entry's fire-state fields atomically.
 
-        Audit fix (Apr 2026 follow-up) for the lost-update race
-        identified in the security audit. Pre-fix, the tick engine
-        mutated ``entry.next_fire_at`` / ``entry.last_fire_at``
-        directly on the live object - while concurrently the watch
-        stream's ``upsert(...)`` replaced the entry in ``_entries``
-        with a freshly-constructed ScheduleEntry. The engine then
-        stamped state on an orphaned object the cache had already
-        evicted; the new entry sat with ``next_fire_at=None`` and
-        the schedule briefly stopped firing until the next iteration
-        recomputed.
+        Closes a lost-update race: if the tick engine mutated
+        ``entry.next_fire_at`` / ``entry.last_fire_at`` directly
+        on the live object - while concurrently the watch
+        stream's ``upsert(...)`` replaced the entry in
+        ``_entries`` with a freshly-constructed ScheduleEntry -
+        the engine would stamp state on an orphaned object the
+        cache had already evicted; the new entry would sit with
+        ``next_fire_at=None`` and the schedule would briefly
+        stop firing until the next iteration recomputed.
 
         This method serialises both reads against the cache lock,
         so the field write lands on whatever entry the cache

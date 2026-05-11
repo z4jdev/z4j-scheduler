@@ -90,7 +90,16 @@ def datetime_to_ts(dt: datetime | None) -> Timestamp:
 # ---------------------------------------------------------------------------
 
 
-_VALID_KINDS: frozenset[str] = frozenset({"cron", "interval", "one_shot"})
+_VALID_KINDS: frozenset[str] = frozenset(
+    {"cron", "interval", "clocked", "solar", "one_shot"},
+)
+# Map any legacy alias seen in older protobuf payloads to the
+# canonical name from z4j_core.models.event.ScheduleKind. The brain
+# emits ``clocked`` since the 1.5 vocab alignment; ``one_shot``
+# remains accepted for backwards compatibility with any pre-1.5
+# scheduler-protocol fixtures or test rigs that have not yet
+# regenerated their protobuf payloads.
+_KIND_ALIASES: dict[str, str] = {"one_shot": "clocked"}
 _VALID_CATCH_UP: frozenset[str] = frozenset(
     {"skip", "fire_one_missed", "fire_all_missed"},
 )
@@ -108,6 +117,9 @@ def entry_from_pb(message: pb.Schedule) -> ScheduleEntry:
             f"unknown schedule kind {message.kind!r} from brain "
             f"(expected one of {sorted(_VALID_KINDS)})",
         )
+    # Normalise legacy aliases so the rest of the scheduler operates
+    # on the canonical name from z4j_core.models.event.ScheduleKind.
+    kind = _KIND_ALIASES.get(message.kind, message.kind)
     if message.catch_up and message.catch_up not in _VALID_CATCH_UP:
         raise ValueError(
             f"unknown catch_up policy {message.catch_up!r} from brain "
@@ -141,7 +153,7 @@ def entry_from_pb(message: pb.Schedule) -> ScheduleEntry:
     entry = ScheduleEntry(
         id=UUID(message.id),
         project_id=UUID(message.project_id),
-        kind=message.kind,  # type: ignore[arg-type]
+        kind=kind,  # type: ignore[arg-type]
         expression=message.expression,
         timezone=message.timezone or "UTC",
         is_enabled=message.is_enabled,

@@ -39,7 +39,7 @@ from collections.abc import Iterable
 from z4j_scheduler.exporters._client import ExportedSchedule, py_repr
 from z4j_scheduler.tick.solar import VALID_EVENTS as _SOLAR_VALID_EVENTS
 
-# Audit fix C1-celery (Apr 2026): mirror the cron exporter's strict
+# Mirror the cron exporter's strict
 # whitelist for cron field characters. The celery exporter renders a
 # Python file the operator's celery worker imports - any expression
 # field that escapes through here lands in their interpreter, so we
@@ -89,7 +89,7 @@ def _render_one(sched: ExportedSchedule) -> list[str]:
         "    # NOTE: original kind was 'one_shot'; celery-beat has no\n"
         "    # native one-shot trigger. This entry will fire repeatedly\n"
         "    # until removed.\n"
-        if sched.kind == "one_shot"
+        if sched.kind in ("clocked", "one_shot")
         else ""
     )
     # 6-field z4j cron carries a seconds-precision field celery
@@ -149,7 +149,7 @@ def _render_schedule_expr(sched: ExportedSchedule) -> str:
         return f"timedelta(seconds={seconds})"
     if sched.kind == "solar":
         return _render_solar(sched.expression)
-    if sched.kind == "one_shot":
+    if sched.kind in ("clocked", "one_shot"):
         # one_shot expression is an ISO timestamp; we degrade to a
         # crontab that fires every minute - the operator removes
         # the row after the intended fire. The warning above

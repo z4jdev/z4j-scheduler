@@ -467,3 +467,123 @@ class TestSleepAndStop:
         finally:
             await engine.stop()
             await asyncio.wait_for(task, timeout=1.0)
+
+
+# ---------------------------------------------------------------------------
+# Tests - cooperative yield under unhealthy watch (Bug #5 regression)
+# ---------------------------------------------------------------------------
+
+
+class TestUnhealthyWatchCooperativeYield:
+    """Regression tests for the silent-deadlock-on-brain-restart bug.
+
+    When the watch stream is unhealthy AND the cache holds past-due
+    schedules, the engine's ``_iteration`` used to return synchronously
+    via ``_sleep_until_next`` (which finds past-due entries and returns
+    immediately, no real ``await``). Combined with the outer ``run()``
+    loop, this produced a tight no-yield spin that starved every other
+    asyncio task, including the watch reconnect task -- so the engine
+    could never escape the unhealthy state. The fix is a fixed
+    cooperative wait in the unhealthy branch + a top-of-iteration
+    ``asyncio.sleep(0)``.
+    """
+
+    async def test_iteration_yields_when_watch_unhealthy_and_cache_past_due(
+        self,
+    ) -> None:
+        """The unhealthy branch must yield to the event loop.
+
+        Construct: cache holds a past-due schedule, watch_healthy
+        returns False. Run a sibling asyncio task in parallel with
+        ``engine.run()``. The sibling MUST make progress within
+        a small bounded time -- if the engine's unhealthy branch
+        doesn't yield, the sibling is starved and this test times
+        out.
+        """
+        cache = ScheduleCache()
+        # Past-due cron entry (last fire well in the past)
+        entry = make_cron_entry(
+            expression="* * * * *",
+            last_fire_at=datetime(2020, 1, 1, tzinfo=UTC),
+        )
+        entry.next_fire_at = datetime(2020, 1, 1, 0, 1, tzinfo=UTC)
+        await cache.upsert(entry)
+
+        clock = ManualClock(datetime(2026, 4, 26, 12, 0, tzinfo=UTC))
+
+        engine = TickEngine(
+            cache=cache,
+            leader_gate=AlwaysLeader(),
+            dispatcher=RecordingDispatcher(),
+            clock=clock,
+            max_sleep_seconds=10.0,
+            watch_healthy=lambda: False,  # the trigger
+        )
+
+        # Sibling task that just increments a counter on every yield.
+        # If the engine starves the loop, this counter stays at 0.
+        sibling_progress = [0]
+
+        async def sibling() -> None:
+            for _ in range(20):
+                await asyncio.sleep(0.005)
+                sibling_progress[0] += 1
+
+        engine_task = asyncio.create_task(engine.run())
+        sibling_task = asyncio.create_task(sibling())
+        try:
+            # Sibling needs ~100ms to complete its 20 iterations.
+            # Generous bound: 2 seconds. If the engine's unhealthy
+            # branch starves the loop the sibling makes no progress
+            # and this wait_for times out.
+            await asyncio.wait_for(sibling_task, timeout=2.0)
+        finally:
+            await engine.stop()
+            await asyncio.wait_for(engine_task, timeout=1.0)
+
+        assert sibling_progress[0] == 20, (
+            f"sibling task starved by engine spin "
+            f"(progress={sibling_progress[0]}/20); the unhealthy "
+            f"branch failed to yield to the event loop"
+        )
+
+    async def test_iteration_yields_top_of_loop_when_no_real_awaits(
+        self,
+    ) -> None:
+        """Belt-and-suspenders: every iteration yields at the top.
+
+        Even branches that don't reach the unhealthy-watch path
+        should yield once per iteration so a tight loop can never
+        starve siblings. We exercise the empty-cache path
+        (``_compute_pending_next_fires`` short-circuits, no dispatch,
+        ``_sleep_until_next`` finds nothing due and sleeps), and
+        confirm a sibling makes progress.
+        """
+        cache = ScheduleCache()
+        clock = ManualClock(datetime(2026, 4, 26, 12, 0, tzinfo=UTC))
+
+        engine = TickEngine(
+            cache=cache,
+            leader_gate=AlwaysLeader(),
+            dispatcher=RecordingDispatcher(),
+            clock=clock,
+            max_sleep_seconds=0.05,  # short so the loop iterates fast
+            watch_healthy=lambda: True,
+        )
+
+        sibling_progress = [0]
+
+        async def sibling() -> None:
+            for _ in range(10):
+                await asyncio.sleep(0.005)
+                sibling_progress[0] += 1
+
+        engine_task = asyncio.create_task(engine.run())
+        sibling_task = asyncio.create_task(sibling())
+        try:
+            await asyncio.wait_for(sibling_task, timeout=2.0)
+        finally:
+            await engine.stop()
+            await asyncio.wait_for(engine_task, timeout=1.0)
+
+        assert sibling_progress[0] == 10
