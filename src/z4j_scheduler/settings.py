@@ -264,6 +264,74 @@ class Settings(BaseSettings):
     )
 
     @model_validator(mode="after")
+    def _enforce_metrics_auth_in_production(self) -> "Settings":
+        """Refuse to start a production scheduler that exposes
+        ``/metrics`` publicly.
+
+        z4j-scheduler 1.6.5 (security advisory R3-L1): the
+        scheduler's ``/metrics`` endpoint publishes operational
+        metadata (project labels, schedule names, leadership state,
+        fire status, latency). Pre-1.6.5 it was unauthenticated by
+        default; an operator who set
+        ``Z4J_SCHEDULER_BIND_HOST=0.0.0.0`` in production without
+        also setting ``Z4J_SCHEDULER_METRICS_AUTH_TOKEN`` exposed
+        every schedule label to anyone who could reach port 7800.
+
+        1.6.5 makes this fail-fast at startup. If:
+        - ``environment == "production"`` AND
+        - ``bind_host`` is not a loopback address AND
+        - ``metrics_enabled`` is true AND
+        - ``metrics_auth_token`` is unset
+        then the scheduler refuses to start with a clear error
+        naming the four-way condition and the fix options.
+
+        Operators have three valid configurations to resolve:
+
+        1. Set ``Z4J_SCHEDULER_METRICS_AUTH_TOKEN=<32+ random
+           bytes>`` so the metrics endpoint requires bearer auth.
+        2. Bind to loopback (``Z4J_SCHEDULER_BIND_HOST=127.0.0.1``)
+           and front the scheduler behind a reverse proxy that
+           handles its own auth + selective scrape exposure.
+        3. Disable metrics entirely
+           (``Z4J_SCHEDULER_METRICS_ENABLED=false``) -- the
+           ``/metrics`` route is then not mounted at all.
+
+        Non-production environments (dev, test, CI) skip the
+        check so fixtureless setups continue to work.
+        """
+        if self.environment.strip().lower() != "production":
+            return self
+        if not self.metrics_enabled:
+            # Metrics endpoint won't be mounted (see ``api/app.py``);
+            # auth token is irrelevant.
+            return self
+        loopback_hosts = {"127.0.0.1", "localhost", "::1", "[::1]"}
+        if self.bind_host.strip().lower() in loopback_hosts:
+            # Loopback exposure: operator's choice; reverse-proxy
+            # in front owns the auth layer.
+            return self
+        if self.metrics_auth_token is None:
+            raise ValueError(
+                "z4j-scheduler: refusing to start in production with "
+                f"bind_host='{self.bind_host}' (non-loopback) AND "
+                "metrics_enabled=true AND no metrics_auth_token set. "
+                "The /metrics endpoint publishes project labels, "
+                "schedule names, leadership state, and fire status to "
+                "anyone who can reach port 7800. Pick one fix:\n"
+                "  (1) Set Z4J_SCHEDULER_METRICS_AUTH_TOKEN to a "
+                "    32-byte random string (recommended; matches the "
+                "    brain's /metrics gating).\n"
+                "  (2) Bind to loopback: "
+                "    Z4J_SCHEDULER_BIND_HOST=127.0.0.1 and front "
+                "    the scheduler behind a reverse proxy.\n"
+                "  (3) Disable metrics entirely: "
+                "    Z4J_SCHEDULER_METRICS_ENABLED=false.\n"
+                "Dev / test environments skip this check (set "
+                "Z4J_SCHEDULER_ENVIRONMENT=dev).",
+            )
+        return self
+
+    @model_validator(mode="after")
     def _enforce_grpc_tls_or_insecure(self) -> "Settings":
         """Require either complete TLS bundle OR explicit insecure opt-in.
 

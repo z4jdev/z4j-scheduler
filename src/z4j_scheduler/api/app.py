@@ -53,7 +53,15 @@ def create_app(state: SchedulerState) -> FastAPI:
     )
     app.state.scheduler_state = state
     app.include_router(health_mod.router)
-    app.include_router(metrics_mod.router)
+    # z4j-scheduler 1.6.5 (audit R3-L1): honor the previously-dead
+    # ``metrics_enabled`` toggle. Pre-1.6.5 the setting existed but
+    # nothing read it; the /metrics route was mounted regardless
+    # so operators who set ``Z4J_SCHEDULER_METRICS_ENABLED=false``
+    # still got 200 with full metric output. Now the route is
+    # conditionally mounted; when disabled, /metrics returns 404
+    # via the FastAPI catch-all.
+    if state.settings.metrics_enabled:
+        app.include_router(metrics_mod.router)
     app.include_router(info_mod.router)
     return app
 

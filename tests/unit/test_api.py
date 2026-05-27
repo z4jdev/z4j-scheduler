@@ -30,6 +30,14 @@ def settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Settings:
     monkeypatch.setenv("Z4J_SCHEDULER_TLS_KEY", str(key))
     monkeypatch.setenv("Z4J_SCHEDULER_TLS_CA", str(ca))
     monkeypatch.setenv("Z4J_SCHEDULER_INSTANCE_ID", "test-instance")
+    # 1.6.5 (audit R3-L1): the new fail-safe refuses to start a
+    # production scheduler that binds to 0.0.0.0 with metrics on
+    # and no auth token. Existing test fixtures used the default
+    # ``environment="production"`` + default ``bind_host="0.0.0.0"``,
+    # which now trips the validator. Override to dev so the fixture
+    # constructs cleanly; tests that specifically exercise the
+    # production fail-safe set the env explicitly themselves.
+    monkeypatch.setenv("Z4J_SCHEDULER_ENVIRONMENT", "dev")
     return Settings(_env_file=None)  # type: ignore[call-arg]
 
 
@@ -200,3 +208,182 @@ class TestMetrics:
             headers={"Authorization": "Bearer supersecret123"},
         )
         assert response.status_code == 200
+
+    # ------------------------------------------------------------------
+    # 1.6.5 audit R3-L1: honor the metrics_enabled toggle
+    # ------------------------------------------------------------------
+
+    def test_metrics_disabled_returns_404(
+        self, settings: Settings, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """When ``Z4J_SCHEDULER_METRICS_ENABLED=false`` the /metrics
+        route MUST not be mounted. Pre-1.6.5 the setting was
+        unused: operators who set it to false still got 200 from
+        the endpoint, undermining their declared intent.
+        """
+        monkeypatch.setenv("Z4J_SCHEDULER_METRICS_ENABLED", "false")
+        disabled_settings = Settings(_env_file=None)  # type: ignore[call-arg]
+        assert disabled_settings.metrics_enabled is False, (
+            "test fixture: env var should have parsed as False"
+        )
+
+        client = _make_client(disabled_settings)
+        response = client.get("/metrics")
+        assert response.status_code == 404, (
+            "1.6.5 R3-L1 regression: when metrics_enabled=false the "
+            "/metrics route MUST NOT be mounted (404), not 200. "
+            f"Got {response.status_code}: {response.text[:200]}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 1.6.5 audit R3-L1: production fail-safe -- non-loopback bind + no auth
+# token + metrics_enabled = ConfigError at startup, not a silent leak.
+# ---------------------------------------------------------------------------
+
+
+class TestR3L1ProductionMetricsFailSafe:
+    """Production scheduler with the pre-1.6.5 default
+    configuration (bind 0.0.0.0:7800, metrics on, no auth token)
+    used to expose project + schedule labels to anyone who could
+    reach the port. 1.6.5 makes this fail-fast at startup so an
+    operator who didn't intend a public metrics surface notices
+    on the first deploy attempt instead of weeks later when a
+    security review finds the leak."""
+
+    def test_prod_nonloopback_unauth_metrics_refuses_startup(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cert = tmp_path / "scheduler.crt"
+        key = tmp_path / "scheduler.key"
+        ca = tmp_path / "brain-ca.crt"
+        for p in (cert, key, ca):
+            p.write_text("dummy")
+        monkeypatch.setenv("Z4J_SCHEDULER_BRAIN_GRPC_URL", "brain:7701")
+        monkeypatch.setenv("Z4J_SCHEDULER_BRAIN_REST_URL", "http://brain:7700")
+        monkeypatch.setenv("Z4J_SCHEDULER_TLS_CERT", str(cert))
+        monkeypatch.setenv("Z4J_SCHEDULER_TLS_KEY", str(key))
+        monkeypatch.setenv("Z4J_SCHEDULER_TLS_CA", str(ca))
+        monkeypatch.setenv("Z4J_SCHEDULER_INSTANCE_ID", "test-instance")
+        # The dangerous combination:
+        monkeypatch.setenv("Z4J_SCHEDULER_ENVIRONMENT", "production")
+        monkeypatch.setenv("Z4J_SCHEDULER_BIND_HOST", "0.0.0.0")
+        monkeypatch.setenv("Z4J_SCHEDULER_METRICS_ENABLED", "true")
+        monkeypatch.delenv(
+            "Z4J_SCHEDULER_METRICS_AUTH_TOKEN", raising=False,
+        )
+
+        with pytest.raises(Exception) as exc:
+            Settings(_env_file=None)  # type: ignore[call-arg]
+        msg = str(exc.value)
+        # Error message must name the four-way condition + the
+        # three fix options so the operator can recover without
+        # reading the source.
+        assert "metrics_auth_token" in msg or "/metrics" in msg, msg
+        assert (
+            "Z4J_SCHEDULER_METRICS_AUTH_TOKEN" in msg
+            or "loopback" in msg
+            or "METRICS_ENABLED" in msg
+        ), f"error message missing fix-options guidance: {msg}"
+
+    def test_prod_loopback_unauth_metrics_starts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Loopback bind is the operator's deliberate choice
+        (typical: reverse-proxy in front handles auth). Skip the
+        fail-safe in that case."""
+        cert = tmp_path / "scheduler.crt"
+        key = tmp_path / "scheduler.key"
+        ca = tmp_path / "brain-ca.crt"
+        for p in (cert, key, ca):
+            p.write_text("dummy")
+        monkeypatch.setenv("Z4J_SCHEDULER_BRAIN_GRPC_URL", "brain:7701")
+        monkeypatch.setenv("Z4J_SCHEDULER_BRAIN_REST_URL", "http://brain:7700")
+        monkeypatch.setenv("Z4J_SCHEDULER_TLS_CERT", str(cert))
+        monkeypatch.setenv("Z4J_SCHEDULER_TLS_KEY", str(key))
+        monkeypatch.setenv("Z4J_SCHEDULER_TLS_CA", str(ca))
+        monkeypatch.setenv("Z4J_SCHEDULER_INSTANCE_ID", "test-instance")
+        monkeypatch.setenv("Z4J_SCHEDULER_ENVIRONMENT", "production")
+        monkeypatch.setenv("Z4J_SCHEDULER_BIND_HOST", "127.0.0.1")
+        monkeypatch.setenv("Z4J_SCHEDULER_METRICS_ENABLED", "true")
+        monkeypatch.delenv(
+            "Z4J_SCHEDULER_METRICS_AUTH_TOKEN", raising=False,
+        )
+        # Should NOT raise.
+        s = Settings(_env_file=None)  # type: ignore[call-arg]
+        assert s.bind_host == "127.0.0.1"
+
+    def test_prod_nonloopback_auth_token_starts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cert = tmp_path / "scheduler.crt"
+        key = tmp_path / "scheduler.key"
+        ca = tmp_path / "brain-ca.crt"
+        for p in (cert, key, ca):
+            p.write_text("dummy")
+        monkeypatch.setenv("Z4J_SCHEDULER_BRAIN_GRPC_URL", "brain:7701")
+        monkeypatch.setenv("Z4J_SCHEDULER_BRAIN_REST_URL", "http://brain:7700")
+        monkeypatch.setenv("Z4J_SCHEDULER_TLS_CERT", str(cert))
+        monkeypatch.setenv("Z4J_SCHEDULER_TLS_KEY", str(key))
+        monkeypatch.setenv("Z4J_SCHEDULER_TLS_CA", str(ca))
+        monkeypatch.setenv("Z4J_SCHEDULER_INSTANCE_ID", "test-instance")
+        monkeypatch.setenv("Z4J_SCHEDULER_ENVIRONMENT", "production")
+        monkeypatch.setenv("Z4J_SCHEDULER_BIND_HOST", "0.0.0.0")
+        monkeypatch.setenv("Z4J_SCHEDULER_METRICS_ENABLED", "true")
+        monkeypatch.setenv(
+            "Z4J_SCHEDULER_METRICS_AUTH_TOKEN",
+            "supersecretthirtytwo_bytes_random!!",
+        )
+        # Should NOT raise: auth token closes the loop.
+        s = Settings(_env_file=None)  # type: ignore[call-arg]
+        assert s.metrics_auth_token is not None
+
+    def test_prod_metrics_disabled_starts_without_auth(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cert = tmp_path / "scheduler.crt"
+        key = tmp_path / "scheduler.key"
+        ca = tmp_path / "brain-ca.crt"
+        for p in (cert, key, ca):
+            p.write_text("dummy")
+        monkeypatch.setenv("Z4J_SCHEDULER_BRAIN_GRPC_URL", "brain:7701")
+        monkeypatch.setenv("Z4J_SCHEDULER_BRAIN_REST_URL", "http://brain:7700")
+        monkeypatch.setenv("Z4J_SCHEDULER_TLS_CERT", str(cert))
+        monkeypatch.setenv("Z4J_SCHEDULER_TLS_KEY", str(key))
+        monkeypatch.setenv("Z4J_SCHEDULER_TLS_CA", str(ca))
+        monkeypatch.setenv("Z4J_SCHEDULER_INSTANCE_ID", "test-instance")
+        monkeypatch.setenv("Z4J_SCHEDULER_ENVIRONMENT", "production")
+        monkeypatch.setenv("Z4J_SCHEDULER_BIND_HOST", "0.0.0.0")
+        monkeypatch.setenv("Z4J_SCHEDULER_METRICS_ENABLED", "false")
+        monkeypatch.delenv(
+            "Z4J_SCHEDULER_METRICS_AUTH_TOKEN", raising=False,
+        )
+        # Metrics off -> no /metrics surface -> no need to gate.
+        s = Settings(_env_file=None)  # type: ignore[call-arg]
+        assert s.metrics_enabled is False
+
+    def test_dev_environment_skips_check(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Dev / test / CI environments skip the check so
+        fixtureless setups continue to work."""
+        cert = tmp_path / "scheduler.crt"
+        key = tmp_path / "scheduler.key"
+        ca = tmp_path / "brain-ca.crt"
+        for p in (cert, key, ca):
+            p.write_text("dummy")
+        monkeypatch.setenv("Z4J_SCHEDULER_BRAIN_GRPC_URL", "brain:7701")
+        monkeypatch.setenv("Z4J_SCHEDULER_BRAIN_REST_URL", "http://brain:7700")
+        monkeypatch.setenv("Z4J_SCHEDULER_TLS_CERT", str(cert))
+        monkeypatch.setenv("Z4J_SCHEDULER_TLS_KEY", str(key))
+        monkeypatch.setenv("Z4J_SCHEDULER_TLS_CA", str(ca))
+        monkeypatch.setenv("Z4J_SCHEDULER_INSTANCE_ID", "test-instance")
+        monkeypatch.setenv("Z4J_SCHEDULER_ENVIRONMENT", "dev")
+        monkeypatch.setenv("Z4J_SCHEDULER_BIND_HOST", "0.0.0.0")
+        monkeypatch.setenv("Z4J_SCHEDULER_METRICS_ENABLED", "true")
+        monkeypatch.delenv(
+            "Z4J_SCHEDULER_METRICS_AUTH_TOKEN", raising=False,
+        )
+        # Should NOT raise even though prod combo would be refused.
+        s = Settings(_env_file=None)  # type: ignore[call-arg]
+        assert s.environment == "dev"
