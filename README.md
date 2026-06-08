@@ -1,8 +1,8 @@
 # z4j-scheduler
 
-[![PyPI version](https://img.shields.io/pypi/v/z4j-scheduler.svg?v=1.4.0)](https://pypi.org/project/z4j-scheduler/)
-[![Python](https://img.shields.io/pypi/pyversions/z4j-scheduler.svg?v=1.4.0)](https://pypi.org/project/z4j-scheduler/)
-[![License](https://img.shields.io/pypi/l/z4j-scheduler.svg?v=1.4.0)](https://github.com/z4jdev/z4j-scheduler/blob/main/LICENSE)
+[![PyPI version](https://img.shields.io/pypi/v/z4j-scheduler.svg?v=1.6.7)](https://pypi.org/project/z4j-scheduler/)
+[![Python](https://img.shields.io/pypi/pyversions/z4j-scheduler.svg?v=1.6.7)](https://pypi.org/project/z4j-scheduler/)
+[![License](https://img.shields.io/pypi/l/z4j-scheduler.svg?v=1.6.7)](https://github.com/z4jdev/z4j-scheduler/blob/main/LICENSE)
 
 The engine-agnostic dynamic scheduler for [z4j](https://z4j.com).
 
@@ -13,6 +13,12 @@ an HMAC-chained audit log, and importers + exporters keep the door
 open in either direction. This is the canonical scheduler when you
 want one place to manage cron / interval / one-shot / solar
 schedules across mixed engines.
+
+## Compatibility
+
+Python 3.11+. PostgreSQL 17+ for shared-database HA (SQLite supported for single-node deployments). Fans out to whichever engines you install on the same host (Celery, RQ, Dramatiq, Huey, arq, TaskIQ); each engine extra carries its own upstream version floor.
+
+Full per-adapter matrix at <https://z4j.dev/reference/compatibility/>.
 
 ## What makes z4j-scheduler different
 

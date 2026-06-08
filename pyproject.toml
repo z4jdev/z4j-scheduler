@@ -1,9 +1,9 @@
 [project]
 name = "z4j-scheduler"
-version = "1.6.5"
+version = "1.6.7"
 description = "Engine-agnostic dynamic scheduler for the z4j stack (Apache 2.0)"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 authors = [{ name = "z4j contributors" }]
 keywords = [
@@ -28,6 +28,8 @@ classifiers = [
     "Operating System :: MacOS",
     "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: Libraries :: Python Modules",
