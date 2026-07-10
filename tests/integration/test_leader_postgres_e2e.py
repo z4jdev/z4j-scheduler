@@ -17,6 +17,7 @@ not installed, or when Docker is unavailable on the host.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import uuid
 
 import pytest
@@ -26,13 +27,11 @@ import pytest
 pytest.importorskip("testcontainers")
 pytest.importorskip("asyncpg")
 
-from testcontainers.postgres import PostgresContainer  # noqa: E402
-
-from z4j_scheduler.leader.postgres import (  # noqa: E402
+from testcontainers.postgres import PostgresContainer
+from z4j_scheduler.leader.postgres import (
     AsyncpgLockBackend,
     PostgresAdvisoryLockLeaderGate,
 )
-
 
 # =====================================================================
 # Fixtures
@@ -50,13 +49,11 @@ def postgres_container():
     try:
         container = PostgresContainer("postgres:18-alpine")
         container.start()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         pytest.skip(f"could not start Postgres container: {exc}")
     yield container
-    try:
+    with contextlib.suppress(Exception):
         container.stop()
-    except Exception:  # noqa: BLE001
-        pass
 
 
 @pytest.fixture
@@ -80,7 +77,8 @@ def asyncpg_dsn(postgres_container) -> str:
 class TestSingleInstance:
     @pytest.mark.asyncio
     async def test_one_instance_becomes_leader(
-        self, asyncpg_dsn: str,
+        self,
+        asyncpg_dsn: str,
     ) -> None:
         namespace = f"test-single-{uuid.uuid4()}"
         gate = PostgresAdvisoryLockLeaderGate(
@@ -99,7 +97,8 @@ class TestSingleInstance:
 class TestTwoInstancesRace:
     @pytest.mark.asyncio
     async def test_only_one_becomes_leader(
-        self, asyncpg_dsn: str,
+        self,
+        asyncpg_dsn: str,
     ) -> None:
         namespace = f"test-race-{uuid.uuid4()}"
         gate_a = PostgresAdvisoryLockLeaderGate(
@@ -121,10 +120,7 @@ class TestTwoInstancesRace:
             await gate_b.wait_for_first_cycle(timeout=10.0)
 
             # Exactly one is leader, the other is standby.
-            leaders = [
-                g.is_leader(uuid.uuid4())
-                for g in (gate_a, gate_b)
-            ]
+            leaders = [g.is_leader(uuid.uuid4()) for g in (gate_a, gate_b)]
             assert sum(leaders) == 1, f"expected one leader, got {leaders}"
         finally:
             await gate_a.stop()
@@ -132,7 +128,8 @@ class TestTwoInstancesRace:
 
     @pytest.mark.asyncio
     async def test_standby_takes_over_when_leader_stops(
-        self, asyncpg_dsn: str,
+        self,
+        asyncpg_dsn: str,
     ) -> None:
         """The classic failover scenario.
 
@@ -187,7 +184,8 @@ class TestTwoInstancesRace:
 class TestNamespaceIsolation:
     @pytest.mark.asyncio
     async def test_distinct_namespaces_dont_interfere(
-        self, asyncpg_dsn: str,
+        self,
+        asyncpg_dsn: str,
     ) -> None:
         """Two clusters using different namespaces both get leaders.
 

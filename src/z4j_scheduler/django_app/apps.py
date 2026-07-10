@@ -30,7 +30,7 @@ class Z4JSchedulerConfig(AppConfig):  # type: ignore[misc]
     label = "z4j_scheduler"
     verbose_name = "z4j-scheduler integration"
 
-    def ready(self) -> None:  # noqa: D401 - Django convention
+    def ready(self) -> None:
         """Optional: fire reconcile on app boot when opted in.
 
         Toggle via ``settings.Z4J_SCHEDULES_AUTO_RECONCILE = True``.
@@ -38,7 +38,7 @@ class Z4JSchedulerConfig(AppConfig):  # type: ignore[misc]
         cannot prevent Django from starting.
         """
         try:
-            from django.conf import settings  # noqa: PLC0415
+            from django.conf import settings
         except ImportError:
             return
 
@@ -47,13 +47,13 @@ class Z4JSchedulerConfig(AppConfig):  # type: ignore[misc]
 
         # Defer import so a Django-only operator who hasn't installed
         # the reconcile path's deps doesn't fail to load Django.
-        from z4j_scheduler.declarative.frameworks.django import (  # noqa: PLC0415
+        from z4j_scheduler.declarative.frameworks.django import (
             reconcile_from_settings,
         )
 
         try:
             reconcile_from_settings()
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception(
                 "z4j.scheduler.django_app: auto-reconcile crashed "
                 "(non-fatal; Django boot continues)",

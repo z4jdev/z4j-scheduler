@@ -176,6 +176,17 @@ class ScheduleCache:
         async with self._lock:
             return list(self._entries.values())
 
+    async def count_for_project(self, project_id: UUID) -> int:
+        """Number of cached schedules owned by ``project_id``.
+
+        Used by the tick engine to decide whether the fire-variance
+        histogram should carry a per-schedule label (bounded cardinality
+        on large tenants). O(n) under the lock; called only on a fire,
+        which is far rarer than a tick.
+        """
+        async with self._lock:
+            return sum(1 for e in self._entries.values() if e.project_id == project_id)
+
     async def next_due(
         self,
         *,
@@ -196,9 +207,7 @@ class ScheduleCache:
         """
         async with self._lock:
             candidates = [
-                e
-                for e in self._entries.values()
-                if e.is_enabled and e.next_fire_at is not None
+                e for e in self._entries.values() if e.is_enabled and e.next_fire_at is not None
             ]
         if not candidates:
             return None
@@ -229,11 +238,7 @@ class ScheduleCache:
                 (
                     e
                     for e in self._entries.values()
-                    if (
-                        e.is_enabled
-                        and e.next_fire_at is not None
-                        and e.next_fire_at <= before
-                    )
+                    if (e.is_enabled and e.next_fire_at is not None and e.next_fire_at <= before)
                 ),
                 key=lambda e: (e.next_fire_at, e.id),  # type: ignore[arg-type, return-value]
             )

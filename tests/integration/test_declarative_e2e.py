@@ -22,27 +22,24 @@ import pytest
 
 pytest.importorskip("z4j_brain")
 
-from httpx import ASGITransport  # noqa: E402
-from sqlalchemy import select  # noqa: E402
-from sqlalchemy.ext.asyncio import create_async_engine  # noqa: E402
-from sqlalchemy.pool import StaticPool  # noqa: E402
-
-from z4j_brain.auth.passwords import PasswordHasher  # noqa: E402
-from z4j_brain.auth.sessions import SessionCookieCodec, cookie_name  # noqa: E402
-from z4j_brain.main import create_app  # noqa: E402
-from z4j_brain.persistence.base import Base  # noqa: E402
-from z4j_brain.persistence import models  # noqa: E402,F401
-from z4j_brain.persistence.enums import ScheduleKind  # noqa: E402
-from z4j_brain.persistence.models import (  # noqa: E402
+from httpx import ASGITransport
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.pool import StaticPool
+from z4j_brain.auth.passwords import PasswordHasher
+from z4j_brain.auth.sessions import SessionCookieCodec, cookie_name
+from z4j_brain.main import create_app
+from z4j_brain.persistence import models  # noqa: F401
+from z4j_brain.persistence.base import Base
+from z4j_brain.persistence.enums import ScheduleKind
+from z4j_brain.persistence.models import (
     Project,
     Schedule,
     Session,
     User,
 )
-from z4j_brain.settings import Settings as BrainSettings  # noqa: E402
-
-from z4j_scheduler.declarative import ScheduleSpec, reconcile  # noqa: E402
-
+from z4j_brain.settings import Settings as BrainSettings
+from z4j_scheduler.declarative import ScheduleSpec, reconcile
 
 # =====================================================================
 # Brain fixtures
@@ -181,7 +178,9 @@ def _spec(name: str, *, expression: str = "0 * * * *") -> ScheduleSpec:
 class TestInitialReconcile:
     @pytest.mark.asyncio
     async def test_first_run_inserts_everything(
-        self, brain_app, reconcile_via_asgi,
+        self,
+        brain_app,
+        reconcile_via_asgi,
     ) -> None:
         summary = await reconcile(
             schedules=[_spec("hourly"), _spec("daily", expression="0 0 * * *")],
@@ -204,7 +203,8 @@ class TestInitialReconcile:
 class TestIdempotency:
     @pytest.mark.asyncio
     async def test_rerun_is_unchanged(
-        self, reconcile_via_asgi,
+        self,
+        reconcile_via_asgi,
     ) -> None:
         specs = [_spec("hourly"), _spec("daily", expression="0 0 * * *")]
         await reconcile(
@@ -229,7 +229,9 @@ class TestIdempotency:
 class TestReplaceSemantics:
     @pytest.mark.asyncio
     async def test_renaming_a_schedule_is_delete_plus_insert(
-        self, brain_app, reconcile_via_asgi,
+        self,
+        brain_app,
+        reconcile_via_asgi,
     ) -> None:
         # Initial: hourly + daily.
         await reconcile(
@@ -248,9 +250,9 @@ class TestReplaceSemantics:
             source="declarative_django",
             brain_url="http://testserver",
         )
-        assert summary["inserted"] == 1   # nightly
+        assert summary["inserted"] == 1  # nightly
         assert summary["unchanged"] == 1  # hourly
-        assert summary["deleted"] == 1    # daily
+        assert summary["deleted"] == 1  # daily
 
         async with brain_app.state.db.session() as s:
             rows = (await s.execute(select(Schedule))).scalars().all()
@@ -258,7 +260,9 @@ class TestReplaceSemantics:
 
     @pytest.mark.asyncio
     async def test_empty_dict_deletes_all_rows_for_source(
-        self, brain_app, reconcile_via_asgi,
+        self,
+        brain_app,
+        reconcile_via_asgi,
     ) -> None:
         await reconcile(
             schedules=[_spec("hourly"), _spec("daily", expression="0 0 * * *")],
@@ -283,7 +287,10 @@ class TestReplaceSemantics:
 class TestSourceIsolation:
     @pytest.mark.asyncio
     async def test_other_source_untouched(
-        self, brain_app, admin_seed: dict, reconcile_via_asgi,
+        self,
+        brain_app,
+        admin_seed: dict,
+        reconcile_via_asgi,
     ) -> None:
         # Insert a row from a different source directly. Then run
         # the declarative reconciler with an empty dict for our
@@ -299,7 +306,9 @@ class TestSourceIsolation:
                     kind=ScheduleKind.CRON,
                     expression="0 * * * *",
                     timezone="UTC",
-                    args=[], kwargs={}, is_enabled=True,
+                    args=[],
+                    kwargs={},
+                    is_enabled=True,
                     source="dashboard",
                 ),
             )

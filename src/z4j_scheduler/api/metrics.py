@@ -31,7 +31,8 @@ async def metrics(request: Request) -> Response:
             "Bearer ",
         )
         if not provided or not hmac.compare_digest(
-            expected_token.get_secret_value(), provided,
+            expected_token.get_secret_value(),
+            provided,
         ):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,

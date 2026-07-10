@@ -25,7 +25,7 @@ def rq_live_task(value: int = 1) -> int:
     return _state["n"]
 
 
-async def arq_live_task(ctx, value: int = 1) -> int:  # noqa: ANN001, ARG001
+async def arq_live_task(ctx, value: int = 1) -> int:
     """arq-importable task body. ``ctx`` is the arq worker ctx."""
     _state["n"] += value
     return _state["n"]

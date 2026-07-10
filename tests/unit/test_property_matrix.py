@@ -28,11 +28,9 @@ from zoneinfo import ZoneInfo
 import pytest
 from hypothesis import HealthCheck, assume, given, settings
 from hypothesis import strategies as st
-
 from z4j_scheduler.importers._core import ImportedSchedule
 from z4j_scheduler.tick.cron import next_fire
 from z4j_scheduler.verify.shadow_comparator import predict_fires
-
 
 _TIMEZONES = [
     "UTC",
@@ -41,10 +39,10 @@ _TIMEZONES = [
     "Europe/London",
     "Europe/Berlin",
     "Asia/Tokyo",
-    "Asia/Kolkata",        # half-hour offset (+05:30)
+    "Asia/Kolkata",  # half-hour offset (+05:30)
     "Australia/Sydney",
-    "Pacific/Auckland",    # +12 / +13 (DST)
-    "Pacific/Chatham",     # +12:45 / +13:45 (DST + odd offset)
+    "Pacific/Auckland",  # +12 / +13 (DST)
+    "Pacific/Chatham",  # +12:45 / +13:45 (DST + odd offset)
     "Africa/Cairo",
 ]
 
@@ -91,11 +89,13 @@ def _cron_expression(draw):
     """Compose a 5-field cron string from valid per-field shapes."""
     return " ".join(
         [
-            draw(_cron_field(lo=0, hi=59, max_step=30)),     # minute
-            draw(_cron_field(lo=0, hi=23, max_step=12)),     # hour
-            draw(_cron_field(lo=1, hi=28, max_step=14)),     # day-of-month (cap at 28 to avoid Feb edge cases)
-            draw(_cron_field(lo=1, hi=12, max_step=6)),      # month
-            draw(_cron_field(lo=0, hi=6, max_step=3)),       # day-of-week
+            draw(_cron_field(lo=0, hi=59, max_step=30)),  # minute
+            draw(_cron_field(lo=0, hi=23, max_step=12)),  # hour
+            draw(
+                _cron_field(lo=1, hi=28, max_step=14)
+            ),  # day-of-month (cap at 28 to avoid Feb edge cases)
+            draw(_cron_field(lo=1, hi=12, max_step=6)),  # month
+            draw(_cron_field(lo=0, hi=6, max_step=3)),  # day-of-week
         ],
     )
 
@@ -120,7 +120,10 @@ class TestCronSyntaxMonotonic:
         offset_seconds=st.integers(min_value=0, max_value=365 * 24 * 3600),
     )
     def test_monotonic_for_synthesised_expressions(
-        self, expression: str, tz: str, offset_seconds: int,
+        self,
+        expression: str,
+        tz: str,
+        offset_seconds: int,
     ) -> None:
         # Anchor at 2026-01-01 in the schedule's tz, walk forward.
         anchor = datetime(2026, 1, 1, tzinfo=ZoneInfo(tz)) + timedelta(
@@ -169,7 +172,10 @@ class TestPredictFiresMatchesIteratedNextFire:
         window_hours=st.integers(min_value=1, max_value=72),
     )
     def test_predict_fires_matches_iterated(
-        self, expression: str, tz: str, window_hours: int,
+        self,
+        expression: str,
+        tz: str,
+        window_hours: int,
     ) -> None:
         start = datetime(2026, 4, 27, 12, 0, 0, tzinfo=UTC)
         end = start + timedelta(hours=window_hours)
@@ -189,7 +195,9 @@ class TestPredictFiresMatchesIteratedNextFire:
         )
         # Path 1: shadow comparator.
         predicted = predict_fires(
-            [sched], window_start=start, window_end=end,
+            [sched],
+            window_start=start,
+            window_end=end,
         )
         predicted_times = sorted(p.fire_time for p in predicted)
 
@@ -245,10 +253,12 @@ class TestIntervalEvenlySpacedAcrossTimezones:
             is_enabled=True,
             source="test",
         )
-        # 10× the interval as window so we get ~10 fires.
+        # 10x the interval as window so we get ~10 fires.
         window = timedelta(seconds=seconds * 10)
         fires = predict_fires(
-            [sched], window_start=start, window_end=start + window,
+            [sched],
+            window_start=start,
+            window_end=start + window,
         )
         # Sort + verify each consecutive pair is exactly N seconds
         # apart in UTC.
@@ -284,10 +294,13 @@ class TestYearAndLeapBoundaries:
         ],
     )
     @pytest.mark.parametrize(
-        "expr", ["0 * * * *", "0 3 * * *", "*/15 * * * *", "0 0 * * 0"],
+        "expr",
+        ["0 * * * *", "0 3 * * *", "*/15 * * * *", "0 0 * * 0"],
     )
     def test_year_or_leap_boundary_monotonic(
-        self, anchor: datetime, expr: str,
+        self,
+        anchor: datetime,
+        expr: str,
     ) -> None:
         moment = anchor
         prev = moment
@@ -327,7 +340,10 @@ class TestSolarMonotonicAcrossTimezones:
         lon=st.floats(min_value=-180.0, max_value=180.0, allow_nan=False),
     )
     def test_solar_monotonic(
-        self, event: str, lat: float, lon: float,
+        self,
+        event: str,
+        lat: float,
+        lon: float,
     ) -> None:
         from z4j_scheduler.tick.solar import next_solar_fire
 
@@ -342,8 +358,7 @@ class TestSolarMonotonicAcrossTimezones:
                 # handles None by skipping.
                 return
             assert nxt > prev, (
-                f"solar non-monotonic: event={event!r} "
-                f"lat={lat} lon={lon} {prev} -> {nxt}"
+                f"solar non-monotonic: event={event!r} lat={lat} lon={lon} {prev} -> {nxt}"
             )
             prev = nxt
 
@@ -373,7 +388,10 @@ class TestCronExpressionEquivalence:
     )
     @pytest.mark.parametrize("tz", ["UTC", "America/New_York", "Asia/Tokyo"])
     def test_equivalent_expressions_produce_identical_fires(
-        self, expr_a: str, expr_b: str, tz: str,
+        self,
+        expr_a: str,
+        expr_b: str,
+        tz: str,
     ) -> None:
         anchor = datetime(2026, 4, 27, 0, 0, 0, tzinfo=ZoneInfo(tz))
         fires_a = []

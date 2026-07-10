@@ -186,7 +186,7 @@ class BrainImportClient:
         exceptions here - a partial-import scenario is exactly the
         situation where the operator wants to see the error.
         """
-        import httpx  # noqa: PLC0415
+        import httpx
 
         if not schedules:
             return {"inserted": 0, "updated": 0, "unchanged": 0, "failed": 0}
@@ -198,10 +198,7 @@ class BrainImportClient:
         if self._api_token:
             headers["Authorization"] = f"Bearer {self._api_token}"
 
-        url = (
-            f"{self._brain_url}/api/v1/projects/{project_slug}"
-            f"/schedules:import"
-        )
+        url = f"{self._brain_url}/api/v1/projects/{project_slug}/schedules:import"
 
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             response = await client.post(url, json=payload, headers=headers)

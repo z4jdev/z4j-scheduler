@@ -53,18 +53,17 @@ from croniter import croniter
 # Optional celery side. We import lazily and skip the celery half
 # if missing.
 try:
-    from celery.schedules import crontab as _celery_crontab  # noqa: F401
+    from celery.schedules import crontab as _celery_crontab
     from celery.schedules import schedule as _celery_schedule  # noqa: F401
 
     _CELERY_AVAILABLE = True
-except Exception:  # noqa: BLE001 - any import failure is a "skip"
+except Exception:
     _CELERY_AVAILABLE = False
 
 # Reuse the well-tested RSS helper from the phase-5 bench. Single
 # source of truth for memory measurement so both benches report
 # numbers we trust.
 from tests.benchmarks.bench_phase5 import _rss_mb
-
 
 # =====================================================================
 # Workloads - identical schedule sets fed to both sides
@@ -76,10 +75,10 @@ from tests.benchmarks.bench_phase5 import _rss_mb
 # under-represent the daily / weekly cron cost.
 _TYPICAL_CRONS = [
     ("every-minute", "* * * * *"),
-    ("every-5-min",  "*/5 * * * *"),
-    ("hourly",       "0 * * * *"),
-    ("daily-3am",    "0 3 * * *"),
-    ("weekly-mon",   "0 9 * * 1"),
+    ("every-5-min", "*/5 * * * *"),
+    ("hourly", "0 * * * *"),
+    ("daily-3am", "0 3 * * *"),
+    ("weekly-mon", "0 9 * * 1"),
 ]
 
 
@@ -159,9 +158,7 @@ def bench_tick_at_scale() -> dict[str, Any]:
     for n in (100, 1_000, 10_000):
         # z4j path: build a list of croniter instances + one
         # full pass to find which ones would fire on this tick.
-        z4j_crons = [
-            croniter("* * * * *", now) for _ in range(n)
-        ]
+        z4j_crons = [croniter("* * * * *", now) for _ in range(n)]
         t0 = time.perf_counter()
         z4j_due = 0
         for c in z4j_crons:
@@ -177,9 +174,7 @@ def bench_tick_at_scale() -> dict[str, Any]:
         }
 
         if _CELERY_AVAILABLE:
-            celery_objs = [
-                _make_celery_crontab("* * * * *") for _ in range(n)
-            ]
+            celery_objs = [_make_celery_crontab("* * * * *") for _ in range(n)]
             t0 = time.perf_counter()
             celery_due = 0
             for c in celery_objs:
@@ -249,7 +244,7 @@ def _quantile(samples: list[float], q: float) -> float:
     if not samples:
         return 0.0
     sorted_s = sorted(samples)
-    k = max(0, min(len(sorted_s) - 1, int(round(q * (len(sorted_s) - 1)))))
+    k = max(0, min(len(sorted_s) - 1, round(q * (len(sorted_s) - 1))))
     return sorted_s[k]
 
 
@@ -266,8 +261,10 @@ def render_summary(report: dict[str, Any]) -> str:
 
     # 1. Next-fire computation cost
     lines.append("--- 1. Next-fire computation cost (microseconds, lower is better) ---")
-    lines.append(f"{'cron':<14} {'z4j p50':>10} {'celery p50':>11} "
-                 f"{'z4j p99':>10} {'celery p99':>11} {'z4j vs celery':>16}")
+    lines.append(
+        f"{'cron':<14} {'z4j p50':>10} {'celery p50':>11} "
+        f"{'z4j p99':>10} {'celery p99':>11} {'z4j vs celery':>16}"
+    )
     for name, r in report["next_fire_cost"]["per_cron"].items():
         z50 = r["z4j_us_p50"]
         z99 = r["z4j_us_p99"]
@@ -277,14 +274,10 @@ def render_summary(report: dict[str, Any]) -> str:
             ratio = z50 / c50 if c50 > 0 else float("inf")
             ratio_str = f"{ratio:>13.2f}x"
             lines.append(
-                f"{name:<14} {z50:>10.2f} {c50:>11.2f} "
-                f"{z99:>10.2f} {c99:>11.2f} {ratio_str:>16}"
+                f"{name:<14} {z50:>10.2f} {c50:>11.2f} {z99:>10.2f} {c99:>11.2f} {ratio_str:>16}"
             )
         else:
-            lines.append(
-                f"{name:<14} {z50:>10.2f} {'(skip)':>11} "
-                f"{z99:>10.2f} {'(skip)':>11}"
-            )
+            lines.append(f"{name:<14} {z50:>10.2f} {'(skip)':>11} {z99:>10.2f} {'(skip)':>11}")
     lines.append("")
 
     # 2. Per-tick due-list cost at scale
@@ -295,9 +288,7 @@ def render_summary(report: dict[str, Any]) -> str:
         if "celery_tick_ms" in r:
             cms = r["celery_tick_ms"]
             ratio = zms / cms if cms > 0 else float("inf")
-            lines.append(
-                f"{int(n):<12,} {zms:>10.2f} {cms:>11.2f} {ratio:>9.2f}x"
-            )
+            lines.append(f"{int(n):<12,} {zms:>10.2f} {cms:>11.2f} {ratio:>9.2f}x")
         else:
             lines.append(f"{int(n):<12,} {zms:>10.2f} {'(skip)':>11}")
     lines.append("")
@@ -308,8 +299,7 @@ def render_summary(report: dict[str, Any]) -> str:
     z_total = mem["z4j_total_mb"]
     z_per = mem.get("z4j_bytes_per_schedule")
     lines.append(
-        f"  z4j-scheduler:   {z_total:>7.2f} MB total, "
-        f"~{z_per:>6.0f} bytes/schedule"
+        f"  z4j-scheduler:   {z_total:>7.2f} MB total, ~{z_per:>6.0f} bytes/schedule"
         if z_per is not None
         else f"  z4j-scheduler:   {z_total:>7.2f} MB total"
     )
@@ -317,8 +307,7 @@ def render_summary(report: dict[str, Any]) -> str:
         c_total = mem["celery_total_mb"]
         c_per = mem.get("celery_bytes_per_schedule")
         lines.append(
-            f"  celery-beat:     {c_total:>7.2f} MB total, "
-            f"~{c_per:>6.0f} bytes/schedule"
+            f"  celery-beat:     {c_total:>7.2f} MB total, ~{c_per:>6.0f} bytes/schedule"
             if c_per is not None
             else f"  celery-beat:     {c_total:>7.2f} MB total"
         )
@@ -337,20 +326,16 @@ def render_summary(report: dict[str, Any]) -> str:
             if r.get("celery_tick_ms"):
                 ratios.append(r["z4j_tick_ms"] / r["celery_tick_ms"])
         if ratios:
-            geomean = (
-                pow(
-                    abs(__import__("math").prod(ratios)),
-                    1 / len(ratios),
-                )
+            geomean = pow(
+                abs(__import__("math").prod(ratios)),
+                1 / len(ratios),
             )
             verdict = (
-                f"z4j is {1/geomean:.2f}x FASTER than celery-beat"
+                f"z4j is {1 / geomean:.2f}x FASTER than celery-beat"
                 if geomean < 1
                 else f"z4j is {geomean:.2f}x SLOWER than celery-beat"
             )
-            lines.append(
-                f"  Geomean across all timing metrics: {verdict}"
-            )
+            lines.append(f"  Geomean across all timing metrics: {verdict}")
     else:
         lines.append(
             "  Re-run with celery installed to see the comparison.",

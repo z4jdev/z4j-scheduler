@@ -12,9 +12,9 @@ Subcommands (per ``docs/SCHEDULER.md §15.4``):
     z4j-scheduler import --from <tool>    Migrate from celery-beat / rq / aps / cron
     z4j-scheduler export --to <tool>      Reverse migration
 
-Phase 1 ships only ``serve`` and ``version`` working end to end.
-The rest of the surface is stubbed so users see a clear "not yet
-implemented" message instead of a missing-command error.
+``serve``, ``version``, ``info``, and the ``schedules`` +
+``import``/``export`` families work end to end. Any remaining stub emits
+a clear "not yet implemented" message instead of a missing-command error.
 """
 
 from __future__ import annotations
@@ -54,8 +54,8 @@ def serve() -> None:
     # other subcommands (version, --help) work even when the env
     # vars are not set. Settings instantiation enforces the
     # required-field validation at this point only.
-    from z4j_scheduler.main import run_from_settings  # noqa: PLC0415
-    from z4j_scheduler.settings import Settings  # noqa: PLC0415
+    from z4j_scheduler.main import run_from_settings
+    from z4j_scheduler.settings import Settings
 
     try:
         settings = Settings()  # type: ignore[call-arg]
@@ -65,7 +65,7 @@ def serve() -> None:
         # (e.g. from a co-located .env file). Extract just the
         # missing/invalid field names so secret-shaped values from
         # other components do not bleed into our stderr.
-        from pydantic import ValidationError  # noqa: PLC0415
+        from pydantic import ValidationError
 
         if isinstance(exc, ValidationError):
             typer.echo(
@@ -88,7 +88,7 @@ def serve() -> None:
     # event loop, not just asyncio.run's default. Linux/macOS only;
     # the conditional dep + import-error guard handle Windows.
     try:
-        import uvloop  # noqa: PLC0415
+        import uvloop
 
         uvloop.install()
     except ImportError:
@@ -128,9 +128,9 @@ def check(
     cron jobs, deploy gates, and Nagios-style monitors. Exit 0 =
     healthy, exit 1 = at least one check failed.
     """
-    import socket  # noqa: PLC0415
-    from urllib.parse import urlparse  # noqa: PLC0415
-    from urllib.request import urlopen  # noqa: PLC0415
+    import socket
+    from urllib.parse import urlparse
+    from urllib.request import urlopen
 
     fails: list[str] = []
 
@@ -139,9 +139,7 @@ def check(
     else:
         try:
             parsed = urlparse(
-                brain_grpc_url
-                if "://" in brain_grpc_url
-                else f"//{brain_grpc_url}",
+                brain_grpc_url if "://" in brain_grpc_url else f"//{brain_grpc_url}",
             )
             host, port = parsed.hostname, parsed.port or 443
             if not host:
@@ -179,20 +177,18 @@ def status() -> None:
     the brain - use ``check`` for that. Useful for "what version
     is on this host?" type questions during incident triage.
     """
-    import os as _os  # noqa: PLC0415
-    typer.echo(f"z4j-scheduler status:")
+    import os as _os
+
+    typer.echo("z4j-scheduler status:")
     typer.echo(f"  version:           {__version__}")
     typer.echo(
-        f"  brain_grpc_url:    "
-        f"{_os.environ.get('Z4J_SCHEDULER_BRAIN_GRPC_URL', '<unset>')}",
+        f"  brain_grpc_url:    {_os.environ.get('Z4J_SCHEDULER_BRAIN_GRPC_URL', '<unset>')}",
     )
     typer.echo(
-        f"  brain_rest_url:    "
-        f"{_os.environ.get('Z4J_SCHEDULER_BRAIN_REST_URL', '<unset>')}",
+        f"  brain_rest_url:    {_os.environ.get('Z4J_SCHEDULER_BRAIN_REST_URL', '<unset>')}",
     )
     typer.echo(
-        f"  embedded mode:     "
-        f"{_os.environ.get('Z4J_EMBEDDED_SCHEDULER', '<unset>')}",
+        f"  embedded mode:     {_os.environ.get('Z4J_EMBEDDED_SCHEDULER', '<unset>')}",
     )
     typer.echo(
         "  process control:   restart via your supervisor "
@@ -233,18 +229,82 @@ def restart() -> None:
 
 
 @app.command()
-def info() -> None:
-    """Print resolved settings + runtime status. Phase 1."""
-    typer.echo(
-        "Phase 1 - implementation in progress. "
-        "See docs/SCHEDULER.md §25.",
-        err=True,
-    )
-    raise typer.Exit(code=2)
+def info(
+    url: str = typer.Option(
+        "http://localhost:7800",
+        "--url",
+        envvar="Z4J_SCHEDULER_INFO_URL",
+        help="the local scheduler's HTTP base URL (env Z4J_SCHEDULER_INFO_URL)",
+    ),
+    token: str | None = typer.Option(
+        None,
+        "--token",
+        envvar="Z4J_SCHEDULER_METRICS_AUTH_TOKEN",
+        help="bearer token, if the scheduler gates /info",
+    ),
+    json_out: bool = typer.Option(
+        False,
+        "--json/--no-json",
+        help="emit raw JSON instead of the table view",
+    ),
+) -> None:
+    """Print the local scheduler instance's runtime status.
+
+    Hits the running scheduler's ``GET /info`` (the same snapshot the
+    brain's Schedulers fleet grid fans out): version, instance id,
+    uptime, readiness, subsystem health, and schedules loaded. Exits 1
+    with a clear message when the scheduler is not reachable, so shell
+    scripts and health probes get a non-zero code rather than the old
+    Phase-1 stub's exit 2.
+    """
+    import json
+
+    import httpx
+
+    headers = {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    try:
+        response = httpx.get(
+            f"{url.rstrip('/')}/info",
+            headers=headers,
+            timeout=5.0,
+        )
+        response.raise_for_status()
+    except httpx.ConnectError:
+        typer.echo(
+            f"scheduler not reachable at {url} - is `z4j-scheduler serve` "
+            "running and bound to this address?",
+            err=True,
+        )
+        raise typer.Exit(code=1) from None
+    except httpx.HTTPError as exc:
+        typer.echo(f"GET {url}/info failed: {exc}", err=True)
+        raise typer.Exit(code=1) from None
+
+    data = response.json()
+    if json_out:
+        typer.echo(json.dumps(data, indent=2))
+        return
+
+    subs = data.get("subsystems", {})
+    typer.echo(f"version           {data.get('version', '?')}")
+    typer.echo(f"instance_id       {data.get('instance_id', '?')}")
+    typer.echo(f"started_at        {data.get('started_at', '?')}")
+    typer.echo(f"uptime_seconds    {data.get('uptime_seconds', '?')}")
+    typer.echo(f"ready             {data.get('ready', '?')}")
+    typer.echo(f"schedules_loaded  {data.get('schedules_loaded', '?')}")
+    typer.echo("subsystems:")
+    for key in (
+        "brain_client_connected",
+        "cache_initial_sync_complete",
+        "leader_gate_initialised",
+    ):
+        typer.echo(f"  {key:<30} {subs.get(key, '?')}")
 
 
 @app.command()
-def doctor(
+def doctor(  # noqa: PLR0912, PLR0915  flat CLI diagnostics dispatch
     brain_grpc_url: str = typer.Option(
         None,
         "--brain-grpc-url",
@@ -302,11 +362,10 @@ def doctor(
     surfaces the actual problem instead of a cryptic stack trace
     from `serve` failing to bind.
     """
-    import socket  # noqa: PLC0415
-    import ssl  # noqa: PLC0415
-    from pathlib import Path  # noqa: PLC0415
-    from urllib.parse import urlparse  # noqa: PLC0415
-    from urllib.request import urlopen  # noqa: PLC0415
+    import socket
+    import ssl
+    from pathlib import Path
+    from urllib.request import urlopen
 
     failed = False
 
@@ -330,14 +389,16 @@ def doctor(
         _print("Z4J_SCHEDULER_BRAIN_GRPC_URL", "PASS", brain_grpc_url)
     else:
         _print(
-            "Z4J_SCHEDULER_BRAIN_GRPC_URL", "FAIL",
+            "Z4J_SCHEDULER_BRAIN_GRPC_URL",
+            "FAIL",
             "unset; required by serve",
         )
     if brain_rest_url:
         _print("Z4J_SCHEDULER_BRAIN_REST_URL", "PASS", brain_rest_url)
     else:
         _print(
-            "Z4J_SCHEDULER_BRAIN_REST_URL", "FAIL",
+            "Z4J_SCHEDULER_BRAIN_REST_URL",
+            "FAIL",
             "unset; required by serve",
         )
 
@@ -368,11 +429,16 @@ def doctor(
     if "cert" in pem_data and "key" in pem_data:
         try:
             ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-            with tempfile.NamedTemporaryFile(
-                suffix=".crt", delete=False,
-            ) as cf, tempfile.NamedTemporaryFile(
-                suffix=".key", delete=False,
-            ) as kf:
+            with (
+                tempfile.NamedTemporaryFile(
+                    suffix=".crt",
+                    delete=False,
+                ) as cf,
+                tempfile.NamedTemporaryFile(
+                    suffix=".key",
+                    delete=False,
+                ) as kf,
+            ):
                 cf.write(pem_data["cert"])
                 kf.write(pem_data["key"])
                 cf.flush()
@@ -381,21 +447,24 @@ def doctor(
             try:
                 ctx.load_cert_chain(certfile=cf_name, keyfile=kf_name)
                 _print(
-                    "cert + key pair", "PASS", "match (same modulus)",
+                    "cert + key pair",
+                    "PASS",
+                    "match (same modulus)",
                 )
             finally:
                 Path(cf_name).unlink(missing_ok=True)
                 Path(kf_name).unlink(missing_ok=True)
         except (ssl.SSLError, OSError) as exc:
             _print(
-                "cert + key pair", "FAIL",
+                "cert + key pair",
+                "FAIL",
                 f"mismatch or unparseable: {exc}",
             )
 
     # 4. CA chain validation
     if "cert" in pem_data and "ca" in pem_data:
         try:
-            from cryptography import x509 as _x509  # noqa: PLC0415
+            from cryptography import x509 as _x509
 
             cert_obj = _x509.load_pem_x509_certificate(pem_data["cert"])
             ca_obj = _x509.load_pem_x509_certificate(pem_data["ca"])
@@ -407,10 +476,11 @@ def doctor(
                 _print("CA issued cert", "PASS", "issuer matches CA subject")
             else:
                 _print(
-                    "CA issued cert", "FAIL",
+                    "CA issued cert",
+                    "FAIL",
                     "issuer != CA subject (cert was signed by a different CA)",
                 )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             _print("CA issued cert", "FAIL", f"parse error: {exc}")
 
     # 5. Brain REST /health probe
@@ -423,29 +493,33 @@ def doctor(
                     _print("brain REST /health", "PASS", f"{rest_url} -> 200")
                 else:
                     _print(
-                        "brain REST /health", "FAIL",
+                        "brain REST /health",
+                        "FAIL",
                         f"{rest_url} -> {resp.status}",
                     )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             _print("brain REST /health", "FAIL", f"{rest_url} -> {exc}")
 
     # 6. Brain gRPC reachability (TCP probe; full mTLS Ping requires
     # an event loop + grpcio import that we keep light here)
     if brain_grpc_url:
-        host_port = brain_grpc_url.split("//")[-1]
+        host_port = brain_grpc_url.rsplit("//", maxsplit=1)[-1]
         host, _, port_s = host_port.partition(":")
         try:
             port = int(port_s)
         except ValueError:
             _print(
-                "brain gRPC TCP", "FAIL",
+                "brain gRPC TCP",
+                "FAIL",
                 f"unparseable port in {brain_grpc_url!r}",
             )
         else:
             try:
                 with socket.create_connection((host, port), timeout=5):
                     _print(
-                        "brain gRPC TCP", "PASS", f"{host}:{port} accepts",
+                        "brain gRPC TCP",
+                        "PASS",
+                        f"{host}:{port} accepts",
                     )
             except OSError as exc:
                 _print("brain gRPC TCP", "FAIL", f"{host}:{port} -> {exc}")
@@ -454,17 +528,18 @@ def doctor(
     typer.echo("\nLeader gate (HA):")
     if not leader_pg_dsn:
         _print(
-            "Postgres advisory lock", "SKIP",
+            "Postgres advisory lock",
+            "SKIP",
             "Z4J_SCHEDULER_LEADER_PG_DSN unset (single-instance mode)",
         )
     else:
         try:
-            import asyncpg  # noqa: PLC0415
+            import asyncpg
 
             async def _probe() -> tuple[bool, str]:
                 try:
                     conn = await asyncpg.connect(leader_pg_dsn, timeout=5)
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     return False, f"connect failed: {exc}"
                 try:
                     # Take + release a bench-only key. Doesn't conflict
@@ -489,7 +564,8 @@ def doctor(
             )
         except ImportError:
             _print(
-                "Postgres advisory lock", "SKIP",
+                "Postgres advisory lock",
+                "SKIP",
                 "asyncpg not installed (pip install asyncpg)",
             )
 
@@ -526,38 +602,48 @@ def schedules_add(
     name: str = typer.Option(..., "--name", help="schedule name (unique per project)"),
     engine: str = typer.Option("celery", "--engine", help="engine adapter"),
     kind: str = typer.Option(
-        ..., "--kind",
+        ...,
+        "--kind",
         help="schedule kind: 'cron' / 'interval' / 'one_shot'",
     ),
     expression: str = typer.Option(
-        ..., "--expression",
+        ...,
+        "--expression",
         help=(
             "kind-specific expression: 5-field crontab (cron), '<N>{s,m,h,d}' "
             "(interval), or ISO-8601 timestamp (one_shot)"
         ),
     ),
     task_name: str = typer.Option(
-        ..., "--task-name",
+        ...,
+        "--task-name",
         help="fully-qualified task name to invoke",
     ),
     timezone: str = typer.Option("UTC", "--timezone"),
     queue: str | None = typer.Option(None, "--queue"),
     args_json: str | None = typer.Option(
-        None, "--args", help="JSON list of positional task args",
+        None,
+        "--args",
+        help="JSON list of positional task args",
     ),
     kwargs_json: str | None = typer.Option(
-        None, "--kwargs", help="JSON object of task kwargs",
+        None,
+        "--kwargs",
+        help="JSON object of task kwargs",
     ),
     catch_up: str = typer.Option("skip", "--catch-up"),
     enabled: bool = typer.Option(
-        True, "--enabled/--disabled",
+        True,
+        "--enabled/--disabled",
         help="seed the schedule in the enabled state (default) or disabled",
     ),
     brain_url: str = typer.Option(
-        "http://localhost:7700", "--brain-url",
+        "http://localhost:7700",
+        "--brain-url",
     ),
     api_token: str | None = typer.Option(
-        None, "--api-token",
+        None,
+        "--api-token",
         envvar="Z4J_SCHEDULER_BRAIN_API_TOKEN",
     ),
 ) -> None:
@@ -567,7 +653,7 @@ def schedules_add(
     created row's brain id on stdout so deploy scripts can capture
     it.
     """
-    import json  # noqa: PLC0415
+    import json
 
     body = {
         "name": name,
@@ -598,14 +684,17 @@ def schedules_add(
 def schedules_list(
     project: str = typer.Option(..., "--project"),
     brain_url: str = typer.Option(
-        "http://localhost:7700", "--brain-url",
+        "http://localhost:7700",
+        "--brain-url",
     ),
     api_token: str | None = typer.Option(
-        None, "--api-token",
+        None,
+        "--api-token",
         envvar="Z4J_SCHEDULER_BRAIN_API_TOKEN",
     ),
     json_output: bool = typer.Option(
-        False, "--json/--no-json",
+        False,
+        "--json/--no-json",
         help="emit raw JSON instead of the human-readable table",
     ),
 ) -> None:
@@ -616,7 +705,7 @@ def schedules_list(
         path=f"/api/v1/projects/{project}/schedules",
     )
     if json_output:
-        import json as _json  # noqa: PLC0415
+        import json as _json
 
         typer.echo(_json.dumps(rows, indent=2))
         return
@@ -630,7 +719,7 @@ def schedules_list(
     for r in rows:
         typer.echo(
             f"{r['name'][:30]:<30} {r['kind']:<10} {r['expression'][:25]:<25} "
-            f"{str(r['is_enabled']):<8} {r['scheduler'][:18]:<18}",
+            f"{r['is_enabled']!s:<8} {r['scheduler'][:18]:<18}",
         )
 
 
@@ -638,14 +727,17 @@ def schedules_list(
 def schedules_trigger(
     project: str = typer.Option(..., "--project"),
     name: str = typer.Option(
-        ..., "--name",
+        ...,
+        "--name",
         help="schedule name (CLI looks up the id by name to keep arg surface small)",
     ),
     brain_url: str = typer.Option(
-        "http://localhost:7700", "--brain-url",
+        "http://localhost:7700",
+        "--brain-url",
     ),
     api_token: str | None = typer.Option(
-        None, "--api-token",
+        None,
+        "--api-token",
         envvar="Z4J_SCHEDULER_BRAIN_API_TOKEN",
     ),
 ) -> None:
@@ -673,10 +765,12 @@ def schedules_disable(
     project: str = typer.Option(..., "--project"),
     name: str = typer.Option(..., "--name"),
     brain_url: str = typer.Option(
-        "http://localhost:7700", "--brain-url",
+        "http://localhost:7700",
+        "--brain-url",
     ),
     api_token: str | None = typer.Option(
-        None, "--api-token",
+        None,
+        "--api-token",
         envvar="Z4J_SCHEDULER_BRAIN_API_TOKEN",
     ),
 ) -> None:
@@ -698,38 +792,46 @@ def schedules_disable(
 
 
 @schedules_app.command("edit")
-def schedules_edit(
+def schedules_edit(  # noqa: PLR0912  flat CLI option dispatch
     project: str = typer.Option(..., "--project"),
     name: str = typer.Option(
-        ..., "--name",
+        ...,
+        "--name",
         help="schedule name (identity); cannot be changed via this command",
     ),
     expression: str = typer.Option(
-        None, "--expression",
+        None,
+        "--expression",
         help="new cron / interval / one_shot / solar expression",
     ),
     task_name: str = typer.Option(
-        None, "--task-name",
+        None,
+        "--task-name",
         help="rename the task this schedule fires",
     ),
     timezone_: str = typer.Option(
-        None, "--timezone",
+        None,
+        "--timezone",
         help="IANA timezone for cron schedules",
     ),
     queue: str = typer.Option(
-        None, "--queue",
+        None,
+        "--queue",
         help="route fires onto this queue (engine-dependent)",
     ),
     catch_up: str = typer.Option(
-        None, "--catch-up",
+        None,
+        "--catch-up",
         help="skip / fire_one_missed / fire_all_missed",
     ),
     args: str = typer.Option(
-        None, "--args",
+        None,
+        "--args",
         help="JSON array of positional args (e.g. '[42, \"x\"]')",
     ),
     kwargs: str = typer.Option(
-        None, "--kwargs",
+        None,
+        "--kwargs",
         help="JSON object of keyword args (e.g. '{\"flag\": true}')",
     ),
     enable: bool = typer.Option(
@@ -738,10 +840,12 @@ def schedules_edit(
         help="flip is_enabled (omit to leave unchanged)",
     ),
     brain_url: str = typer.Option(
-        "http://localhost:7700", "--brain-url",
+        "http://localhost:7700",
+        "--brain-url",
     ),
     api_token: str | None = typer.Option(
-        None, "--api-token",
+        None,
+        "--api-token",
         envvar="Z4J_SCHEDULER_BRAIN_API_TOKEN",
     ),
 ) -> None:
@@ -752,7 +856,7 @@ def schedules_edit(
     targeted ops scripts that flip ONE field (rotate a queue, bump
     a catch-up policy) without re-stating the whole schedule.
     """
-    import json  # noqa: PLC0415
+    import json
 
     schedule_id = _resolve_schedule_id_by_name(
         brain_url=brain_url,
@@ -817,18 +921,22 @@ def schedules_history(
     project: str = typer.Option(..., "--project"),
     name: str = typer.Option(..., "--name"),
     limit: int = typer.Option(
-        20, "--limit",
+        20,
+        "--limit",
         help="number of recent fires to show (capped at 1000 server-side)",
     ),
     json_out: bool = typer.Option(
-        False, "--json/--no-json",
+        False,
+        "--json/--no-json",
         help="emit raw JSON instead of the table view",
     ),
     brain_url: str = typer.Option(
-        "http://localhost:7700", "--brain-url",
+        "http://localhost:7700",
+        "--brain-url",
     ),
     api_token: str | None = typer.Option(
-        None, "--api-token",
+        None,
+        "--api-token",
         envvar="Z4J_SCHEDULER_BRAIN_API_TOKEN",
     ),
 ) -> None:
@@ -838,7 +946,7 @@ def schedules_history(
     operator use. Status / latency / error_message per row, newest
     first. ``--json`` is for piping into ``jq`` etc.
     """
-    import json  # noqa: PLC0415
+    import json
 
     schedule_id = _resolve_schedule_id_by_name(
         brain_url=brain_url,
@@ -849,10 +957,7 @@ def schedules_history(
     rows = _brain_get(
         brain_url=brain_url,
         api_token=api_token,
-        path=(
-            f"/api/v1/projects/{project}/schedules/{schedule_id}/fires"
-            f"?limit={limit}"
-        ),
+        path=(f"/api/v1/projects/{project}/schedules/{schedule_id}/fires?limit={limit}"),
     )
     if json_out:
         typer.echo(json.dumps(rows, indent=2))
@@ -872,10 +977,7 @@ def schedules_history(
         detail = (
             r.get("error_message")
             or r.get("error_code")
-            or (
-                f"cmd:{r.get('command_id', '')[:8]}..."
-                if r.get("command_id") else "-"
-            )
+            or (f"cmd:{r.get('command_id', '')[:8]}..." if r.get("command_id") else "-")
         )
         # Truncate detail to keep the line under 120 columns.
         if len(detail) > 50:
@@ -890,10 +992,12 @@ def schedules_enable(
     project: str = typer.Option(..., "--project"),
     name: str = typer.Option(..., "--name"),
     brain_url: str = typer.Option(
-        "http://localhost:7700", "--brain-url",
+        "http://localhost:7700",
+        "--brain-url",
     ),
     api_token: str | None = typer.Option(
-        None, "--api-token",
+        None,
+        "--api-token",
         envvar="Z4J_SCHEDULER_BRAIN_API_TOKEN",
     ),
 ) -> None:
@@ -947,7 +1051,7 @@ def _brain_get(
     here keeps the command implementation small. The async path is
     available via :class:`BrainImportClient` when needed.
     """
-    import httpx  # noqa: PLC0415
+    import httpx
 
     headers = {}
     if api_token:
@@ -980,7 +1084,7 @@ def _brain_patch(
     surfaces as 422 - we propagate the body so the operator
     sees which field failed.
     """
-    import httpx  # noqa: PLC0415
+    import httpx
 
     headers = {"Content-Type": "application/json"}
     if api_token:
@@ -993,8 +1097,7 @@ def _brain_patch(
     )
     if response.status_code != 200:
         typer.echo(
-            f"brain PATCH {path} returned {response.status_code}: "
-            f"{response.text}",
+            f"brain PATCH {path} returned {response.status_code}: {response.text}",
             err=True,
         )
         raise typer.Exit(code=1)
@@ -1010,7 +1113,7 @@ def _brain_post(
     expect_status: tuple[int, ...],
 ) -> dict:
     """Sync httpx POST wrapper. Raises typer.Exit on unexpected status."""
-    import httpx  # noqa: PLC0415
+    import httpx
 
     headers = {"Content-Type": "application/json"}
     if api_token:
@@ -1023,8 +1126,7 @@ def _brain_post(
     )
     if response.status_code not in expect_status:
         typer.echo(
-            f"brain POST {path} returned {response.status_code}: "
-            f"{response.text}",
+            f"brain POST {path} returned {response.status_code}: {response.text}",
             err=True,
         )
         raise typer.Exit(code=1)
@@ -1043,10 +1145,7 @@ def import_(
     source: str = typer.Option(
         ...,
         "--from",
-        help=(
-            "source format: celery | django-celery-beat | rq | "
-            "apscheduler | cron"
-        ),
+        help=("source format: celery | django-celery-beat | rq | apscheduler | cron"),
     ),
     project: str = typer.Option(
         ...,
@@ -1120,10 +1219,7 @@ def import_(
     jobstore_url: str | None = typer.Option(
         None,
         "--jobstore-url",
-        help=(
-            "(--from apscheduler) SQLAlchemy URL for the "
-            "APScheduler jobstore"
-        ),
+        help=("(--from apscheduler) SQLAlchemy URL for the APScheduler jobstore"),
     ),
     jobstore_alias: str = typer.Option(
         "default",
@@ -1162,10 +1258,7 @@ def import_(
     timezone: str = typer.Option(
         "UTC",
         "--timezone",
-        help=(
-            "timezone tag applied to schedules whose source has "
-            "none (cron, rq) - default UTC"
-        ),
+        help=("timezone tag applied to schedules whose source has none (cron, rq) - default UTC"),
     ),
     engine: str | None = typer.Option(
         None,
@@ -1199,7 +1292,7 @@ def import_(
         engine=engine,
     )
 
-    from z4j_scheduler.importers._core import (  # noqa: PLC0415
+    from z4j_scheduler.importers._core import (
         BrainImportClient,
         render_jsonl,
     )
@@ -1226,8 +1319,7 @@ def import_(
         # ignoring it. Same pattern as `git push --force` not
         # being something we silently swallow.
         typer.echo(
-            "--duration requires --verify; pass both to get the "
-            "fire-by-fire shadow comparison.",
+            "--duration requires --verify; pass both to get the fire-by-fire shadow comparison.",
             err=True,
         )
         raise typer.Exit(code=2)
@@ -1255,8 +1347,7 @@ def import_(
         raise typer.Exit(code=1) from exc
 
     typer.echo(
-        f"pushed {len(schedules)} schedule(s) to project {project!r} "
-        f"on {brain_url}:",
+        f"pushed {len(schedules)} schedule(s) to project {project!r} on {brain_url}:",
     )
     typer.echo(
         f"  inserted={summary.get('inserted', 0)}  "
@@ -1330,7 +1421,7 @@ def export(
     the operator's deployment artefacts - you copy the printed
     output into your config and commit it.
     """
-    from z4j_scheduler.exporters._client import (  # noqa: PLC0415
+    from z4j_scheduler.exporters._client import (
         fetch_schedules,
     )
 
@@ -1351,7 +1442,7 @@ def export(
     if out == "-":
         typer.echo(rendered)
     else:
-        from pathlib import Path  # noqa: PLC0415
+        from pathlib import Path
 
         Path(out).write_text(rendered, encoding="utf-8")
         typer.echo(
@@ -1389,7 +1480,7 @@ def _print_verify_diff(
     survive the round-trip? did the timezone? did the args /
     kwargs / queue come through?"
     """
-    import httpx  # noqa: PLC0415
+    import httpx
 
     # Fetch brain's current view.
     headers = {}
@@ -1409,13 +1500,8 @@ def _print_verify_diff(
 
     # Restrict to rows from the same source label - matches the
     # `replace_for_source` semantics the live import would use.
-    if not schedules:
-        source_label = None
-    else:
-        source_label = schedules[0].source
-    brain_for_source = [
-        r for r in brain_rows if r.get("source") == source_label
-    ]
+    source_label = None if not schedules else schedules[0].source
+    brain_for_source = [r for r in brain_rows if r.get("source") == source_label]
     brain_by_name = {r["name"]: r for r in brain_for_source}
 
     will_insert: list[str] = []
@@ -1431,10 +1517,7 @@ def _print_verify_diff(
             will_update.append(sched.name)
 
     declared_names = {s.name for s in schedules}
-    will_delete = [
-        r["name"] for r in brain_for_source
-        if r["name"] not in declared_names
-    ]
+    will_delete = [r["name"] for r in brain_for_source if r["name"] not in declared_names]
 
     typer.echo(
         f"[verify] source={source_label!r} project={project!r}",
@@ -1479,9 +1562,9 @@ def _print_shadow_comparison(
     side once we have an end-to-end celery-beat reference parser
     (separate from the importer's own parsing).
     """
-    from datetime import UTC, datetime  # noqa: PLC0415
+    from datetime import UTC, datetime
 
-    from z4j_scheduler.verify import (  # noqa: PLC0415
+    from z4j_scheduler.verify import (
         compare_predicted_fires,
         parse_duration,
         predict_fires,
@@ -1523,19 +1606,19 @@ def _select_renderer(target: str):
     """Resolve --to value to a renderer callable. Lazy imports keep
     extras only loaded for the path the user picked."""
     if target == "celery":
-        from z4j_scheduler.exporters import celery as _celery  # noqa: PLC0415
+        from z4j_scheduler.exporters import celery as _celery
 
         return _celery.render
     if target == "rq":
-        from z4j_scheduler.exporters import rq as _rq  # noqa: PLC0415
+        from z4j_scheduler.exporters import rq as _rq
 
         return _rq.render
     if target == "apscheduler":
-        from z4j_scheduler.exporters import apscheduler as _aps  # noqa: PLC0415
+        from z4j_scheduler.exporters import apscheduler as _aps
 
         return _aps.render
     if target == "cron":
-        from z4j_scheduler.exporters import cron as _cron  # noqa: PLC0415
+        from z4j_scheduler.exporters import cron as _cron
 
         return _cron.render
     raise typer.BadParameter(
@@ -1571,7 +1654,7 @@ def _do_import(
             raise typer.BadParameter(
                 "--celery-app is required for --from celery",
             )
-        from z4j_scheduler.importers.celery import (  # noqa: PLC0415
+        from z4j_scheduler.importers.celery import (
             read_celery_app,
         )
 
@@ -1587,7 +1670,7 @@ def _do_import(
             raise typer.BadParameter(
                 "--django-settings is required for --from django-celery-beat",
             )
-        from z4j_scheduler.importers.celery import (  # noqa: PLC0415
+        from z4j_scheduler.importers.celery import (
             read_django_celery_beat,
         )
 
@@ -1600,7 +1683,7 @@ def _do_import(
     if src == "rq":
         if not redis_url:
             raise typer.BadParameter("--redis-url is required for --from rq")
-        from z4j_scheduler.importers.rq import (  # noqa: PLC0415
+        from z4j_scheduler.importers.rq import (
             read_rq_scheduler,
         )
 
@@ -1615,7 +1698,7 @@ def _do_import(
             raise typer.BadParameter(
                 "--jobstore-url is required for --from apscheduler",
             )
-        from z4j_scheduler.importers.apscheduler import (  # noqa: PLC0415
+        from z4j_scheduler.importers.apscheduler import (
             read_apscheduler,
         )
 
@@ -1633,7 +1716,7 @@ def _do_import(
             raise typer.BadParameter(
                 "--task-prefix is required for --from cron",
             )
-        from z4j_scheduler.importers.cron import (  # noqa: PLC0415
+        from z4j_scheduler.importers.cron import (
             read_crontab,
         )
 

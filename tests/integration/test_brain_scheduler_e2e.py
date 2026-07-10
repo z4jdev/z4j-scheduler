@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import asyncio
 import secrets
-import socket
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -40,38 +39,34 @@ pytest.importorskip("grpc")
 pytest.importorskip("cryptography")
 pytest.importorskip("z4j_brain")
 
-from cryptography import x509  # noqa: E402
-from cryptography.hazmat.primitives import hashes, serialization  # noqa: E402
-from cryptography.hazmat.primitives.asymmetric import rsa  # noqa: E402
-from cryptography.x509.oid import NameOID  # noqa: E402
-from sqlalchemy import select  # noqa: E402
-from sqlalchemy.ext.asyncio import create_async_engine  # noqa: E402
-from sqlalchemy.pool import StaticPool  # noqa: E402
-
-from z4j_brain.domain.audit_service import AuditService  # noqa: E402
-from z4j_brain.domain.command_dispatcher import CommandDispatcher  # noqa: E402
-from z4j_brain.persistence.base import Base  # noqa: E402
-from z4j_brain.persistence.database import DatabaseManager  # noqa: E402
-from z4j_brain.persistence.enums import (  # noqa: E402
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.pool import StaticPool
+from z4j_brain.domain.audit_service import AuditService
+from z4j_brain.domain.command_dispatcher import CommandDispatcher
+from z4j_brain.persistence.base import Base
+from z4j_brain.persistence.database import DatabaseManager
+from z4j_brain.persistence.enums import (
     AgentState,
-    ProjectRole,
     ScheduleKind,
 )
-from z4j_brain.persistence.models import (  # noqa: E402
+from z4j_brain.persistence.models import (
     Agent,
     Project,
     Schedule,
 )
-from z4j_brain.scheduler_grpc.auth import mint_scheduler_cert  # noqa: E402
-from z4j_brain.scheduler_grpc.server import (  # noqa: E402
+from z4j_brain.scheduler_grpc.auth import mint_scheduler_cert
+from z4j_brain.scheduler_grpc.server import (
     SchedulerGrpcServer,
 )
-from z4j_brain.settings import Settings as BrainSettings  # noqa: E402
-from z4j_brain.websocket.registry import LocalRegistry  # noqa: E402
-
-from z4j_scheduler.settings import Settings as SchedulerSettings  # noqa: E402
-from z4j_scheduler.storage.brain_client import BrainClient  # noqa: E402
-
+from z4j_brain.settings import Settings as BrainSettings
+from z4j_brain.websocket.registry import LocalRegistry
+from z4j_scheduler.settings import Settings as SchedulerSettings
+from z4j_scheduler.storage.brain_client import BrainClient
 
 # =====================================================================
 # Cert + port helpers
@@ -110,7 +105,9 @@ def _self_signed_ca() -> tuple[bytes, bytes]:
 
 
 def _mint_server_cert(
-    *, ca_cert: bytes, ca_key: bytes,
+    *,
+    ca_cert: bytes,
+    ca_key: bytes,
 ) -> tuple[bytes, bytes]:
     """Mint a SERVER cert with serverAuth EKU and CN=localhost.
 
@@ -173,7 +170,8 @@ def cert_bundle(tmp_path: Path) -> dict:
     """Write a fresh CA + server cert + client cert to ``tmp_path``."""
     ca_cert, ca_key = _self_signed_ca()
     server_cert, server_key = _mint_server_cert(
-        ca_cert=ca_cert, ca_key=ca_key,
+        ca_cert=ca_cert,
+        ca_key=ca_key,
     )
     client_cert, client_key = mint_scheduler_cert(
         name="scheduler-e2e",
@@ -297,7 +295,8 @@ async def _noop_deliver_local(*_args, **_kwargs) -> bool:
 class TestPing:
     @pytest.mark.asyncio
     async def test_ping_returns_brain_version(
-        self, scheduler_client: BrainClient,
+        self,
+        scheduler_client: BrainClient,
     ) -> None:
         info = await scheduler_client.ping()
         assert info.brain_version
@@ -310,7 +309,9 @@ class TestPing:
 class TestListSchedules:
     @pytest.mark.asyncio
     async def test_lists_only_z4j_scheduler_rows(
-        self, brain_grpc, scheduler_client: BrainClient,
+        self,
+        brain_grpc,
+        scheduler_client: BrainClient,
     ) -> None:
         _server, _port, db, _dispatcher = brain_grpc
         project_id = uuid.uuid4()
@@ -327,7 +328,8 @@ class TestListSchedules:
                     kind=ScheduleKind.CRON,
                     expression="0 * * * *",
                     timezone="UTC",
-                    args=[], kwargs={},
+                    args=[],
+                    kwargs={},
                     is_enabled=True,
                 ),
             )
@@ -341,7 +343,8 @@ class TestListSchedules:
                     kind=ScheduleKind.CRON,
                     expression="0 * * * *",
                     timezone="UTC",
-                    args=[], kwargs={},
+                    args=[],
+                    kwargs={},
                     is_enabled=True,
                 ),
             )
@@ -359,7 +362,9 @@ class TestListSchedules:
 class TestWatchSchedules:
     @pytest.mark.asyncio
     async def test_emits_event_when_schedule_inserted(
-        self, brain_grpc, scheduler_client: BrainClient,
+        self,
+        brain_grpc,
+        scheduler_client: BrainClient,
     ) -> None:
         _server, _port, db, _dispatcher = brain_grpc
         project_id = uuid.uuid4()
@@ -393,7 +398,8 @@ class TestWatchSchedules:
                     kind=ScheduleKind.INTERVAL,
                     expression="60s",
                     timezone="UTC",
-                    args=[], kwargs={},
+                    args=[],
+                    kwargs={},
                     is_enabled=True,
                 ),
             )
@@ -402,11 +408,10 @@ class TestWatchSchedules:
         # Wait for the next poll cycle to pick the diff up.
         try:
             await asyncio.wait_for(consume_task, timeout=5.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             consume_task.cancel()
             pytest.fail(
-                "watch stream did not emit an event within 5s "
-                f"(events={events})",
+                f"watch stream did not emit an event within 5s (events={events})",
             )
 
         assert len(events) >= 1
@@ -418,7 +423,9 @@ class TestWatchSchedules:
 class TestFireSchedule:
     @pytest.mark.asyncio
     async def test_fire_with_no_agent_buffers(
-        self, brain_grpc, scheduler_client: BrainClient,
+        self,
+        brain_grpc,
+        scheduler_client: BrainClient,
     ) -> None:
         # Phase 2 behaviour change: when no agent is online, brain
         # buffers the fire in pending_fires (returning buffered=true)
@@ -441,7 +448,8 @@ class TestFireSchedule:
                     kind=ScheduleKind.CRON,
                     expression="0 * * * *",
                     timezone="UTC",
-                    args=[], kwargs={},
+                    args=[],
+                    kwargs={},
                     is_enabled=True,
                 ),
             )
@@ -465,7 +473,8 @@ class TestFireSchedule:
 class TestAcknowledgeFireResult:
     @pytest.mark.asyncio
     async def test_ack_for_unknown_fire_id_is_accepted(
-        self, scheduler_client: BrainClient,
+        self,
+        scheduler_client: BrainClient,
     ) -> None:
         # Acking a fire_id that brain doesn't know about (no schedule
         # row carrying last_fire_id == this id) must not crash. It's
@@ -479,7 +488,9 @@ class TestAcknowledgeFireResult:
 
     @pytest.mark.asyncio
     async def test_ack_updates_last_run_at_when_correlated(
-        self, brain_grpc, scheduler_client: BrainClient,
+        self,
+        brain_grpc,
+        scheduler_client: BrainClient,
     ) -> None:
         # Audit fix I-1 (Apr 2026): ack lookup goes via the
         # ``schedule_fires`` row, which the FireSchedule handler
@@ -489,9 +500,9 @@ class TestAcknowledgeFireResult:
         # AcknowledgeFireResult in production can only do so for a
         # fire_id that was minted via FireSchedule, which always
         # writes the fires row.
-        from datetime import datetime, UTC  # noqa: PLC0415
+        from datetime import UTC, datetime
 
-        from z4j_brain.persistence.models import ScheduleFire  # noqa: PLC0415
+        from z4j_brain.persistence.models import ScheduleFire
 
         _server, _port, db, _dispatcher = brain_grpc
         project_id = uuid.uuid4()
@@ -511,7 +522,8 @@ class TestAcknowledgeFireResult:
                     kind=ScheduleKind.CRON,
                     expression="0 * * * *",
                     timezone="UTC",
-                    args=[], kwargs={},
+                    args=[],
+                    kwargs={},
                     is_enabled=True,
                     last_fire_id=fire_id,
                     total_runs=0,
@@ -558,7 +570,9 @@ class TestEndToEndWiring:
 
     @pytest.mark.asyncio
     async def test_full_flow(
-        self, brain_grpc, scheduler_client: BrainClient,
+        self,
+        brain_grpc,
+        scheduler_client: BrainClient,
     ) -> None:
         _server, _port, db, _dispatcher = brain_grpc
         project_id = uuid.uuid4()
@@ -598,7 +612,8 @@ class TestEndToEndWiring:
                     kind=ScheduleKind.CRON,
                     expression="0 * * * *",
                     timezone="UTC",
-                    args=[], kwargs={},
+                    args=[],
+                    kwargs={},
                     is_enabled=True,
                 ),
             )

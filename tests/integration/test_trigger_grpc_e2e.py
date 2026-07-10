@@ -28,24 +28,21 @@ pytest.importorskip("grpc")
 pytest.importorskip("cryptography")
 pytest.importorskip("z4j_brain")
 
-from cryptography import x509  # noqa: E402
-from cryptography.hazmat.primitives import hashes, serialization  # noqa: E402
-from cryptography.hazmat.primitives.asymmetric import rsa  # noqa: E402
-from cryptography.x509.oid import NameOID  # noqa: E402
-
-from z4j_brain.scheduler_grpc.auth import mint_scheduler_cert  # noqa: E402
-from z4j_brain.scheduler_grpc.trigger_client import (  # noqa: E402
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
+from z4j_brain.scheduler_grpc.auth import mint_scheduler_cert
+from z4j_brain.scheduler_grpc.trigger_client import (
     TriggerScheduleClient,
 )
-from z4j_brain.settings import Settings as BrainSettings  # noqa: E402
-
-from z4j_scheduler.dispatch.fire import FireDispatcher  # noqa: E402
-from z4j_scheduler.settings import Settings as SchedulerSettings  # noqa: E402
-from z4j_scheduler.storage._models import FireResult  # noqa: E402
-from z4j_scheduler.storage.cache import ScheduleCache  # noqa: E402
-from z4j_scheduler.tick._entry import ScheduleEntry  # noqa: E402
-from z4j_scheduler.trigger_grpc.server import TriggerGrpcServer  # noqa: E402
-
+from z4j_brain.settings import Settings as BrainSettings
+from z4j_scheduler.dispatch.fire import FireDispatcher
+from z4j_scheduler.settings import Settings as SchedulerSettings
+from z4j_scheduler.storage._models import FireResult
+from z4j_scheduler.storage.cache import ScheduleCache
+from z4j_scheduler.tick._entry import ScheduleEntry
+from z4j_scheduler.trigger_grpc.server import TriggerGrpcServer
 
 # =====================================================================
 # Cert helpers
@@ -202,6 +199,7 @@ async def trigger_server(cert_bundle: dict):
     )
     dispatcher = FireDispatcher(client=fake_client, settings=sched_settings)
     from z4j_scheduler.leader import SingleInstanceLeaderGate
+
     server = TriggerGrpcServer(
         settings=sched_settings,
         cache=cache,
@@ -263,7 +261,9 @@ def _seed_entry(cache: ScheduleCache, *, enabled: bool = True) -> uuid.UUID:
 class TestTriggerHappyPath:
     @pytest.mark.asyncio
     async def test_returns_command_id(
-        self, trigger_server, trigger_client,
+        self,
+        trigger_server,
+        trigger_client,
     ) -> None:
         _server, _port, cache, fake = trigger_server
         schedule_id, entry = _seed_entry(cache)
@@ -284,7 +284,8 @@ class TestTriggerHappyPath:
 class TestTriggerNotInCache:
     @pytest.mark.asyncio
     async def test_unknown_schedule_returns_clean_error(
-        self, trigger_client,
+        self,
+        trigger_client,
     ) -> None:
         response = await trigger_client.trigger(
             schedule_id=uuid.uuid4(),
@@ -297,14 +298,17 @@ class TestTriggerNotInCache:
 class TestTriggerDisabled:
     @pytest.mark.asyncio
     async def test_disabled_schedule_returns_clean_error(
-        self, trigger_server, trigger_client,
+        self,
+        trigger_server,
+        trigger_client,
     ) -> None:
         _server, _port, cache, _fake = trigger_server
         schedule_id, entry = _seed_entry(cache, enabled=False)
         await cache.upsert(entry)
 
         response = await trigger_client.trigger(
-            schedule_id=schedule_id, user_id=None,
+            schedule_id=schedule_id,
+            user_id=None,
         )
         assert response.error_code == "schedule_disabled"
 
@@ -312,14 +316,17 @@ class TestTriggerDisabled:
 class TestServerStop:
     @pytest.mark.asyncio
     async def test_stop_drains_inflight_calls(
-        self, trigger_server, trigger_client,
+        self,
+        trigger_server,
+        trigger_client,
     ) -> None:
         # Just verify stop doesn't blow up after a successful call.
         _server, _port, cache, _fake = trigger_server
         schedule_id, entry = _seed_entry(cache)
         await cache.upsert(entry)
         response = await trigger_client.trigger(
-            schedule_id=schedule_id, user_id=None,
+            schedule_id=schedule_id,
+            user_id=None,
         )
         assert response.command_id
         # Server is stopped by the fixture teardown - if it crashes

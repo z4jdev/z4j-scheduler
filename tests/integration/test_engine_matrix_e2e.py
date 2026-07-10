@@ -53,7 +53,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-
 from z4j_bare.buffer import BufferStore
 from z4j_bare.dispatcher import CommandDispatcher
 from z4j_core.transport.frames import CommandFrame, CommandPayload
@@ -83,8 +82,14 @@ def _build_celery() -> _BuilderResult:
 
     class _FakeApp:
         def send_task(
-            self, name, *, args=(), kwargs=None,  # noqa: ANN001
-            eta=None, queue=None, priority=None,
+            self,
+            name,
+            *,
+            args=(),
+            kwargs=None,
+            eta=None,
+            queue=None,
+            priority=None,
         ):
             sent.append(
                 {
@@ -110,11 +115,11 @@ def _build_rq() -> _BuilderResult:
     from z4j_rq.engine import RqEngineAdapter
 
     class _FakeQueue:
-        def __init__(self, name):  # noqa: ANN001
+        def __init__(self, name):
             self.name = name
             self.submit_calls: list[dict] = []
 
-        def enqueue(self, name, *args, **kwargs):  # noqa: ANN001
+        def enqueue(self, name, *args, **kwargs):
             self.submit_calls.append(
                 {"name": name, "args": args, "kwargs": kwargs},
             )
@@ -128,7 +133,7 @@ def _build_rq() -> _BuilderResult:
         def __init__(self):
             self._queues: dict[str, _FakeQueue] = {}
 
-        def queue_for_name(self, name):  # noqa: ANN001
+        def queue_for_name(self, name):
             if name not in self._queues:
                 self._queues[name] = _FakeQueue(name)
             return self._queues[name]
@@ -143,7 +148,6 @@ def _build_dramatiq() -> _BuilderResult:
     pytest.importorskip("dramatiq")
     import dramatiq
     from dramatiq.brokers.stub import StubBroker
-
     from z4j_dramatiq.engine import DramatiqEngineAdapter
 
     saved = dramatiq.broker.global_broker
@@ -151,7 +155,7 @@ def _build_dramatiq() -> _BuilderResult:
     dramatiq.broker.global_broker = broker
 
     @dramatiq.actor(broker=broker, actor_name="matrix_task", queue_name="default")
-    def _matrix_task(*args, **kwargs):  # noqa: ANN001, ARG001
+    def _matrix_task(*args, **kwargs):
         return None
 
     adapter = DramatiqEngineAdapter(broker=broker)
@@ -166,20 +170,17 @@ def _build_dramatiq() -> _BuilderResult:
 def _build_huey() -> _BuilderResult:
     pytest.importorskip("huey")
     from huey import MemoryHuey
-
     from z4j_huey.engine import HueyEngineAdapter
 
     huey_inst = MemoryHuey("matrix-test", immediate=False)
 
     @huey_inst.task()
-    def matrix_task(*args, **kwargs):  # noqa: ANN001, ARG001
+    def matrix_task(*args, **kwargs):
         return None
 
     adapter = HueyEngineAdapter(huey=huey_inst)
     # Huey registers the task under "<module>.matrix_task".
-    full_name = next(
-        k for k in huey_inst._registry._registry if k.endswith(".matrix_task")
-    )
+    full_name = next(k for k in huey_inst._registry._registry if k.endswith(".matrix_task"))
     return "huey", adapter, full_name, None, None
 
 
@@ -191,7 +192,7 @@ def _build_arq() -> _BuilderResult:
         def __init__(self):
             self.calls: list[dict] = []
 
-        async def enqueue_job(self, name, *args, **kwargs):  # noqa: ANN001
+        async def enqueue_job(self, name, *args, **kwargs):
             self.calls.append(
                 {"name": name, "args": tuple(args), "kwargs": dict(kwargs)},
             )
@@ -203,7 +204,8 @@ def _build_arq() -> _BuilderResult:
 
     pool = _RecordingPool()
     adapter = ArqEngineAdapter(
-        redis_settings=pool, function_names=["myapp.t"],
+        redis_settings=pool,
+        function_names=["myapp.t"],
     )
     adapter._matrix_recorder = pool  # type: ignore[attr-defined]
     return "arq", adapter, "myapp.t", None, None
@@ -212,19 +214,16 @@ def _build_arq() -> _BuilderResult:
 def _build_taskiq() -> _BuilderResult:
     pytest.importorskip("taskiq")
     from taskiq import InMemoryBroker
-
     from z4j_taskiq.engine import TaskiqEngineAdapter
 
     broker = InMemoryBroker()
 
     @broker.task
-    async def matrix_task(*args, **kwargs):  # noqa: ANN001, ARG001
+    async def matrix_task(*args, **kwargs):
         return None
 
     adapter = TaskiqEngineAdapter(broker=broker)
-    full_name = next(
-        k for k in broker.get_all_tasks() if k.endswith(":matrix_task")
-    )
+    full_name = next(k for k in broker.get_all_tasks() if k.endswith(":matrix_task"))
 
     async def _setup():
         await broker.startup()
@@ -319,13 +318,11 @@ async def test_schedule_fire_lands_on_engine(
     entries = buf.drain(20)
     results = [e for e in entries if e.kind == "command_result"]
     assert len(results) == 1, (
-        f"engine={engine_name}: exactly one command_result expected, "
-        f"got {len(results)}"
+        f"engine={engine_name}: exactly one command_result expected, got {len(results)}"
     )
     parsed = json.loads(results[0].payload.decode("utf-8"))
     assert parsed["payload"]["status"] == "success", (
-        f"engine={engine_name}: dispatch failed - "
-        f"{parsed['payload'].get('error')!r}"
+        f"engine={engine_name}: dispatch failed - {parsed['payload'].get('error')!r}"
     )
     assert parsed["payload"]["result"]["engine"] == engine_name, (
         f"engine={engine_name}: result.engine field mismatch - "
@@ -365,7 +362,7 @@ async def test_schedule_fire_routes_to_correct_engine_in_mixed_deployment(
     A pre-1.1 bug (collapsing to "the only registered engine") would
     have silently mis-fired in mixed deployments.
     """
-    celery_name, celery_adapter, celery_task, _, _ = _build_celery()
+    celery_name, celery_adapter, _celery_task, _, _ = _build_celery()
     rq_name, rq_adapter, rq_task, _, _ = _build_rq()
 
     dispatcher = CommandDispatcher(

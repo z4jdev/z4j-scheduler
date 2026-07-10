@@ -7,13 +7,11 @@ semantics) is covered by the brain-side test_schedules_crud.py.
 
 from __future__ import annotations
 
-import json
 from unittest.mock import patch
 
 import pytest
 from z4j_scheduler.declarative import ScheduleSpec, reconcile, reconcile_sync
 from z4j_scheduler.declarative._reconciler import _to_imported
-
 
 # =====================================================================
 # ScheduleSpec → ImportedSchedule conversion
@@ -71,12 +69,14 @@ class TestDictInput:
         # Verify the dict-form is accepted when key matches name.
         # Use a fake httpx so we don't actually hit the network.
         spec = ScheduleSpec(
-            name="hourly", engine="celery", kind="cron",
-            expression="0 * * * *", task_name="t",
+            name="hourly",
+            engine="celery",
+            kind="cron",
+            expression="0 * * * *",
+            task_name="t",
         )
         with _fake_httpx_returning(
-            {"inserted": 1, "updated": 0, "unchanged": 0,
-             "failed": 0, "deleted": 0},
+            {"inserted": 1, "updated": 0, "unchanged": 0, "failed": 0, "deleted": 0},
         ) as recorded:
             await reconcile(
                 schedules={"hourly": spec},
@@ -89,8 +89,11 @@ class TestDictInput:
     @pytest.mark.asyncio
     async def test_dict_with_mismatched_key_rejected(self) -> None:
         spec = ScheduleSpec(
-            name="actual-name", engine="celery", kind="cron",
-            expression="0 * * * *", task_name="t",
+            name="actual-name",
+            engine="celery",
+            kind="cron",
+            expression="0 * * * *",
+            task_name="t",
         )
         with pytest.raises(ValueError, match="dict key"):
             await reconcile(
@@ -110,12 +113,14 @@ class TestWireFormat:
     @pytest.mark.asyncio
     async def test_sends_replace_for_source_mode(self) -> None:
         spec = ScheduleSpec(
-            name="x", engine="celery", kind="cron",
-            expression="0 * * * *", task_name="t",
+            name="x",
+            engine="celery",
+            kind="cron",
+            expression="0 * * * *",
+            task_name="t",
         )
         with _fake_httpx_returning(
-            {"inserted": 1, "updated": 0, "unchanged": 0,
-             "failed": 0, "deleted": 0},
+            {"inserted": 1, "updated": 0, "unchanged": 0, "failed": 0, "deleted": 0},
         ) as recorded:
             await reconcile(
                 schedules=[spec],
@@ -136,12 +141,14 @@ class TestWireFormat:
     @pytest.mark.asyncio
     async def test_url_targets_import_endpoint(self) -> None:
         spec = ScheduleSpec(
-            name="x", engine="celery", kind="cron",
-            expression="0 * * * *", task_name="t",
+            name="x",
+            engine="celery",
+            kind="cron",
+            expression="0 * * * *",
+            task_name="t",
         )
         with _fake_httpx_returning(
-            {"inserted": 1, "updated": 0, "unchanged": 0,
-             "failed": 0, "deleted": 0},
+            {"inserted": 1, "updated": 0, "unchanged": 0, "failed": 0, "deleted": 0},
         ) as recorded:
             await reconcile(
                 schedules=[spec],
@@ -156,19 +163,25 @@ class TestWireFormat:
     @pytest.mark.asyncio
     async def test_404_response_raises_clear_error(self) -> None:
         spec = ScheduleSpec(
-            name="x", engine="celery", kind="cron",
-            expression="0 * * * *", task_name="t",
+            name="x",
+            engine="celery",
+            kind="cron",
+            expression="0 * * * *",
+            task_name="t",
         )
-        with _fake_httpx_returning(
-            response_status=404, response_json={},
+        with (
+            _fake_httpx_returning(
+                response_status=404,
+                response_json={},
+            ),
+            pytest.raises(RuntimeError, match="schedules:import"),
         ):
-            with pytest.raises(RuntimeError, match="schedules:import"):
-                await reconcile(
-                    schedules=[spec],
-                    project="acme",
-                    source="src",
-                    brain_url="http://brain",
-                )
+            await reconcile(
+                schedules=[spec],
+                project="acme",
+                source="src",
+                brain_url="http://brain",
+            )
 
 
 # =====================================================================
@@ -179,12 +192,18 @@ class TestWireFormat:
 class TestHashStability:
     def test_same_spec_same_hash(self) -> None:
         a = ScheduleSpec(
-            name="x", engine="celery", kind="cron",
-            expression="0 * * * *", task_name="t",
+            name="x",
+            engine="celery",
+            kind="cron",
+            expression="0 * * * *",
+            task_name="t",
         )
         b = ScheduleSpec(
-            name="x", engine="celery", kind="cron",
-            expression="0 * * * *", task_name="t",
+            name="x",
+            engine="celery",
+            kind="cron",
+            expression="0 * * * *",
+            task_name="t",
         )
         ia = _to_imported(a, project="p", source="s")
         ib = _to_imported(b, project="p", source="s")
@@ -193,12 +212,18 @@ class TestHashStability:
 
     def test_changing_expression_changes_hash(self) -> None:
         a = ScheduleSpec(
-            name="x", engine="celery", kind="cron",
-            expression="0 * * * *", task_name="t",
+            name="x",
+            engine="celery",
+            kind="cron",
+            expression="0 * * * *",
+            task_name="t",
         )
         b = ScheduleSpec(
-            name="x", engine="celery", kind="cron",
-            expression="*/15 * * * *", task_name="t",
+            name="x",
+            engine="celery",
+            kind="cron",
+            expression="*/15 * * * *",
+            task_name="t",
         )
         ia = _to_imported(a, project="p", source="s")
         ib = _to_imported(b, project="p", source="s")
@@ -213,12 +238,14 @@ class TestHashStability:
 class TestReconcileSync:
     def test_runs_event_loop(self) -> None:
         spec = ScheduleSpec(
-            name="x", engine="celery", kind="cron",
-            expression="0 * * * *", task_name="t",
+            name="x",
+            engine="celery",
+            kind="cron",
+            expression="0 * * * *",
+            task_name="t",
         )
         with _fake_httpx_returning(
-            {"inserted": 1, "updated": 0, "unchanged": 0,
-             "failed": 0, "deleted": 0},
+            {"inserted": 1, "updated": 0, "unchanged": 0, "failed": 0, "deleted": 0},
         ):
             summary = reconcile_sync(
                 schedules=[spec],
@@ -258,8 +285,7 @@ def _fake_httpx_returning(
     we accumulate call metadata into so tests can assert on it.
     """
     body = response_json or {}
-    recorded: dict = {"calls": 0, "last_url": None, "last_body": None,
-                      "last_headers": None}
+    recorded: dict = {"calls": 0, "last_url": None, "last_body": None, "last_headers": None}
 
     class _Client:
         def __init__(self, *_args, **_kw):
@@ -271,7 +297,7 @@ def _fake_httpx_returning(
         async def __aexit__(self, *_args):
             return None
 
-        async def post(self, url, json=None, headers=None):  # noqa: ARG002
+        async def post(self, url, json=None, headers=None):
             recorded["calls"] += 1
             recorded["last_url"] = url
             recorded["last_body"] = json

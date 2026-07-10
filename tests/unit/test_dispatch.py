@@ -125,6 +125,7 @@ class FakeBrainClient:
         fire_id: UUID,
         scheduled_for: datetime,
         fired_at: datetime,
+        triggered_by_user_id: str = "",
     ) -> FireResult:
         self.fire_calls.append(
             {
@@ -132,12 +133,15 @@ class FakeBrainClient:
                 "fire_id": fire_id,
                 "scheduled_for": scheduled_for,
                 "fired_at": fired_at,
+                "triggered_by_user_id": triggered_by_user_id,
             },
         )
         if not self.fire_responses:
             return FireResult(
-                command_id=uuid4(), error_code=None,
-                error_message=None, buffered=False,
+                command_id=uuid4(),
+                error_code=None,
+                error_message=None,
+                buffered=False,
             )
         head = self.fire_responses.pop(0)
         if isinstance(head, Exception):
@@ -155,8 +159,10 @@ class FakeBrainClient:
     ) -> None:
         self.ack_calls.append(
             _RecordedAck(
-                fire_id=fire_id, command_id=command_id,
-                status=status, error=error,
+                fire_id=fire_id,
+                command_id=command_id,
+                status=status,
+                error=error,
             ),
         )
         _ = new_task_id  # not asserted in current tests; preserved for future
@@ -206,8 +212,10 @@ class TestDispatchSuccess:
         client = FakeBrainClient(
             fire_responses=[
                 FireResult(
-                    command_id=cid, error_code=None,
-                    error_message=None, buffered=False,
+                    command_id=cid,
+                    error_code=None,
+                    error_message=None,
+                    buffered=False,
                 ),
             ],
         )
@@ -232,8 +240,10 @@ class TestDispatchSuccess:
         client = FakeBrainClient(
             fire_responses=[
                 FireResult(
-                    command_id=None, error_code=None,
-                    error_message=None, buffered=True,
+                    command_id=None,
+                    error_code=None,
+                    error_message=None,
+                    buffered=True,
                 ),
             ],
         )
@@ -249,13 +259,16 @@ class TestDispatchSuccess:
 @pytest.mark.asyncio
 class TestDispatchFailure:
     async def test_brain_error_raises_fire_dispatch_error(
-        self, settings: Settings,
+        self,
+        settings: Settings,
     ) -> None:
         client = FakeBrainClient(
             fire_responses=[
                 FireResult(
-                    command_id=None, error_code="agent_offline",
-                    error_message="no agent online", buffered=False,
+                    command_id=None,
+                    error_code="agent_offline",
+                    error_message="no agent online",
+                    buffered=False,
                 ),
             ],
         )
@@ -273,14 +286,17 @@ class TestDispatchFailure:
 @pytest.mark.asyncio
 class TestDispatchRetry:
     async def test_transient_error_retried_then_succeeds(
-        self, settings: Settings,
+        self,
+        settings: Settings,
     ) -> None:
         client = FakeBrainClient(
             fire_responses=[
                 _FakeAioRpcError(grpc.StatusCode.UNAVAILABLE),
                 FireResult(
-                    command_id=uuid4(), error_code=None,
-                    error_message=None, buffered=False,
+                    command_id=uuid4(),
+                    error_code=None,
+                    error_message=None,
+                    buffered=False,
                 ),
             ],
         )
@@ -295,7 +311,8 @@ class TestDispatchRetry:
         assert client.fire_calls[0]["fire_id"] == client.fire_calls[1]["fire_id"]
 
     async def test_transient_error_giving_up_after_max(
-        self, settings: Settings,
+        self,
+        settings: Settings,
     ) -> None:
         # fire_retry_max=2 means 1 + 2 = 3 attempts max.
         client = FakeBrainClient(
@@ -315,7 +332,8 @@ class TestDispatchRetry:
         assert len(client.fire_calls) == 3
 
     async def test_permanent_error_not_retried(
-        self, settings: Settings,
+        self,
+        settings: Settings,
     ) -> None:
         client = FakeBrainClient(
             fire_responses=[
@@ -335,15 +353,18 @@ class TestDispatchRetry:
 @pytest.mark.asyncio
 class TestAckBestEffort:
     async def test_ack_failure_does_not_raise(
-        self, settings: Settings,
+        self,
+        settings: Settings,
     ) -> None:
         """If brain.acknowledge_result raises, the dispatcher swallows
         and the engine continues."""
         client = FakeBrainClient(
             fire_responses=[
                 FireResult(
-                    command_id=uuid4(), error_code=None,
-                    error_message=None, buffered=False,
+                    command_id=uuid4(),
+                    error_code=None,
+                    error_message=None,
+                    buffered=False,
                 ),
             ],
             ack_should_raise=True,
@@ -355,3 +376,139 @@ class TestAckBestEffort:
             scheduled_for=datetime(2026, 4, 26, 15, 0, tzinfo=UTC),
         )
         assert len(client.ack_calls) == 1
+
+
+@pytest.mark.asyncio
+class TestFireVariance:
+    """A3: the fire-variance histogram is observed at dispatch, sliced by
+    engine + project, with a bounded per-schedule label."""
+
+    @staticmethod
+    def _variance_count(*, schedule_id: str, engine: str, project: str) -> float:
+        from z4j_scheduler.observability import metrics as m
+
+        return (
+            m.default_registry.get_sample_value(
+                "z4j_scheduler_fire_variance_seconds_count",
+                {"schedule_id": schedule_id, "engine": engine, "project": project},
+            )
+            or 0.0
+        )
+
+    async def test_variance_observed_with_per_schedule_label(
+        self,
+        settings: Settings,
+    ) -> None:
+        client = FakeBrainClient(
+            fire_responses=[
+                FireResult(
+                    command_id=uuid4(),
+                    error_code=None,
+                    error_message=None,
+                    buffered=False,
+                ),
+            ],
+        )
+        dispatcher = FireDispatcher(client=client, settings=settings)  # type: ignore[arg-type]
+        sid, pid = uuid4(), uuid4()
+        when = datetime(2026, 4, 26, 15, 0, tzinfo=UTC)
+
+        before = self._variance_count(
+            schedule_id=str(sid),
+            engine="celery",
+            project=str(pid),
+        )
+        await dispatcher.dispatch(
+            schedule_id=sid,
+            scheduled_for=when,
+            engine="celery",
+            project_id=pid,
+            project_schedule_count=5,
+        )
+        after = self._variance_count(
+            schedule_id=str(sid),
+            engine="celery",
+            project=str(pid),
+        )
+        assert after == before + 1
+
+    async def test_per_schedule_label_omitted_for_large_project(
+        self,
+        settings: Settings,
+    ) -> None:
+        # >= FIRE_VARIANCE_SCHEDULE_ID_MAX schedules -> schedule_id label
+        # is empty so cardinality stays bounded; the sample still lands
+        # under the engine + project labels.
+        client = FakeBrainClient(
+            fire_responses=[
+                FireResult(
+                    command_id=uuid4(),
+                    error_code=None,
+                    error_message=None,
+                    buffered=False,
+                ),
+            ],
+        )
+        dispatcher = FireDispatcher(client=client, settings=settings)  # type: ignore[arg-type]
+        sid, pid = uuid4(), uuid4()
+        when = datetime(2026, 4, 26, 15, 0, tzinfo=UTC)
+
+        empty_before = self._variance_count(
+            schedule_id="",
+            engine="celery",
+            project=str(pid),
+        )
+        await dispatcher.dispatch(
+            schedule_id=sid,
+            scheduled_for=when,
+            engine="celery",
+            project_id=pid,
+            project_schedule_count=250,
+        )
+        # The per-schedule series must NOT exist; the empty-label series does.
+        assert (
+            self._variance_count(
+                schedule_id=str(sid),
+                engine="celery",
+                project=str(pid),
+            )
+            == 0.0
+        )
+        assert (
+            self._variance_count(
+                schedule_id="",
+                engine="celery",
+                project=str(pid),
+            )
+            == empty_before + 1
+        )
+
+
+@pytest.mark.asyncio
+class TestTriggeredByAttribution:
+    """A5: trigger_now forwards the operator's user id on the wire;
+    the cadence dispatch path leaves it empty."""
+
+    async def test_trigger_now_forwards_user_id(
+        self,
+        settings: Settings,
+    ) -> None:
+        client = FakeBrainClient()
+        dispatcher = FireDispatcher(client=client, settings=settings)  # type: ignore[arg-type]
+        await dispatcher.trigger_now(
+            schedule_id=uuid4(),
+            triggered_by_user_id="user-123",
+        )
+        assert client.fire_calls[0]["triggered_by_user_id"] == "user-123"
+
+    async def test_dispatch_leaves_user_id_empty(
+        self,
+        settings: Settings,
+    ) -> None:
+        client = FakeBrainClient()
+        dispatcher = FireDispatcher(client=client, settings=settings)  # type: ignore[arg-type]
+        await dispatcher.dispatch(
+            schedule_id=uuid4(),
+            scheduled_for=datetime(2026, 4, 26, 15, 0, tzinfo=UTC),
+        )
+        assert client.fire_calls[0]["triggered_by_user_id"] == ""

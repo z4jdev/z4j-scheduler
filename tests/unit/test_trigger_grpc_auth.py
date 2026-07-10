@@ -18,7 +18,7 @@ import pytest
 # Python and is safe to test without grpcio actually running.
 pytest.importorskip("grpc")
 
-from z4j_scheduler.trigger_grpc.auth import _enforce_cn  # noqa: E402
+from z4j_scheduler.trigger_grpc.auth import _enforce_cn
 
 
 class _Ctx:
@@ -33,7 +33,7 @@ class _Ctx:
     def auth_context(self) -> dict:
         return self._data
 
-    async def abort(self, code, msg) -> None:  # noqa: ANN001, D401
+    async def abort(self, code, msg) -> None:
         self.aborted = True
         self.abort_msg = msg
         # Real grpc abort raises; mirror so the abort path is observable
@@ -56,6 +56,15 @@ class TestEnforceCnAuthContextShape:
     async def test_san_dns_prefix_stripped(self) -> None:
         ctx = _Ctx({"x509_subject_alternative_name": [b"DNS:z4j-brain"]})
         await _enforce_cn(ctx, frozenset({"z4j-brain"}))  # type: ignore[arg-type]
+        assert not ctx.aborted
+
+    async def test_san_ip_prefix_stripped(self) -> None:
+        # Regression: the interceptor used to strip ONLY "DNS:", so an
+        # IP-SAN brain cert ("IP:10.0.0.5") never matched a bare
+        # "10.0.0.5" in the allow-list and a legitimate brain was
+        # rejected. Mirror the brain-side _normalise_cn (DNS/IP/URI/email).
+        ctx = _Ctx({"x509_subject_alternative_name": [b"IP:10.0.0.5"]})
+        await _enforce_cn(ctx, frozenset({"10.0.0.5"}))  # type: ignore[arg-type]
         assert not ctx.aborted
 
     async def test_unknown_cn_aborts(self) -> None:

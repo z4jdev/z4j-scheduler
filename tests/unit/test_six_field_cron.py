@@ -30,7 +30,6 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
-
 from z4j_scheduler.exporters import celery as celery_exporter
 from z4j_scheduler.exporters._client import ExportedSchedule
 from z4j_scheduler.importers._core import ImportedSchedule
@@ -112,9 +111,11 @@ class TestCeleryExporterDegradesSixField:
         )
 
     def test_six_field_renders_warning_comment(self) -> None:
-        out = celery_exporter.render([
-            self._exported("0 * * * * 30"),
-        ])
+        out = celery_exporter.render(
+            [
+                self._exported("0 * * * * 30"),
+            ]
+        )
         # Operator MUST see the seconds-loss warning, otherwise
         # they pasted a schedule into celery that runs differently.
         assert "seconds-precision" in out
@@ -122,14 +123,17 @@ class TestCeleryExporterDegradesSixField:
         assert "minute-resolution only" in out
 
     def test_six_field_drops_seconds_in_crontab_call(self) -> None:
-        out = celery_exporter.render([
-            self._exported("0 3 * * * 30"),
-        ])
+        out = celery_exporter.render(
+            [
+                self._exported("0 3 * * * 30"),
+            ]
+        )
         # The crontab() call must contain the 5-field shape; the
         # seconds field MUST NOT appear inside crontab(...).
-        assert "crontab(minute=\"0\", hour=\"3\"" in out
+        assert 'crontab(minute="0", hour="3"' in out
         # And the rendered file must still parse as Python.
         import ast
+
         try:
             ast.parse(out)
         except SyntaxError as exc:

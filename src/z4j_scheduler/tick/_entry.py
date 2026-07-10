@@ -69,6 +69,11 @@ class ScheduleEntry:
     # (Prometheus, dashboard charts, log lines). Optional so older
     # WatchSchedules events that pre-date the field still convert.
     name: str = ""
+    # A3: engine label for the fire-variance histogram. Sourced from the
+    # gRPC Schedule.engine field (the tick engine does not route by it --
+    # it is carried only for observability). Optional/defaulted so a
+    # pre-field WatchSchedules event still converts.
+    engine: str = ""
     next_fire_at: datetime | None = field(default=None, init=False)
 
 

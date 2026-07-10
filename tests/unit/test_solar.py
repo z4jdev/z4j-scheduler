@@ -38,7 +38,6 @@ from z4j_scheduler.tick.solar import (
 )
 from z4j_scheduler.verify.shadow_comparator import predict_fires
 
-
 # =====================================================================
 # Expression parser
 # =====================================================================
@@ -137,7 +136,9 @@ class TestNextSolarFire:
         # max_days_ahead and return None.
         anchor = datetime(2026, 6, 21, 0, 0, 0, tzinfo=UTC)
         result = next_solar_fire(
-            "sunrise:89:0", anchor, max_days_ahead=30,
+            "sunrise:89:0",
+            anchor,
+            max_days_ahead=30,
         )
         # Either None (no event in 30 days) or a real datetime if
         # astral somehow finds one - either is acceptable; the
@@ -182,16 +183,23 @@ class TestShadowComparatorPredictsSolar:
 
     def test_disabled_solar_schedule_emits_nothing(self) -> None:
         sched = ImportedSchedule(
-            project_slug="p", name="off",
-            engine="celery", kind="solar",  # type: ignore[arg-type]
+            project_slug="p",
+            name="off",
+            engine="celery",
+            kind="solar",  # type: ignore[arg-type]
             expression="sunset:0:0",
-            task_name="app.t", timezone="UTC",
-            args=[], kwargs={}, is_enabled=False,
+            task_name="app.t",
+            timezone="UTC",
+            args=[],
+            kwargs={},
+            is_enabled=False,
             source="test",
         )
         start = datetime(2026, 4, 27, tzinfo=UTC)
         fires = predict_fires(
-            [sched], window_start=start, window_end=start + timedelta(days=7),
+            [sched],
+            window_start=start,
+            window_end=start + timedelta(days=7),
         )
         assert fires == []
 
@@ -199,18 +207,25 @@ class TestShadowComparatorPredictsSolar:
         self,
     ) -> None:
         sched = ImportedSchedule(
-            project_slug="p", name="bad",
-            engine="celery", kind="solar",  # type: ignore[arg-type]
+            project_slug="p",
+            name="bad",
+            engine="celery",
+            kind="solar",  # type: ignore[arg-type]
             expression="bogus",  # missing :lat:lon
-            task_name="app.t", timezone="UTC",
-            args=[], kwargs={}, is_enabled=True,
+            task_name="app.t",
+            timezone="UTC",
+            args=[],
+            kwargs={},
+            is_enabled=True,
             source="test",
         )
         start = datetime(2026, 4, 27, tzinfo=UTC)
         # Comparator must not raise on malformed input - the
         # importer is responsible for syntactic validation.
         fires = predict_fires(
-            [sched], window_start=start, window_end=start + timedelta(days=7),
+            [sched],
+            window_start=start,
+            window_end=start + timedelta(days=7),
         )
         assert fires == []
 
@@ -240,9 +255,11 @@ class TestCeleryExporterRendersSolar:
         )
 
     def test_imports_solar_when_present(self) -> None:
-        out = celery_exporter.render([
-            self._exported("sunrise:37.7749:-122.4194"),
-        ])
+        out = celery_exporter.render(
+            [
+                self._exported("sunrise:37.7749:-122.4194"),
+            ]
+        )
         # The ``solar`` symbol must be imported alongside crontab so
         # the rendered Python module evaluates without a NameError.
         assert "from celery.schedules import crontab, solar" in out
@@ -252,22 +269,31 @@ class TestCeleryExporterRendersSolar:
         from z4j_scheduler.exporters._client import ExportedSchedule
 
         cron_only = ExportedSchedule(
-            id="x", name="hourly",
-            engine="celery", kind="cron",
+            id="x",
+            name="hourly",
+            engine="celery",
+            kind="cron",
             expression="0 * * * *",
-            task_name="app.t", timezone="UTC",
-            queue=None, args=[], kwargs={},
-            catch_up="skip", is_enabled=True,
-            scheduler="z4j-scheduler", source="dashboard",
+            task_name="app.t",
+            timezone="UTC",
+            queue=None,
+            args=[],
+            kwargs={},
+            catch_up="skip",
+            is_enabled=True,
+            scheduler="z4j-scheduler",
+            source="dashboard",
         )
         out = celery_exporter.render([cron_only])
         assert "from celery.schedules import crontab\n" in out
         assert ", solar" not in out
 
     def test_renders_solar_call_with_event_and_coords(self) -> None:
-        out = celery_exporter.render([
-            self._exported("sunset:51.5074:-0.1278"),
-        ])
+        out = celery_exporter.render(
+            [
+                self._exported("sunset:51.5074:-0.1278"),
+            ]
+        )
         assert "solar('sunset', 51.5074, -0.1278)" in out
 
     def test_unparseable_expression_renders_comment(self) -> None:

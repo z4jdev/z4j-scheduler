@@ -46,8 +46,8 @@ def read_rq_scheduler(
     timezones - we assume UTC and let the operator override later.
     """
     try:
-        from redis import Redis  # noqa: PLC0415
-        from rq_scheduler import Scheduler  # noqa: PLC0415
+        from redis import Redis
+        from rq_scheduler import Scheduler
     except ImportError as exc:
         raise RuntimeError(
             "rq importer requires `pip install redis rq-scheduler`",
@@ -65,8 +65,7 @@ def read_rq_scheduler(
         scheduler = Scheduler(connection=redis_conn)
     except Exception as exc:
         raise RuntimeError(
-            f"could not connect to Redis ({_redact_redis_url(redis_url)}): "
-            f"{type(exc).__name__}",
+            f"could not connect to Redis ({_redact_redis_url(redis_url)}): {type(exc).__name__}",
         ) from None  # ``from None`` chops the original exception
         # so its message (which may also embed the URL) doesn't
         # leak into the chained traceback.
@@ -83,7 +82,8 @@ def read_rq_scheduler(
         except _UnsupportedJobError as exc:
             logger.warning(
                 "z4j.scheduler.importers.rq: skipping %r - %s",
-                job.id, exc,
+                job.id,
+                exc,
             )
             continue
         if sched is not None:
@@ -113,11 +113,11 @@ def _redact_redis_url(url: str) -> str:
     present; passes the URL through unchanged when it isn't (no
     secrets, no work).
     """
-    from urllib.parse import urlparse, urlunparse  # noqa: PLC0415
+    from urllib.parse import urlparse, urlunparse
 
     try:
         parsed = urlparse(url)
-    except Exception:  # noqa: BLE001
+    except Exception:
         return "<unparseable redis url>"
     if not parsed.password:
         return url
@@ -157,10 +157,7 @@ def _job_to_schedule(
     args = list(job.args or ())
     kwargs = dict(job.kwargs or {})
 
-    queue = (
-        getattr(job, "origin", None)
-        or default_queue
-    )
+    queue = getattr(job, "origin", None) or default_queue
 
     if cron_string:
         return ImportedSchedule(
@@ -203,11 +200,7 @@ def _job_to_schedule(
             "no cron_string, interval, or scheduled_at - job is not a "
             "recognised rq-scheduler shape",
         )
-    expression = (
-        schedule_at.isoformat()
-        if hasattr(schedule_at, "isoformat")
-        else str(schedule_at)
-    )
+    expression = schedule_at.isoformat() if hasattr(schedule_at, "isoformat") else str(schedule_at)
     return ImportedSchedule(
         project_slug=project_slug,
         name=str(job.id),

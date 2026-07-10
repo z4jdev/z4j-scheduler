@@ -10,13 +10,11 @@ the security audit.
 from __future__ import annotations
 
 import sys
-import textwrap
 from types import ModuleType
+from typing import ClassVar
 
 import pytest
-
 from z4j_scheduler.exporters._client import ExportedSchedule
-
 
 # =====================================================================
 # Huey
@@ -27,7 +25,6 @@ class TestHueyImporter:
     def test_reads_periodic_tasks_from_real_huey_instance(self) -> None:
         pytest.importorskip("huey")
         from huey import MemoryHuey, crontab
-
         from z4j_scheduler.importers.huey import read_huey_app
 
         # Build a Huey instance with a periodic task in a synthetic
@@ -79,33 +76,48 @@ class TestHueyExporter:
         from z4j_scheduler.exporters.huey import render
 
         sched = ExportedSchedule(
-            id="x", name="hourly", engine="huey", kind="cron",
+            id="x",
+            name="hourly",
+            engine="huey",
+            kind="cron",
             expression="0 * * * *",
             task_name="myapp.tasks.hourly",
-            timezone="UTC", queue=None, args=[], kwargs={},
+            timezone="UTC",
+            queue=None,
+            args=[],
+            kwargs={},
             is_enabled=True,
         )
         out = render([sched])
         assert "@huey.periodic_task" in out
         assert "crontab(" in out
-        assert "minute=\"0\"" in out
-        assert "hour=\"*\"" in out
+        assert 'minute="0"' in out
+        assert 'hour="*"' in out
 
     def test_disabled_schedule_renders_as_comment(self) -> None:
         from z4j_scheduler.exporters.huey import render
 
         sched = ExportedSchedule(
-            id="x", name="off", engine="huey", kind="cron",
-            expression="0 * * * *", task_name="t",
-            timezone="UTC", queue=None, args=[], kwargs={},
+            id="x",
+            name="off",
+            engine="huey",
+            kind="cron",
+            expression="0 * * * *",
+            task_name="t",
+            timezone="UTC",
+            queue=None,
+            args=[],
+            kwargs={},
             is_enabled=False,
         )
         out = render([sched])
         assert "DISABLED in z4j" in out
         # No active periodic_task line.
         active_lines = [
-            line for line in out.splitlines()
-            if line.strip() and not line.lstrip().startswith("#")
+            line
+            for line in out.splitlines()
+            if line.strip()
+            and not line.lstrip().startswith("#")
             and "register_schedules" not in line
             and "from huey" not in line
             and "def " not in line
@@ -116,9 +128,16 @@ class TestHueyExporter:
         from z4j_scheduler.exporters.huey import render
 
         sched = ExportedSchedule(
-            id="x", name="ival", engine="huey", kind="interval",
-            expression="60s", task_name="t",
-            timezone="UTC", queue=None, args=[], kwargs={},
+            id="x",
+            name="ival",
+            engine="huey",
+            kind="interval",
+            expression="60s",
+            task_name="t",
+            timezone="UTC",
+            queue=None,
+            args=[],
+            kwargs={},
             is_enabled=True,
         )
         out = render([sched])
@@ -128,16 +147,24 @@ class TestHueyExporter:
         from z4j_scheduler.exporters.huey import render
 
         sched = ExportedSchedule(
-            id="x", name="bad", engine="huey", kind="cron",
-            expression="0 `whoami` * * *", task_name="t",
-            timezone="UTC", queue=None, args=[], kwargs={},
+            id="x",
+            name="bad",
+            engine="huey",
+            kind="cron",
+            expression="0 `whoami` * * *",
+            task_name="t",
+            timezone="UTC",
+            queue=None,
+            args=[],
+            kwargs={},
             is_enabled=True,
         )
         out = render([sched])
         assert "REFUSED" in out
         # No crontab() call rendered for this schedule.
         active = [
-            line for line in out.splitlines()
+            line
+            for line in out.splitlines()
             if "crontab(" in line and not line.lstrip().startswith("#")
         ]
         # The only allowed crontab() reference comes from the
@@ -155,14 +182,13 @@ class TestArqImporter:
     def test_reads_cron_jobs_from_worker_settings(self) -> None:
         pytest.importorskip("arq")
         from arq import cron
-
         from z4j_scheduler.importers.arq import read_arq_settings
 
-        async def my_task(ctx) -> None:  # noqa: ANN001
+        async def my_task(ctx) -> None:
             return None
 
         class _WorkerSettings:
-            cron_jobs = [
+            cron_jobs: ClassVar[list] = [
                 cron(my_task, name="daily-greeting", hour=8, minute=0),
                 cron(my_task, name="bursts", hour={9, 17}, minute=0),
             ]
@@ -191,7 +217,7 @@ class TestArqImporter:
         from z4j_scheduler.importers.arq import read_arq_settings
 
         class _WorkerSettings:
-            cron_jobs = []
+            cron_jobs: ClassVar[list] = []
 
         mod = ModuleType("z4j_test_arq_empty")
         mod.WorkerSettings = _WorkerSettings
@@ -211,15 +237,22 @@ class TestArqExporter:
         from z4j_scheduler.exporters.arq import render
 
         sched = ExportedSchedule(
-            id="x", name="daily", engine="arq", kind="cron",
-            expression="0 8 * * *", task_name="myapp.tasks.daily",
-            timezone="UTC", queue=None, args=[], kwargs={},
+            id="x",
+            name="daily",
+            engine="arq",
+            kind="cron",
+            expression="0 8 * * *",
+            task_name="myapp.tasks.daily",
+            timezone="UTC",
+            queue=None,
+            args=[],
+            kwargs={},
             is_enabled=True,
         )
         out = render([sched])
         assert "from arq import cron" in out
         assert "build_cron_jobs" in out
-        assert "cron(by_name[\"daily\"]" in out
+        assert 'cron(by_name["daily"]' in out
         # Field translation: "*" → None, "0" → 0, "8" → 8.
         assert "minute=0" in out
         assert "hour=8" in out
@@ -229,9 +262,16 @@ class TestArqExporter:
         from z4j_scheduler.exporters.arq import render
 
         sched = ExportedSchedule(
-            id="x", name="bursts", engine="arq", kind="cron",
-            expression="0 9,17 * * *", task_name="t",
-            timezone="UTC", queue=None, args=[], kwargs={},
+            id="x",
+            name="bursts",
+            engine="arq",
+            kind="cron",
+            expression="0 9,17 * * *",
+            task_name="t",
+            timezone="UTC",
+            queue=None,
+            args=[],
+            kwargs={},
             is_enabled=True,
         )
         out = render([sched])
@@ -248,7 +288,6 @@ class TestTaskiqImporter:
     async def test_reads_cron_label_from_broker(self) -> None:
         pytest.importorskip("taskiq")
         from taskiq import InMemoryBroker
-
         from z4j_scheduler.importers.taskiq import read_taskiq_broker
 
         broker = InMemoryBroker()
@@ -279,7 +318,6 @@ class TestTaskiqImporter:
     async def test_reads_one_shot_time_label(self) -> None:
         pytest.importorskip("taskiq")
         from taskiq import InMemoryBroker
-
         from z4j_scheduler.importers.taskiq import read_taskiq_broker
 
         broker = InMemoryBroker()
@@ -309,13 +347,20 @@ class TestTaskiqExporter:
         from z4j_scheduler.exporters.taskiq import render
 
         sched = ExportedSchedule(
-            id="x", name="nightly", engine="taskiq", kind="cron",
-            expression="0 3 * * *", task_name="myapp.tasks.cleanup",
-            timezone="UTC", queue=None, args=[], kwargs={},
+            id="x",
+            name="nightly",
+            engine="taskiq",
+            kind="cron",
+            expression="0 3 * * *",
+            task_name="myapp.tasks.cleanup",
+            timezone="UTC",
+            queue=None,
+            args=[],
+            kwargs={},
             is_enabled=True,
         )
         out = render([sched])
-        assert "by_name.get(\"myapp.tasks.cleanup\")" in out
+        assert 'by_name.get("myapp.tasks.cleanup")' in out
         assert "labels['schedule']" in out
         assert '"cron": "0 3 * * *"' in out
 
@@ -323,10 +368,16 @@ class TestTaskiqExporter:
         from z4j_scheduler.exporters.taskiq import render
 
         sched = ExportedSchedule(
-            id="x", name="ny", engine="taskiq", kind="one_shot",
+            id="x",
+            name="ny",
+            engine="taskiq",
+            kind="one_shot",
             expression="2026-12-31T23:59:59Z",
             task_name="myapp.tasks.newyear",
-            timezone="UTC", queue=None, args=[], kwargs={},
+            timezone="UTC",
+            queue=None,
+            args=[],
+            kwargs={},
             is_enabled=True,
         )
         out = render([sched])
@@ -336,9 +387,16 @@ class TestTaskiqExporter:
         from z4j_scheduler.exporters.taskiq import render
 
         sched = ExportedSchedule(
-            id="x", name="ival", engine="taskiq", kind="interval",
-            expression="60s", task_name="t",
-            timezone="UTC", queue=None, args=[], kwargs={},
+            id="x",
+            name="ival",
+            engine="taskiq",
+            kind="interval",
+            expression="60s",
+            task_name="t",
+            timezone="UTC",
+            queue=None,
+            args=[],
+            kwargs={},
             is_enabled=True,
         )
         out = render([sched])

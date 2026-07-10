@@ -82,9 +82,7 @@ class WatchStream:
         client: BrainClient,
         cache: ScheduleCache,
         project_id: UUID | None = None,
-        full_resync_interval_seconds: float = (
-            _DEFAULT_FULL_RESYNC_INTERVAL_SECONDS
-        ),
+        full_resync_interval_seconds: float = (_DEFAULT_FULL_RESYNC_INTERVAL_SECONDS),
     ) -> None:
         self._client = client
         self._cache = cache
@@ -98,7 +96,8 @@ class WatchStream:
         # cache state.
         self._sync_lock = asyncio.Lock()
         self._full_resync_interval_seconds = max(
-            0.0, full_resync_interval_seconds,
+            0.0,
+            full_resync_interval_seconds,
         )
         # Expose a ``is_healthy`` flag the tick engine reads on
         # every iteration. If the watch stream drops (network
@@ -175,8 +174,7 @@ class WatchStream:
                 # stops firing until reconnect lands.
                 self._is_healthy = False
                 logger.exception(
-                    "z4j.scheduler.watch: stream loop error; "
-                    "backing off + reconnecting",
+                    "z4j.scheduler.watch: stream loop error; backing off + reconnecting",
                 )
                 await self._backoff_or_stop()
                 continue
@@ -207,7 +205,8 @@ class WatchStream:
         while not self._stop_event.is_set():
             try:
                 await asyncio.wait_for(
-                    self._stop_event.wait(), timeout=interval,
+                    self._stop_event.wait(),
+                    timeout=interval,
                 )
                 # ``wait_for`` returned cleanly only if stop fired -
                 # exit the loop.
@@ -225,8 +224,7 @@ class WatchStream:
                 # logged and we wait for the next tick. Never let
                 # this loop die.
                 logger.warning(
-                    "z4j.scheduler.watch: periodic full re-sync "
-                    "failed; will retry on next tick",
+                    "z4j.scheduler.watch: periodic full re-sync failed; will retry on next tick",
                     exc_info=True,
                 )
 
@@ -258,7 +256,7 @@ class WatchStream:
         ``sync_started_at`` was definitely covered by the sync's
         full snapshot.
         """
-        from datetime import datetime, UTC  # noqa: PLC0415
+        from datetime import UTC, datetime
 
         sync_started_at_iso = datetime.now(UTC).isoformat()
         await self._full_sync()
@@ -266,10 +264,7 @@ class WatchStream:
         # ``or`` guard so we never DOWN-grade a token the stream
         # was already past (paranoia - shouldn't happen because
         # we only get here on reconnect, but cheap to assert).
-        if (
-            not self._resume_token
-            or self._resume_token < sync_started_at_iso
-        ):
+        if not self._resume_token or self._resume_token < sync_started_at_iso:
             self._resume_token = sync_started_at_iso
 
         # Now subscribe to the live stream until something breaks.
@@ -307,9 +302,7 @@ class WatchStream:
             # which ids were live at sync-start. Any id the live
             # stream adds during the list call is intentionally
             # excluded from the sweep candidate set.
-            pre_sync_ids = {
-                e.id for e in await self._cache.snapshot()
-            }
+            pre_sync_ids = {e.id for e in await self._cache.snapshot()}
             entries = []
             async for entry in self._client.list_schedules(self._project_id):
                 entries.append(entry)
@@ -320,15 +313,12 @@ class WatchStream:
             # return. Concurrently-added ids (from _stream events
             # during the sync window) are left in the cache.
             fresh_ids = {e.id for e in entries}
-            stale_ids = [
-                sid for sid in pre_sync_ids if sid not in fresh_ids
-            ]
+            stale_ids = [sid for sid in pre_sync_ids if sid not in fresh_ids]
             for sid in stale_ids:
                 await self._cache.remove(sid)
             if stale_ids:
                 logger.info(
-                    "z4j.scheduler.watch: full sync swept %d "
-                    "stale schedule(s) from cache",
+                    "z4j.scheduler.watch: full sync swept %d stale schedule(s) from cache",
                     len(stale_ids),
                 )
         logger.info(
@@ -346,7 +336,8 @@ class WatchStream:
         # mark the stream healthy.
         self._is_healthy = True
         async for event in self._client.watch_schedules(
-            self._project_id, resume_token=self._resume_token,
+            self._project_id,
+            resume_token=self._resume_token,
         ):
             if self._stop_event.is_set():
                 break
@@ -383,9 +374,9 @@ class WatchStream:
         self._reconnect_attempts += 1
 
         logger.info(
-            "z4j.scheduler.watch: reconnecting in %.2fs "
-            "(attempt %d)",
-            delay, self._reconnect_attempts,
+            "z4j.scheduler.watch: reconnecting in %.2fs (attempt %d)",
+            delay,
+            self._reconnect_attempts,
         )
         try:
             await asyncio.wait_for(self._stop_event.wait(), timeout=delay)

@@ -52,7 +52,8 @@ class TestMetricDefinitions:
     def test_grpc_calls_total_label_combos(self) -> None:
         m.grpc_calls_total.labels(method="FireSchedule", status="ok").inc()
         m.grpc_calls_total.labels(
-            method="FireSchedule", status="UNAVAILABLE",
+            method="FireSchedule",
+            status="UNAVAILABLE",
         ).inc()
 
     def test_default_registry_exposes_metrics(self) -> None:
@@ -77,7 +78,9 @@ class TestLoggingConfig:
         configure_logging(settings)
 
     def test_configure_console_mode(
-        self, settings: Settings, monkeypatch: pytest.MonkeyPatch,
+        self,
+        settings: Settings,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setenv("Z4J_SCHEDULER_LOG_JSON", "false")
         non_json_settings = Settings(_env_file=None)  # type: ignore[call-arg]

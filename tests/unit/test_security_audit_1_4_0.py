@@ -19,7 +19,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-
 # =====================================================================
 # S002 -- TriggerSchedule idempotency cache
 # =====================================================================
@@ -79,7 +78,7 @@ class TestS002IdempotencyCache:
 
         dispatcher = MagicMock()
 
-        async def _trigger_now(*, schedule_id):  # noqa: ARG001, ANN001
+        async def _trigger_now(*, schedule_id, **_kwargs):
             nonlocal call_count
             call_count += 1
             cmd = first_cmd_id if call_count == 1 else second_cmd_id
@@ -155,7 +154,7 @@ class TestS002IdempotencyCache:
         call_count = 0
         dispatcher = MagicMock()
 
-        async def _trigger_now(*, schedule_id):  # noqa: ARG001, ANN001
+        async def _trigger_now(*, schedule_id, **_kwargs):
             nonlocal call_count
             call_count += 1
             return FireResult(
@@ -173,7 +172,9 @@ class TestS002IdempotencyCache:
             leader_gate=SingleInstanceLeaderGate(),
         )
         request = pb.TriggerScheduleRequest(
-            schedule_id=str(sid), user_id="", idempotency_key="",
+            schedule_id=str(sid),
+            user_id="",
+            idempotency_key="",
         )
         await servicer.TriggerSchedule(request, MagicMock())
         await servicer.TriggerSchedule(request, MagicMock())
@@ -214,7 +215,7 @@ class TestS002IdempotencyCache:
         call_count = 0
         dispatcher = MagicMock()
 
-        async def _trigger_now(*, schedule_id):  # noqa: ARG001, ANN001
+        async def _trigger_now(*, schedule_id, **_kwargs):
             nonlocal call_count
             call_count += 1
             return FireResult(
@@ -233,19 +234,21 @@ class TestS002IdempotencyCache:
         )
         await servicer.TriggerSchedule(
             pb.TriggerScheduleRequest(
-                schedule_id=str(sid), user_id="", idempotency_key="A",
+                schedule_id=str(sid),
+                user_id="",
+                idempotency_key="A",
             ),
             MagicMock(),
         )
         await servicer.TriggerSchedule(
             pb.TriggerScheduleRequest(
-                schedule_id=str(sid), user_id="", idempotency_key="B",
+                schedule_id=str(sid),
+                user_id="",
+                idempotency_key="B",
             ),
             MagicMock(),
         )
-        assert call_count == 2, (
-            "distinct idempotency_keys must result in distinct fires"
-        )
+        assert call_count == 2, "distinct idempotency_keys must result in distinct fires"
 
     @pytest.mark.asyncio
     async def test_expired_entries_get_swept(self) -> None:
@@ -286,7 +289,7 @@ class TestS002IdempotencyCache:
         call_count = 0
         dispatcher = MagicMock()
 
-        async def _trigger_now(*, schedule_id):  # noqa: ARG001, ANN001
+        async def _trigger_now(*, schedule_id, **_kwargs):
             nonlocal call_count
             call_count += 1
             return FireResult(
@@ -321,9 +324,7 @@ class TestS002IdempotencyCache:
             ),
             MagicMock(),
         )
-        assert call_count == 1, (
-            "expired cache entry must NOT short-circuit the call"
-        )
+        assert call_count == 1, "expired cache entry must NOT short-circuit the call"
 
 
 # =====================================================================
@@ -362,7 +363,8 @@ class TestS004TriggerRequireAllowlist:
 
     @pytest.mark.asyncio
     async def test_start_raises_when_required_and_empty(
-        self, tmp_path,
+        self,
+        tmp_path,
     ) -> None:
         from z4j_scheduler.settings import Settings
         from z4j_scheduler.trigger_grpc.server import TriggerGrpcServer

@@ -20,6 +20,7 @@ FastAPI app::
         ),
     ]
 
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         async with z4j_lifespan(
@@ -29,6 +30,7 @@ FastAPI app::
             api_token=os.environ["Z4J_API_TOKEN"],
         ):
             yield
+
 
     app = FastAPI(lifespan=lifespan)
 
@@ -83,11 +85,10 @@ async def z4j_lifespan(
             "z4j.scheduler.declarative.fastapi: reconcile complete %r",
             summary,
         )
-    except Exception:  # noqa: BLE001
+    except Exception:
         # Never crash app startup. The next deploy will retry.
         logger.exception(
-            "z4j.scheduler.declarative.fastapi: reconcile failed; "
-            "app will continue",
+            "z4j.scheduler.declarative.fastapi: reconcile failed; app will continue",
         )
     try:
         yield

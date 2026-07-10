@@ -55,11 +55,10 @@ try:
     from cryptography.x509.oid import NameOID
     from sqlalchemy.ext.asyncio import create_async_engine
     from sqlalchemy.pool import StaticPool
-
     from z4j_brain.domain.audit_service import AuditService
     from z4j_brain.domain.command_dispatcher import CommandDispatcher
-    from z4j_brain.persistence.base import Base
     from z4j_brain.persistence import models  # noqa: F401
+    from z4j_brain.persistence.base import Base
     from z4j_brain.persistence.database import DatabaseManager
     from z4j_brain.persistence.enums import ScheduleKind
     from z4j_brain.persistence.models import Project, Schedule
@@ -67,14 +66,13 @@ try:
     from z4j_brain.scheduler_grpc.server import SchedulerGrpcServer
     from z4j_brain.settings import Settings as BrainSettings
     from z4j_brain.websocket.registry import LocalRegistry
-
     from z4j_scheduler.dispatch.fire import FireDispatcher
     from z4j_scheduler.settings import Settings as SchedulerSettings
     from z4j_scheduler.storage.brain_client import BrainClient
 
     _DEPS_AVAILABLE = True
     _IMPORT_ERROR: str | None = None
-except Exception as exc:  # noqa: BLE001
+except Exception as exc:
     _DEPS_AVAILABLE = False
     _IMPORT_ERROR = str(exc)
 
@@ -93,7 +91,8 @@ def _mint_pki(out_dir: Path) -> dict[str, Path]:
     now = datetime.now(UTC)
     ca_cert = (
         x509.CertificateBuilder()
-        .subject_name(ca_subject).issuer_name(ca_subject)
+        .subject_name(ca_subject)
+        .issuer_name(ca_subject)
         .public_key(ca_key.public_key())
         .serial_number(int.from_bytes(secrets.token_bytes(8), "big"))
         .not_valid_before(now - timedelta(minutes=5))
@@ -204,12 +203,16 @@ async def _bench(iterations: int) -> dict[str, Any]:
         audit = AuditService(brain_settings)
         registry = LocalRegistry(deliver_local=_noop_deliver)
         cmd_dispatcher = CommandDispatcher(
-            settings=brain_settings, registry=registry, audit=audit,
+            settings=brain_settings,
+            registry=registry,
+            audit=audit,
         )
 
         server = SchedulerGrpcServer(
-            settings=brain_settings, db=db,
-            command_dispatcher=cmd_dispatcher, audit_service=audit,
+            settings=brain_settings,
+            db=db,
+            command_dispatcher=cmd_dispatcher,
+            audit_service=audit,
         )
         await server.start()
         try:
@@ -218,19 +221,22 @@ async def _bench(iterations: int) -> dict[str, Any]:
             schedule_id = uuid.uuid4()
             async with db.session() as s:
                 s.add(Project(id=project_id, slug="bench", name="Bench"))
-                s.add(Schedule(
-                    id=schedule_id,
-                    project_id=project_id,
-                    engine="celery",
-                    scheduler="z4j-scheduler",
-                    name="bench-sched",
-                    task_name="app.bench",
-                    kind=ScheduleKind.CRON,
-                    expression="* * * * *",
-                    timezone="UTC",
-                    args=[], kwargs={},
-                    is_enabled=True,
-                ))
+                s.add(
+                    Schedule(
+                        id=schedule_id,
+                        project_id=project_id,
+                        engine="celery",
+                        scheduler="z4j-scheduler",
+                        name="bench-sched",
+                        task_name="app.bench",
+                        kind=ScheduleKind.CRON,
+                        expression="* * * * *",
+                        timezone="UTC",
+                        args=[],
+                        kwargs={},
+                        is_enabled=True,
+                    )
+                )
                 await s.commit()
 
             # Scheduler-side bootstrap.
@@ -245,7 +251,8 @@ async def _bench(iterations: int) -> dict[str, Any]:
             await client.connect()
             try:
                 dispatcher = FireDispatcher(
-                    client=client, settings=sched_settings,
+                    client=client,
+                    settings=sched_settings,
                 )
 
                 # Warm up - first 5 calls amortize gRPC channel + DB
@@ -287,7 +294,7 @@ async def _bench(iterations: int) -> dict[str, Any]:
 def _quantile(samples: list[float], q: float) -> float:
     if not samples:
         return 0.0
-    idx = max(0, min(len(samples) - 1, int(round(q * (len(samples) - 1)))))
+    idx = max(0, min(len(samples) - 1, round(q * (len(samples) - 1))))
     return samples[idx]
 
 
@@ -320,7 +327,9 @@ def render_summary(report: dict[str, Any]) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument(
-        "--iterations", type=int, default=200,
+        "--iterations",
+        type=int,
+        default=200,
         help="Number of FireSchedule calls to time (default 200).",
     )
     parser.add_argument(

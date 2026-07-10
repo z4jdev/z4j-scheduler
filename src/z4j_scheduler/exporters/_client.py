@@ -80,7 +80,7 @@ async def fetch_schedules(
     Raises :class:`RuntimeError` on HTTP errors so the CLI can
     surface them.
     """
-    import httpx  # noqa: PLC0415
+    import httpx
 
     headers = {"Accept": "application/json"}
     if api_token:
@@ -102,10 +102,7 @@ async def fetch_schedules(
     # ``{"items": [...], "next_cursor": "..."}`` instead of a
     # flat list. Tolerate both shapes so an old brain (flat list)
     # and the new brain (envelope) work with the same exporter.
-    if isinstance(body, dict):
-        rows = body.get("items", [])
-    else:
-        rows = body
+    rows = body.get("items", []) if isinstance(body, dict) else body
 
     out: list[ExportedSchedule] = []
     for row in rows:
@@ -136,7 +133,7 @@ async def fetch_schedules(
     return out
 
 
-def py_repr(value: Any) -> str:
+def py_repr(value: Any) -> str:  # noqa: PLR0911  literal-type dispatch
     """Render value as a Python literal (not JSON).
 
     Shared by every exporter so a schedule's args/kwargs round-trip
@@ -151,7 +148,7 @@ def py_repr(value: Any) -> str:
     ``json.dumps(str(value))`` which mirrors the previous
     ``default=str`` behaviour.
     """
-    import json  # noqa: PLC0415
+    import json
 
     if isinstance(value, bool):
         # bool MUST come before int (bool is a subclass of int).
@@ -165,13 +162,7 @@ def py_repr(value: Any) -> str:
     if isinstance(value, (list, tuple)):
         return "[" + ", ".join(py_repr(v) for v in value) + "]"
     if isinstance(value, dict):
-        return (
-            "{"
-            + ", ".join(
-                f"{py_repr(str(k))}: {py_repr(v)}" for k, v in value.items()
-            )
-            + "}"
-        )
+        return "{" + ", ".join(f"{py_repr(str(k))}: {py_repr(v)}" for k, v in value.items()) + "}"
     return json.dumps(str(value))
 
 

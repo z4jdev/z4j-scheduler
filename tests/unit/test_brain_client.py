@@ -49,7 +49,8 @@ class TestConstruction:
 class TestConnectClose:
     @pytest.mark.asyncio
     async def test_connect_opens_channel_idempotently(
-        self, settings: Settings,
+        self,
+        settings: Settings,
     ) -> None:
         client = BrainClient(settings)
         # Patch the channel constructor so we don't actually open a
@@ -67,7 +68,8 @@ class TestConnectClose:
 
     @pytest.mark.asyncio
     async def test_close_before_connect_is_noop(
-        self, settings: Settings,
+        self,
+        settings: Settings,
     ) -> None:
         client = BrainClient(settings)
         await client.close()  # no error, no exception
@@ -75,7 +77,8 @@ class TestConnectClose:
 
     @pytest.mark.asyncio
     async def test_close_after_connect_clears_state(
-        self, settings: Settings,
+        self,
+        settings: Settings,
     ) -> None:
         client = BrainClient(settings)
         with patch(

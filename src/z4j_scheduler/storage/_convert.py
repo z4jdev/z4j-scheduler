@@ -161,6 +161,7 @@ def entry_from_pb(message: pb.Schedule) -> ScheduleEntry:
         anchor_at=anchor_at,
         last_fire_at=last_run_at,
         name=message.name or "",
+        engine=message.engine or "",
     )
     # The protobuf may carry a precomputed next_run_at; honour it as
     # an initial value so the tick engine doesn't recompute on first
@@ -237,13 +238,19 @@ def make_fire_request(
     fire_id: UUID,
     scheduled_for: datetime,
     fired_at: datetime,
+    triggered_by_user_id: str = "",
 ) -> pb.FireScheduleRequest:
-    """Build a protobuf ``FireScheduleRequest`` from typed inputs."""
+    """Build a protobuf ``FireScheduleRequest`` from typed inputs.
+
+    ``triggered_by_user_id`` is set only for operator-triggered fires
+    (TriggerSchedule); empty for scheduler-driven cadence fires.
+    """
     return pb.FireScheduleRequest(
         schedule_id=str(schedule_id),
         fire_id=str(fire_id),
         scheduled_for=datetime_to_ts(scheduled_for),
         fired_at=datetime_to_ts(fired_at),
+        triggered_by_user_id=triggered_by_user_id,
     )
 
 
@@ -294,8 +301,7 @@ def parse_ping_response(message: pb.PingResponse) -> PingInfo:
     """Convert a ``PingResponse`` to :class:`PingInfo`."""
     return PingInfo(
         brain_version=message.brain_version,
-        brain_time=ts_to_datetime(message.brain_time)
-        or datetime.fromtimestamp(0, tz=UTC),
+        brain_time=ts_to_datetime(message.brain_time) or datetime.fromtimestamp(0, tz=UTC),
     )
 
 

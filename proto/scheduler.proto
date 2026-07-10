@@ -137,6 +137,11 @@ message FireScheduleRequest {
     string fire_id = 2;
     google.protobuf.Timestamp scheduled_for = 3;
     google.protobuf.Timestamp fired_at = 4;
+    // The user who manually triggered this fire (via TriggerSchedule);
+    // empty for scheduler-driven cadence fires. The brain records it on
+    // the schedule_fires row so the fire-history + personal-activity
+    // views attribute a "fire now" to the operator who clicked it.
+    string triggered_by_user_id = 5;
 }
 
 message FireScheduleResponse {

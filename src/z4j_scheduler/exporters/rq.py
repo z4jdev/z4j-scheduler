@@ -31,7 +31,7 @@ def render(schedules: Iterable[ExportedSchedule]) -> str:
         "",
         "",
         "def register_schedules(scheduler):",
-        "    \"\"\"Apply z4j-managed schedules to an rq_scheduler Scheduler.\"\"\"",
+        '    """Apply z4j-managed schedules to an rq_scheduler Scheduler."""',
     ]
     if not schedules:
         lines.append("    return  # no z4j schedules to migrate")
@@ -50,9 +50,7 @@ def _render_one(sched: ExportedSchedule) -> list[str]:
     # startup. Same fix applied to celery + apscheduler exporters.
     args_repr = py_repr(list(sched.args))
     kwargs_repr = py_repr(dict(sched.kwargs))
-    queue_kw = (
-        f", queue_name={json.dumps(sched.queue)}" if sched.queue else ""
-    )
+    queue_kw = f", queue_name={json.dumps(sched.queue)}" if sched.queue else ""
 
     if not sched.is_enabled:
         # rq-scheduler has no soft-disable concept; the operator

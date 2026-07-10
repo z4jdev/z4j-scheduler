@@ -29,7 +29,7 @@ TYO = ZoneInfo("Asia/Tokyo")
 
 # Hand-curated 2026 DST transitions for spot checks.
 NYC_SPRING_FORWARD_2026 = datetime(2026, 3, 8, 7, 0, tzinfo=UTC)  # 02:00 EST -> 03:00 EDT
-NYC_FALL_BACK_2026 = datetime(2026, 11, 1, 6, 0, tzinfo=UTC)       # 02:00 EDT -> 01:00 EST
+NYC_FALL_BACK_2026 = datetime(2026, 11, 1, 6, 0, tzinfo=UTC)  # 02:00 EDT -> 01:00 EST
 
 
 class TestSpringForwardGap:
@@ -171,8 +171,7 @@ class TestPropertyMonotonicNextFire:
         after = after_naive.replace(tzinfo=ZoneInfo(tz))
         result = next_fire(expression, tz, after)
         assert result > after, (
-            f"non-monotonic for expr={expression!r} tz={tz!r} "
-            f"after={after!r} got={result!r}"
+            f"non-monotonic for expr={expression!r} tz={tz!r} after={after!r} got={result!r}"
         )
 
 
@@ -200,17 +199,13 @@ class TestPropertyTimezoneIndependence:
         # Two equivalent representations of the same UTC instant.
         moment_utc = datetime(2026, 6, 15, 12, 0, tzinfo=UTC)
         equivalent_tz = ZoneInfo(
-            f"Etc/GMT{'+' if instant_offset_hours <= 0 else '-'}"
-            f"{abs(instant_offset_hours)}",
+            f"Etc/GMT{'+' if instant_offset_hours <= 0 else '-'}{abs(instant_offset_hours)}",
         )
         moment_other = moment_utc.astimezone(equivalent_tz)
 
         a = next_fire(expression, sched_tz, moment_utc)
         b = next_fire(expression, sched_tz, moment_other)
-        assert a == b, (
-            f"next_fire is not tz-independent for input: "
-            f"{a!r} vs {b!r}"
-        )
+        assert a == b, f"next_fire is not tz-independent for input: {a!r} vs {b!r}"
 
 
 @pytest.mark.parametrize("tz", ["UTC", "America/New_York", "Asia/Tokyo", "Europe/London"])

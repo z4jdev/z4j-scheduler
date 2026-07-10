@@ -5,9 +5,13 @@ schedules to their existing taskiq broker. Each schedule renders
 one ``broker.task(..., schedule=[...])`` annotation::
 
     from .z4j_taskiq_schedules import apply_schedules
-    apply_schedules(broker, by_name={
-        'myapp.tasks.send_email': send_email,
-    })
+
+    apply_schedules(
+        broker,
+        by_name={
+            "myapp.tasks.send_email": send_email,
+        },
+    )
 
 Operators pass their actual task callables in ``by_name``; we
 attach the schedule label to each one.
@@ -44,12 +48,12 @@ def render(schedules: Iterable[ExportedSchedule]) -> str:
         "",
         "",
         "def apply_schedules(broker, *, by_name):",
-        "    \"\"\"Attach z4j-managed schedule labels to existing tasks.",
+        '    """Attach z4j-managed schedule labels to existing tasks.',
         "",
         "    ``by_name`` maps schedule.task_name -> registered taskiq",
         "    task object. Tasks not in the map are skipped (logged via",
         "    print so the operator notices missing wiring).",
-        "    \"\"\"",
+        '    """',
     ]
     if not schedules:
         lines.append("    return  # no z4j schedules to migrate")
@@ -95,10 +99,7 @@ def _render_one(sched: ExportedSchedule) -> list[str]:
         label_entry = {"time": sched.expression}
     else:
         return [
-            (
-                f"    # {safe_name}: kind={sched.kind!r} not supported by "
-                f"taskiq label scheduler;"
-            ),
+            (f"    # {safe_name}: kind={sched.kind!r} not supported by taskiq label scheduler;"),
             f"    # keep on z4j-scheduler. expression={safe_expr!r}",
             "",
         ]
@@ -112,13 +113,10 @@ def _render_one(sched: ExportedSchedule) -> list[str]:
     return [
         f"    # {safe_name}",
         f"    _task = by_name.get({json.dumps(safe_task_name)})",
-        f"    if _task is not None:",
+        "    if _task is not None:",
         f"        _task.labels['schedule'] = {label_repr}",
-        f"    else:",
-        (
-            f"        print('z4j taskiq export: missing task '"
-            f" + {json.dumps(safe_task_name)})"
-        ),
+        "    else:",
+        (f"        print('z4j taskiq export: missing task ' + {json.dumps(safe_task_name)})"),
         "",
     ]
 

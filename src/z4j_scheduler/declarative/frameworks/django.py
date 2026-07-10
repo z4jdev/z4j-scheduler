@@ -53,12 +53,15 @@ In ``apps.py``::
 
     from django.apps import AppConfig
 
+
     class MyAppConfig(AppConfig):
         name = "myapp"
+
         def ready(self):
             from z4j_scheduler.declarative.frameworks.django import (
                 reconcile_from_settings,
             )
+
             reconcile_from_settings()
 """
 
@@ -82,7 +85,7 @@ def reconcile_from_settings() -> dict[str, int] | None:
     crash the Django app's startup.
     """
     try:
-        from django.conf import settings as django_settings  # noqa: PLC0415
+        from django.conf import settings as django_settings
     except ImportError:
         logger.debug(
             "z4j.scheduler.declarative.django: django not installed; "
@@ -97,31 +100,35 @@ def reconcile_from_settings() -> dict[str, int] | None:
         # ``None`` / unset case is "operator hasn't wired anything
         # yet" so we skip.
         logger.info(
-            "z4j.scheduler.declarative.django: Z4J_SCHEDULES unset; "
-            "no reconcile performed",
+            "z4j.scheduler.declarative.django: Z4J_SCHEDULES unset; no reconcile performed",
         )
         return None
 
     project = getattr(django_settings, "Z4J_SCHEDULES_PROJECT", None)
     if not project:
         logger.error(
-            "z4j.scheduler.declarative.django: Z4J_SCHEDULES_PROJECT "
-            "not set; cannot reconcile",
+            "z4j.scheduler.declarative.django: Z4J_SCHEDULES_PROJECT not set; cannot reconcile",
         )
         return None
 
     brain_url = getattr(
-        django_settings, "Z4J_SCHEDULES_BRAIN_URL", "http://brain:7700",
+        django_settings,
+        "Z4J_SCHEDULES_BRAIN_URL",
+        "http://brain:7700",
     )
     api_token = getattr(
-        django_settings, "Z4J_SCHEDULES_API_TOKEN", None,
+        django_settings,
+        "Z4J_SCHEDULES_API_TOKEN",
+        None,
     )
     source = getattr(
-        django_settings, "Z4J_SCHEDULES_SOURCE", "declarative_django",
+        django_settings,
+        "Z4J_SCHEDULES_SOURCE",
+        "declarative_django",
     )
 
     try:
-        from z4j_scheduler.declarative import reconcile_sync  # noqa: PLC0415
+        from z4j_scheduler.declarative import reconcile_sync
 
         return reconcile_sync(
             schedules=schedules,
@@ -130,7 +137,7 @@ def reconcile_from_settings() -> dict[str, int] | None:
             brain_url=brain_url,
             api_token=api_token,
         )
-    except Exception:  # noqa: BLE001
+    except Exception:
         # Never crash Django startup over a brain outage. The
         # operator sees the error in the Django logs; the next
         # deploy / restart retries.

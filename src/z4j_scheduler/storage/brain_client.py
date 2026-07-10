@@ -70,11 +70,7 @@ def _build_credentials(settings: Settings) -> grpc.ChannelCredentials:
     the Settings model_validator should have caught this before, but
     we re-check here to fail loud if something slipped through.
     """
-    if (
-        settings.tls_ca is None
-        or settings.tls_cert is None
-        or settings.tls_key is None
-    ):
+    if settings.tls_ca is None or settings.tls_cert is None or settings.tls_key is None:
         raise RuntimeError(
             "z4j-scheduler: _build_credentials called without a "
             "complete TLS bundle - this is a Settings validator bug",
@@ -174,7 +170,7 @@ class BrainClient:
         self._stub = None
         try:
             await asyncio.shield(channel.close(grace=2.0))
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.debug(
                 "z4j.scheduler.brain_client: shielded close raised",
                 exc_info=True,
@@ -203,7 +199,8 @@ class BrainClient:
             page_size=page_size,
         )
         async for message in stub.ListSchedules(
-            request, timeout=_LIST_TIMEOUT_SECONDS,
+            request,
+            timeout=_LIST_TIMEOUT_SECONDS,
         ):
             yield entry_from_pb(message)
 
@@ -234,17 +231,24 @@ class BrainClient:
         fire_id: UUID,
         scheduled_for: datetime,
         fired_at: datetime,
+        triggered_by_user_id: str = "",
     ) -> FireResult:
-        """Tell brain to fire a schedule. Single short-deadline RPC."""
+        """Tell brain to fire a schedule. Single short-deadline RPC.
+
+        ``triggered_by_user_id`` is non-empty only for operator-triggered
+        fires; the brain records it on the schedule_fires row.
+        """
         stub = self._require_stub()
         request = make_fire_request(
             schedule_id=schedule_id,
             fire_id=fire_id,
             scheduled_for=scheduled_for,
             fired_at=fired_at,
+            triggered_by_user_id=triggered_by_user_id,
         )
         response = await stub.FireSchedule(
-            request, timeout=_FIRE_TIMEOUT_SECONDS,
+            request,
+            timeout=_FIRE_TIMEOUT_SECONDS,
         )
         return parse_fire_response(response)
 
@@ -267,14 +271,16 @@ class BrainClient:
             error=error,
         )
         await stub.AcknowledgeFireResult(
-            request, timeout=_ACK_TIMEOUT_SECONDS,
+            request,
+            timeout=_ACK_TIMEOUT_SECONDS,
         )
 
     async def ping(self) -> PingInfo:
         """Liveness check. Returns brain version + clock."""
         stub = self._require_stub()
         response = await stub.Ping(
-            pb.PingRequest(), timeout=_PING_TIMEOUT_SECONDS,
+            pb.PingRequest(),
+            timeout=_PING_TIMEOUT_SECONDS,
         )
         return parse_ping_response(response)
 

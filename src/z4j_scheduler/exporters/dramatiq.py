@@ -22,7 +22,6 @@ from collections.abc import Iterable
 
 from z4j_scheduler.exporters._client import ExportedSchedule
 
-
 _GUIDANCE = """\
 Dramatiq has no native scheduler config to export to. Two options:
 
@@ -36,7 +35,7 @@ Dramatiq has no native scheduler config to export to. Two options:
 """
 
 
-def render(schedules: Iterable[ExportedSchedule]) -> str:  # noqa: ARG001
+def render(schedules: Iterable[ExportedSchedule]) -> str:
     """Always returns the guidance message as a comment-prefixed string.
 
     Dramatiq has no native scheduler config to render to.

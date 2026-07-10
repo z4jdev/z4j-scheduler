@@ -4,9 +4,10 @@ docs/SCHEDULER.md §5.1 lists solar as one of the four schedule
 kinds in the v1 surface. The ``expression`` field for a solar
 schedule encodes ``"<event>:<latitude>:<longitude>"``, e.g.::
 
-    "sunrise:37.7749:-122.4194"     # SF sunrise
-    "sunset:51.5074:-0.1278"        # London sunset
-    "dawn:-33.8688:151.2093"        # Sydney astronomical dawn
+    "sunrise:37.7749:-122.4194"  # SF sunrise
+
+    "sunset:51.5074:-0.1278"  # London sunset
+    "dawn:-33.8688:151.2093"  # Sydney astronomical dawn
 
 The seven supported events match astral's vocabulary plus the two
 celery-beat aliases (``solar_noon`` / ``solar_midnight``):
@@ -39,6 +40,7 @@ try:
     from astral import LocationInfo, Observer
     from astral.sun import midnight as _astral_midnight
     from astral.sun import sun
+
     _ASTRAL_AVAILABLE = True
 except ImportError:  # pragma: no cover - exercised in degraded mode
     LocationInfo = None  # type: ignore[assignment]
@@ -64,9 +66,12 @@ _DAY_DICT_KEYS: Final[dict[str, str]] = {
     "sunset": "sunset",
     "dusk": "dusk",
 }
-_MIDNIGHT_EVENTS: Final[frozenset[str]] = frozenset({
-    "midnight", "solar_midnight",
-})
+_MIDNIGHT_EVENTS: Final[frozenset[str]] = frozenset(
+    {
+        "midnight",
+        "solar_midnight",
+    }
+)
 
 
 VALID_EVENTS = frozenset(_DAY_DICT_KEYS.keys()) | _MIDNIGHT_EVENTS
@@ -81,15 +86,13 @@ def parse_solar_expression(expression: str) -> tuple[str, float, float]:
     """
     if not expression or expression.count(":") != 2:
         raise ValueError(
-            f"solar expression must be 'event:lat:lon'; got "
-            f"{expression!r}",
+            f"solar expression must be 'event:lat:lon'; got {expression!r}",
         )
     event, lat_s, lon_s = expression.split(":", 2)
     event = event.strip().lower()
     if event not in VALID_EVENTS:
         raise ValueError(
-            f"unknown solar event {event!r}; must be one of "
-            f"{sorted(VALID_EVENTS)}",
+            f"unknown solar event {event!r}; must be one of {sorted(VALID_EVENTS)}",
         )
     try:
         lat = float(lat_s)
@@ -149,12 +152,14 @@ def next_solar_fire(
                 # it's the moment the sun is at the antimeridian
                 # (lowest point), not the wall-clock 00:00.
                 candidate = _astral_midnight(
-                    observer, date=cursor, tzinfo=UTC,
+                    observer,
+                    date=cursor,
+                    tzinfo=UTC,
                 )
             else:
                 day_events = sun(observer, date=cursor, tzinfo=UTC)
                 candidate = day_events[astral_key]
-        except Exception:  # noqa: BLE001 - astral raises various
+        except Exception:
             # Polar latitudes can raise ``ValueError`` ("Sun is
             # always below the horizon"). Skip the day; the
             # outer loop tries tomorrow. Eventually ``max_days_ahead``

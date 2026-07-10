@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.7.0 (2026-07-07)
+
+* Brain-side misfire detection, per-operator fire attribution, and a `z4j_scheduler_fire_variance_seconds` histogram.
+* Fixed a Postgres leader-election release-path `TypeError` (a structlog-style kwarg on a stdlib logger) that could abort cleanup before the local held flag cleared, leaving a stale-leader belief.
+* Python 3.11 is now the minimum supported version (3.10 dropped).
+* Part of the coordinated 1.7.0 fleet release (unified fleet version, green lint/format/import-boundary gate).
+
 ## 1.6.5 (2026-05-26)
 
 Security hardening (round-3 audit, R3-L1).

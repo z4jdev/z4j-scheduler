@@ -25,7 +25,7 @@ def _default_instance_id() -> str:
     Lazy ``socket`` import keeps the module import cheap and lets
     tests stub this function without depending on socket internals.
     """
-    import socket  # noqa: PLC0415  - lazy on purpose, see docstring
+    import socket
 
     return socket.gethostname()
 
@@ -62,13 +62,16 @@ class Settings(BaseSettings):
     # Required - mTLS (unless ``insecure_grpc`` is True)
     # ------------------------------------------------------------------
     tls_cert: Path | None = Field(
-        default=None, description="mTLS client cert for gRPC",
+        default=None,
+        description="mTLS client cert for gRPC",
     )
     tls_key: Path | None = Field(
-        default=None, description="mTLS client key for gRPC",
+        default=None,
+        description="mTLS client key for gRPC",
     )
     tls_ca: Path | None = Field(
-        default=None, description="mTLS CA for verifying brain server cert",
+        default=None,
+        description="mTLS CA for verifying brain server cert",
     )
 
     # ------------------------------------------------------------------
@@ -154,9 +157,7 @@ class Settings(BaseSettings):
     #: - ``postgres``: HA via Postgres advisory lock. Multiple
     #:   instances race; the lock holder is leader. Requires
     #:   ``leader_pg_dsn`` to be set.
-    leader_backend: Literal["single", "postgres", "postgres_per_project"] = (
-        "single"
-    )
+    leader_backend: Literal["single", "postgres", "postgres_per_project"] = "single"
     #: Postgres DSN used by the ``postgres`` leader backend. Format:
     #: ``postgres://user:pass@host:port/db``. Typically points at the
     #: brain's own database (the scheduler doesn't need its own DB).
@@ -174,7 +175,9 @@ class Settings(BaseSettings):
     #: faster failover at the cost of more DB round-trips. The
     #: default 2s gives 1-3s failover under clean leader death.
     leader_heartbeat_seconds: float = Field(
-        default=2.0, ge=0.5, le=60.0,
+        default=2.0,
+        ge=0.5,
+        le=60.0,
     )
 
     # ------------------------------------------------------------------
@@ -213,7 +216,9 @@ class Settings(BaseSettings):
     #: forgotten.
     trigger_grpc_require_allowlist: bool = False
     trigger_grpc_grace_seconds: float = Field(
-        default=5.0, ge=0.1, le=60.0,
+        default=5.0,
+        ge=0.1,
+        le=60.0,
     )
 
     # ------------------------------------------------------------------
@@ -264,7 +269,7 @@ class Settings(BaseSettings):
     )
 
     @model_validator(mode="after")
-    def _enforce_metrics_auth_in_production(self) -> "Settings":
+    def _enforce_metrics_auth_in_production(self) -> Settings:
         """Refuse to start a production scheduler that exposes
         ``/metrics`` publicly.
 
@@ -332,7 +337,7 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
-    def _enforce_grpc_tls_or_insecure(self) -> "Settings":
+    def _enforce_grpc_tls_or_insecure(self) -> Settings:
         """Require either complete TLS bundle OR explicit insecure opt-in.
 
         The combinations:
@@ -350,9 +355,7 @@ class Settings(BaseSettings):
           path was selected.
         """
         tls_complete = (
-            self.tls_cert is not None
-            and self.tls_key is not None
-            and self.tls_ca is not None
+            self.tls_cert is not None and self.tls_key is not None and self.tls_ca is not None
         )
         if self.insecure_grpc:
             if self.environment.strip().lower() == "production":

@@ -22,7 +22,6 @@ from z4j_scheduler.importers._core import (
     render_jsonl,
 )
 
-
 # =====================================================================
 # Core
 # =====================================================================
@@ -31,9 +30,12 @@ from z4j_scheduler.importers._core import (
 class TestImportedSchedule:
     def test_to_dict_includes_computed_hash(self) -> None:
         sched = ImportedSchedule(
-            project_slug="p", name="every-hour",
-            engine="celery", kind="cron",
-            expression="0 * * * *", task_name="tasks.heartbeat",
+            project_slug="p",
+            name="every-hour",
+            engine="celery",
+            kind="cron",
+            expression="0 * * * *",
+            task_name="tasks.heartbeat",
         )
         d = sched.to_dict()
         assert d["source_hash"]
@@ -41,16 +43,24 @@ class TestImportedSchedule:
 
     def test_compute_hash_deterministic(self) -> None:
         sched1 = ImportedSchedule(
-            project_slug="p", name="x",
-            engine="celery", kind="cron",
-            expression="* * * * *", task_name="t",
-            args=[1, 2], kwargs={"a": "b"},
+            project_slug="p",
+            name="x",
+            engine="celery",
+            kind="cron",
+            expression="* * * * *",
+            task_name="t",
+            args=[1, 2],
+            kwargs={"a": "b"},
         )
         sched2 = ImportedSchedule(
-            project_slug="p", name="x",
-            engine="celery", kind="cron",
-            expression="* * * * *", task_name="t",
-            args=[1, 2], kwargs={"a": "b"},
+            project_slug="p",
+            name="x",
+            engine="celery",
+            kind="cron",
+            expression="* * * * *",
+            task_name="t",
+            args=[1, 2],
+            kwargs={"a": "b"},
         )
         # ``project_slug`` is intentionally NOT part of the hash; the
         # hash is content-only (re-import idempotency).
@@ -58,9 +68,12 @@ class TestImportedSchedule:
 
     def test_compute_hash_changes_on_edit(self) -> None:
         sched = ImportedSchedule(
-            project_slug="p", name="x",
-            engine="celery", kind="cron",
-            expression="* * * * *", task_name="t",
+            project_slug="p",
+            name="x",
+            engine="celery",
+            kind="cron",
+            expression="* * * * *",
+            task_name="t",
         )
         before = sched.compute_hash()
         sched.expression = "0 * * * *"
@@ -71,9 +84,12 @@ class TestRenderJsonl:
     def test_one_line_per_schedule(self) -> None:
         scheds = [
             ImportedSchedule(
-                project_slug="p", name=f"n{i}",
-                engine="celery", kind="cron",
-                expression="0 * * * *", task_name="t",
+                project_slug="p",
+                name=f"n{i}",
+                engine="celery",
+                kind="cron",
+                expression="0 * * * *",
+                task_name="t",
             )
             for i in range(3)
         ]
@@ -102,7 +118,10 @@ class TestBrainImportClient:
         # be zero on an empty input (no rows to insert / update /
         # leave unchanged / fail).
         assert result == {
-            "inserted": 0, "updated": 0, "unchanged": 0, "failed": 0,
+            "inserted": 0,
+            "updated": 0,
+            "unchanged": 0,
+            "failed": 0,
         }
 
     @pytest.mark.asyncio
@@ -118,7 +137,7 @@ class TestBrainImportClient:
                 raise AssertionError("should have been short-circuited")
 
         class _Client:
-            async def __aenter__(self) -> "_Client":
+            async def __aenter__(self) -> _Client:
                 return self
 
             async def __aexit__(self, *_args: object) -> None:
@@ -127,19 +146,23 @@ class TestBrainImportClient:
             async def post(self, *_args: object, **_kw: object) -> _Response:
                 return _Response()
 
-        with patch("httpx.AsyncClient", return_value=_Client()):
-            with pytest.raises(RuntimeError, match="schedules:import"):
-                await client.upload(
-                    project_slug="p",
-                    schedules=[
-                        ImportedSchedule(
-                            project_slug="p", name="n",
-                            engine="celery", kind="cron",
-                            expression="* * * * *",
-                            task_name="t",
-                        ),
-                    ],
-                )
+        with (
+            patch("httpx.AsyncClient", return_value=_Client()),
+            pytest.raises(RuntimeError, match="schedules:import"),
+        ):
+            await client.upload(
+                project_slug="p",
+                schedules=[
+                    ImportedSchedule(
+                        project_slug="p",
+                        name="n",
+                        engine="celery",
+                        kind="cron",
+                        expression="* * * * *",
+                        task_name="t",
+                    ),
+                ],
+            )
 
 
 # =====================================================================
@@ -300,8 +323,8 @@ class TestCeleryClassify:
         from datetime import timedelta
 
         from z4j_scheduler.importers.celery import (
-            _UnsupportedScheduleError,
             _classify_schedule,
+            _UnsupportedScheduleError,
         )
 
         with pytest.raises(_UnsupportedScheduleError):
@@ -309,8 +332,8 @@ class TestCeleryClassify:
 
     def test_unknown_type_rejected(self) -> None:
         from z4j_scheduler.importers.celery import (
-            _UnsupportedScheduleError,
             _classify_schedule,
+            _UnsupportedScheduleError,
         )
 
         with pytest.raises(_UnsupportedScheduleError):
@@ -321,7 +344,7 @@ class TestCeleryAppLoader:
     def test_bad_path_format_rejected(self) -> None:
         from z4j_scheduler.importers.celery import _load_celery_app
 
-        with pytest.raises(ValueError, match="module.path:attr"):
+        with pytest.raises(ValueError, match=r"module\.path:attr"):
             _load_celery_app("not_a_module_path_format")
 
     def test_missing_module_clear_error(self) -> None:
@@ -349,7 +372,10 @@ class TestRqJobMapper:
             meta={"cron_string": "0 * * * *"},
         )
         sched = _job_to_schedule(
-            job=job, project_slug="p", engine="rq", default_queue=None,
+            job=job,
+            project_slug="p",
+            engine="rq",
+            default_queue=None,
         )
         assert sched.kind == "cron"
         assert sched.expression == "0 * * * *"
@@ -368,7 +394,10 @@ class TestRqJobMapper:
             meta={"interval": 60},
         )
         sched = _job_to_schedule(
-            job=job, project_slug="p", engine="rq", default_queue="q-fallback",
+            job=job,
+            project_slug="p",
+            engine="rq",
+            default_queue="q-fallback",
         )
         assert sched.kind == "interval"
         assert sched.expression == "60s"
@@ -388,15 +417,18 @@ class TestRqJobMapper:
             scheduled_at=when,
         )
         sched = _job_to_schedule(
-            job=job, project_slug="p", engine="rq", default_queue=None,
+            job=job,
+            project_slug="p",
+            engine="rq",
+            default_queue=None,
         )
         assert sched.kind == "one_shot"
         assert sched.expression == when.isoformat()
 
     def test_unknown_shape_raises(self) -> None:
         from z4j_scheduler.importers.rq import (
-            _UnsupportedJobError,
             _job_to_schedule,
+            _UnsupportedJobError,
         )
 
         job = SimpleNamespace(
@@ -409,7 +441,10 @@ class TestRqJobMapper:
         )
         with pytest.raises(_UnsupportedJobError):
             _job_to_schedule(
-                job=job, project_slug="p", engine="rq", default_queue=None,
+                job=job,
+                project_slug="p",
+                engine="rq",
+                default_queue=None,
             )
 
 
@@ -476,7 +511,10 @@ class TestApsJobMapper:
             next_run_time=datetime(2026, 4, 26, tzinfo=UTC),
         )
         sched = _job_to_schedule(
-            job=job, project_slug="p", engine="apscheduler", default_queue=None,
+            job=job,
+            project_slug="p",
+            engine="apscheduler",
+            default_queue=None,
         )
         assert sched.kind == "cron"
         assert sched.expression == "0 * * * *"
@@ -497,7 +535,10 @@ class TestApsJobMapper:
             next_run_time=None,  # paused
         )
         sched = _job_to_schedule(
-            job=job, project_slug="p", engine="apscheduler", default_queue=None,
+            job=job,
+            project_slug="p",
+            engine="apscheduler",
+            default_queue=None,
         )
         assert sched.kind == "interval"
         assert sched.expression == "300s"
@@ -516,15 +557,18 @@ class TestApsJobMapper:
             next_run_time=when,
         )
         sched = _job_to_schedule(
-            job=job, project_slug="p", engine="apscheduler", default_queue=None,
+            job=job,
+            project_slug="p",
+            engine="apscheduler",
+            default_queue=None,
         )
         assert sched.kind == "one_shot"
         assert sched.expression == when.isoformat()
 
     def test_combining_trigger_rejected(self) -> None:
         from z4j_scheduler.importers.apscheduler import (
-            _UnsupportedTriggerError,
             _job_to_schedule,
+            _UnsupportedTriggerError,
         )
 
         job = SimpleNamespace(
@@ -537,6 +581,8 @@ class TestApsJobMapper:
         )
         with pytest.raises(_UnsupportedTriggerError):
             _job_to_schedule(
-                job=job, project_slug="p", engine="apscheduler",
+                job=job,
+                project_slug="p",
+                engine="apscheduler",
                 default_queue=None,
             )

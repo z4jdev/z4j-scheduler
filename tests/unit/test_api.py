@@ -94,7 +94,8 @@ class TestReady:
         assert "brain_client" in body["missing"]
 
     def test_not_ready_lists_every_missing_subsystem(
-        self, settings: Settings,
+        self,
+        settings: Settings,
     ) -> None:
         state = SchedulerState(settings=settings)
         # No subsystems up.
@@ -150,12 +151,8 @@ class TestInfo:
         """
         client = _make_client(settings)
         body = client.get("/info").json()
-        assert "brain_grpc_url" not in body, (
-            "leaks the upstream brain URL"
-        )
-        assert "projects" not in body, (
-            "leaks the per-instance project bindings"
-        )
+        assert "brain_grpc_url" not in body, "leaks the upstream brain URL"
+        assert "projects" not in body, "leaks the per-instance project bindings"
 
 
 # ---------------------------------------------------------------------------
@@ -165,7 +162,8 @@ class TestInfo:
 
 class TestMetrics:
     def test_metrics_returns_prometheus_format(
-        self, settings: Settings,
+        self,
+        settings: Settings,
     ) -> None:
         client = _make_client(settings)
         response = client.get("/metrics")
@@ -178,17 +176,21 @@ class TestMetrics:
         assert "z4j_scheduler_schedules_loaded" in text
 
     def test_metrics_no_auth_when_token_unset(
-        self, settings: Settings,
+        self,
+        settings: Settings,
     ) -> None:
         client = _make_client(settings)
         # No Authorization header - 200 OK.
         assert client.get("/metrics").status_code == 200
 
     def test_metrics_requires_bearer_when_token_set(
-        self, settings: Settings, monkeypatch: pytest.MonkeyPatch,
+        self,
+        settings: Settings,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setenv(
-            "Z4J_SCHEDULER_METRICS_AUTH_TOKEN", "supersecret123",
+            "Z4J_SCHEDULER_METRICS_AUTH_TOKEN",
+            "supersecret123",
         )
         gated_settings = Settings(_env_file=None)  # type: ignore[call-arg]
         client = _make_client(gated_settings)
@@ -198,7 +200,8 @@ class TestMetrics:
 
         # Wrong header - 401.
         response = client.get(
-            "/metrics", headers={"Authorization": "Bearer wrong"},
+            "/metrics",
+            headers={"Authorization": "Bearer wrong"},
         )
         assert response.status_code == 401
 
@@ -214,7 +217,9 @@ class TestMetrics:
     # ------------------------------------------------------------------
 
     def test_metrics_disabled_returns_404(
-        self, settings: Settings, monkeypatch: pytest.MonkeyPatch,
+        self,
+        settings: Settings,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """When ``Z4J_SCHEDULER_METRICS_ENABLED=false`` the /metrics
         route MUST not be mounted. Pre-1.6.5 the setting was
@@ -252,7 +257,9 @@ class TestR3L1ProductionMetricsFailSafe:
     security review finds the leak."""
 
     def test_prod_nonloopback_unauth_metrics_refuses_startup(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         cert = tmp_path / "scheduler.crt"
         key = tmp_path / "scheduler.key"
@@ -270,7 +277,8 @@ class TestR3L1ProductionMetricsFailSafe:
         monkeypatch.setenv("Z4J_SCHEDULER_BIND_HOST", "0.0.0.0")
         monkeypatch.setenv("Z4J_SCHEDULER_METRICS_ENABLED", "true")
         monkeypatch.delenv(
-            "Z4J_SCHEDULER_METRICS_AUTH_TOKEN", raising=False,
+            "Z4J_SCHEDULER_METRICS_AUTH_TOKEN",
+            raising=False,
         )
 
         with pytest.raises(Exception) as exc:
@@ -287,7 +295,9 @@ class TestR3L1ProductionMetricsFailSafe:
         ), f"error message missing fix-options guidance: {msg}"
 
     def test_prod_loopback_unauth_metrics_starts(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Loopback bind is the operator's deliberate choice
         (typical: reverse-proxy in front handles auth). Skip the
@@ -307,14 +317,17 @@ class TestR3L1ProductionMetricsFailSafe:
         monkeypatch.setenv("Z4J_SCHEDULER_BIND_HOST", "127.0.0.1")
         monkeypatch.setenv("Z4J_SCHEDULER_METRICS_ENABLED", "true")
         monkeypatch.delenv(
-            "Z4J_SCHEDULER_METRICS_AUTH_TOKEN", raising=False,
+            "Z4J_SCHEDULER_METRICS_AUTH_TOKEN",
+            raising=False,
         )
         # Should NOT raise.
         s = Settings(_env_file=None)  # type: ignore[call-arg]
         assert s.bind_host == "127.0.0.1"
 
     def test_prod_nonloopback_auth_token_starts(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         cert = tmp_path / "scheduler.crt"
         key = tmp_path / "scheduler.key"
@@ -339,7 +352,9 @@ class TestR3L1ProductionMetricsFailSafe:
         assert s.metrics_auth_token is not None
 
     def test_prod_metrics_disabled_starts_without_auth(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         cert = tmp_path / "scheduler.crt"
         key = tmp_path / "scheduler.key"
@@ -356,14 +371,17 @@ class TestR3L1ProductionMetricsFailSafe:
         monkeypatch.setenv("Z4J_SCHEDULER_BIND_HOST", "0.0.0.0")
         monkeypatch.setenv("Z4J_SCHEDULER_METRICS_ENABLED", "false")
         monkeypatch.delenv(
-            "Z4J_SCHEDULER_METRICS_AUTH_TOKEN", raising=False,
+            "Z4J_SCHEDULER_METRICS_AUTH_TOKEN",
+            raising=False,
         )
         # Metrics off -> no /metrics surface -> no need to gate.
         s = Settings(_env_file=None)  # type: ignore[call-arg]
         assert s.metrics_enabled is False
 
     def test_dev_environment_skips_check(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Dev / test / CI environments skip the check so
         fixtureless setups continue to work."""
@@ -382,7 +400,8 @@ class TestR3L1ProductionMetricsFailSafe:
         monkeypatch.setenv("Z4J_SCHEDULER_BIND_HOST", "0.0.0.0")
         monkeypatch.setenv("Z4J_SCHEDULER_METRICS_ENABLED", "true")
         monkeypatch.delenv(
-            "Z4J_SCHEDULER_METRICS_AUTH_TOKEN", raising=False,
+            "Z4J_SCHEDULER_METRICS_AUTH_TOKEN",
+            raising=False,
         )
         # Should NOT raise even though prod combo would be refused.
         s = Settings(_env_file=None)  # type: ignore[call-arg]

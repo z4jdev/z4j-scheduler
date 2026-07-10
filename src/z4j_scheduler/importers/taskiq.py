@@ -63,7 +63,7 @@ def read_taskiq_broker(
         RuntimeError: broker cannot be resolved or taskiq missing.
     """
     try:
-        import taskiq  # noqa: F401, PLC0415
+        import taskiq  # noqa: F401
     except ImportError as exc:
         raise RuntimeError(
             "taskiq importer requires `pip install taskiq`",
@@ -81,8 +81,8 @@ def read_taskiq_broker(
         # ``schedule`` label is a list of {cron|time, ...} dicts.
         if not isinstance(schedule_label, (list, tuple)):
             logger.warning(
-                "z4j.scheduler.importers.taskiq: skipping %r - "
-                "schedule label is not a list", task_name,
+                "z4j.scheduler.importers.taskiq: skipping %r - schedule label is not a list",
+                task_name,
             )
             continue
         for idx, entry in enumerate(schedule_label):
@@ -100,7 +100,8 @@ def read_taskiq_broker(
 
     logger.info(
         "z4j.scheduler.importers.taskiq: parsed %d schedule(s) from %r",
-        len(schedules), broker_path,
+        len(schedules),
+        broker_path,
     )
     return schedules
 
@@ -113,11 +114,10 @@ def read_taskiq_broker(
 def _resolve_taskiq_broker(broker_path: str) -> Any:
     if ":" not in broker_path:
         raise RuntimeError(
-            f"taskiq importer: --taskiq-broker must be 'module:attr', "
-            f"got {broker_path!r}",
+            f"taskiq importer: --taskiq-broker must be 'module:attr', got {broker_path!r}",
         )
     module_path, _, attr = broker_path.partition(":")
-    import importlib  # noqa: PLC0415
+    import importlib
 
     try:
         module = importlib.import_module(module_path)
@@ -129,8 +129,7 @@ def _resolve_taskiq_broker(broker_path: str) -> Any:
         return getattr(module, attr)
     except AttributeError as exc:
         raise RuntimeError(
-            f"taskiq importer: {module_path!r} has no attribute "
-            f"{attr!r}",
+            f"taskiq importer: {module_path!r} has no attribute {attr!r}",
         ) from exc
 
 
@@ -146,8 +145,8 @@ def _label_entry_to_schedule(
 ) -> ImportedSchedule | None:
     if not isinstance(entry, dict):
         logger.warning(
-            "z4j.scheduler.importers.taskiq: skipping non-dict "
-            "schedule entry on %r", task_name,
+            "z4j.scheduler.importers.taskiq: skipping non-dict schedule entry on %r",
+            task_name,
         )
         return None
 
@@ -196,7 +195,9 @@ def _label_entry_to_schedule(
     logger.warning(
         "z4j.scheduler.importers.taskiq: skipping %r entry %d - "
         "no 'cron' or 'time' field; got keys=%r",
-        task_name, idx, sorted(entry.keys()),
+        task_name,
+        idx,
+        sorted(entry.keys()),
     )
     return None
 

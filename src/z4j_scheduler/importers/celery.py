@@ -84,9 +84,7 @@ def read_celery_app(
     """
     app = _load_celery_app(app_path)
     beat = getattr(app.conf, "beat_schedule", None) or {}
-    timezone = (
-        getattr(app.conf, "timezone", None) or default_timezone or "UTC"
-    )
+    timezone = getattr(app.conf, "timezone", None) or default_timezone or "UTC"
 
     schedules: list[ImportedSchedule] = []
     for name, entry in beat.items():
@@ -102,7 +100,8 @@ def read_celery_app(
         except _UnsupportedScheduleError as exc:
             logger.warning(
                 "z4j.scheduler.importers.celery: skipping %r - %s",
-                name, exc,
+                name,
+                exc,
             )
             continue
         if sched is not None:
@@ -131,7 +130,7 @@ def read_django_celery_beat(
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", django_settings)
 
     try:
-        import django  # noqa: PLC0415
+        import django
 
         django.setup()
     except ImportError as exc:
@@ -141,11 +140,10 @@ def read_django_celery_beat(
         ) from exc
 
     try:
-        from django_celery_beat.models import PeriodicTask  # noqa: PLC0415
+        from django_celery_beat.models import PeriodicTask
     except ImportError as exc:
         raise RuntimeError(
-            "django-celery-beat importer requires "
-            "`pip install django-celery-beat`",
+            "django-celery-beat importer requires `pip install django-celery-beat`",
         ) from exc
 
     schedules: list[ImportedSchedule] = []
@@ -159,9 +157,9 @@ def read_django_celery_beat(
             )
         except _UnsupportedScheduleError as exc:
             logger.warning(
-                "z4j.scheduler.importers.celery: skipping django-celery-beat "
-                "%r - %s",
-                task.name, exc,
+                "z4j.scheduler.importers.celery: skipping django-celery-beat %r - %s",
+                task.name,
+                exc,
             )
             continue
         if sched is not None:
@@ -186,7 +184,7 @@ def _load_celery_app(app_path: str) -> Any:
         )
     module_path, attr = app_path.rsplit(":", 1)
     try:
-        import importlib  # noqa: PLC0415
+        import importlib
 
         module = importlib.import_module(module_path)
     except ImportError as exc:
@@ -257,8 +255,11 @@ def _periodic_task_to_schedule(
         c = task.crontab
         expression = " ".join(
             [
-                c.minute, c.hour, c.day_of_month,
-                c.month_of_year, c.day_of_week,
+                c.minute,
+                c.hour,
+                c.day_of_month,
+                c.month_of_year,
+                c.day_of_week,
             ],
         )
         kind = "cron"
@@ -268,7 +269,9 @@ def _periodic_task_to_schedule(
         # django-celery-beat encodes period as "seconds"/"minutes"/etc.
         period = (i.period or "seconds").lower()
         suffix_map = {
-            "seconds": "s", "minutes": "m", "hours": "h",
+            "seconds": "s",
+            "minutes": "m",
+            "hours": "h",
             "days": "d",
         }
         suffix = suffix_map.get(period, "s")
@@ -315,7 +318,8 @@ def _periodic_task_to_schedule(
 
 
 def _classify_schedule(
-    raw: Any, default_timezone: str,
+    raw: Any,
+    default_timezone: str,
 ) -> tuple[str, str, str]:
     """Identify a celery schedule object and return (kind, expr, tz).
 
@@ -333,9 +337,13 @@ def _classify_schedule(
         return "interval", f"{seconds}s", default_timezone
 
     try:
-        from celery.schedules import (  # noqa: PLC0415
+        from celery.schedules import (
             crontab,
+        )
+        from celery.schedules import (
             schedule as celery_schedule,
+        )
+        from celery.schedules import (
             solar as celery_solar,
         )
     except ImportError:

@@ -26,7 +26,6 @@ Same shape as :mod:`z4j_scheduler.declarative.frameworks.django`:
 
 from __future__ import annotations
 
-import asyncio
 import json
 from typing import Any
 
@@ -82,15 +81,14 @@ class Command(BaseCommand):  # type: ignore[misc]
     # ------------------------------------------------------------------
 
     def _cmd_sync(self, *, json_output: bool) -> None:
-        from z4j_scheduler.declarative.frameworks.django import (  # noqa: PLC0415
+        from z4j_scheduler.declarative.frameworks.django import (
             reconcile_from_settings,
         )
 
         summary = reconcile_from_settings()
         if summary is None:
             raise CommandError(
-                "reconcile failed - check Z4J_SCHEDULES + "
-                "Z4J_SCHEDULES_PROJECT settings",
+                "reconcile failed - check Z4J_SCHEDULES + Z4J_SCHEDULES_PROJECT settings",
             )
         if json_output:
             self.stdout.write(json.dumps(summary, indent=2))
@@ -113,14 +111,13 @@ class Command(BaseCommand):  # type: ignore[misc]
             self.stdout.write("(no schedules)")
             return
         self.stdout.write(
-            f"{'name':<30} {'kind':<10} {'expression':<25} "
-            f"{'enabled':<8} {'source':<22}",
+            f"{'name':<30} {'kind':<10} {'expression':<25} {'enabled':<8} {'source':<22}",
         )
         for r in rows:
             self.stdout.write(
                 f"{r['name'][:30]:<30} {r['kind']:<10} "
                 f"{r['expression'][:25]:<25} "
-                f"{str(r['is_enabled']):<8} {r.get('source', '')[:22]:<22}",
+                f"{r['is_enabled']!s:<8} {r.get('source', '')[:22]:<22}",
             )
 
     def _cmd_diff(self, *, json_output: bool) -> None:
@@ -130,9 +127,9 @@ class Command(BaseCommand):  # type: ignore[misc]
         know what an actual sync would do. Doesn't write anything to
         brain - safe to run from a CI lint step.
         """
-        from django.conf import settings  # noqa: PLC0415
+        from django.conf import settings
 
-        from z4j_scheduler.declarative._reconciler import _to_imported  # noqa: PLC0415
+        from z4j_scheduler.declarative._reconciler import _to_imported
 
         declared = getattr(settings, "Z4J_SCHEDULES", None)
         if not declared:
@@ -141,26 +138,25 @@ class Command(BaseCommand):  # type: ignore[misc]
         cfg = self._read_brain_config()
 
         brain_rows = self._brain_get(
-            cfg, f"/api/v1/projects/{cfg['project']}/schedules",
+            cfg,
+            f"/api/v1/projects/{cfg['project']}/schedules",
         )
         # Only the rows from our source matter for diff scoping.
-        brain_for_source = [
-            r for r in brain_rows if r.get("source") == cfg["source"]
-        ]
+        brain_for_source = [r for r in brain_rows if r.get("source") == cfg["source"]]
         brain_by_name = {r["name"]: r for r in brain_for_source}
 
         # Convert each declared spec to its hash to compare with
         # brain's stored source_hash.
-        declared_specs = (
-            list(declared.values()) if isinstance(declared, dict) else list(declared)
-        )
+        declared_specs = list(declared.values()) if isinstance(declared, dict) else list(declared)
 
         will_insert: list[str] = []
         will_update: list[str] = []
         will_unchanged: list[str] = []
         for spec in declared_specs:
             imported = _to_imported(
-                spec, project=cfg["project"], source=cfg["source"],
+                spec,
+                project=cfg["project"],
+                source=cfg["source"],
             )
             current = brain_by_name.get(imported.name)
             if current is None:
@@ -172,10 +168,7 @@ class Command(BaseCommand):  # type: ignore[misc]
         # Anything in brain (for our source) that we're not declaring
         # would be deleted by replace_for_source.
         declared_names = {s.name for s in declared_specs}
-        will_delete = [
-            r["name"] for r in brain_for_source
-            if r["name"] not in declared_names
-        ]
+        will_delete = [r["name"] for r in brain_for_source if r["name"] not in declared_names]
 
         if json_output:
             self.stdout.write(
@@ -224,7 +217,7 @@ class Command(BaseCommand):  # type: ignore[misc]
     # ------------------------------------------------------------------
 
     def _read_brain_config(self) -> dict[str, Any]:
-        from django.conf import settings  # noqa: PLC0415
+        from django.conf import settings
 
         project = getattr(settings, "Z4J_SCHEDULES_PROJECT", None)
         if not project:
@@ -234,18 +227,24 @@ class Command(BaseCommand):  # type: ignore[misc]
         return {
             "project": project,
             "brain_url": getattr(
-                settings, "Z4J_SCHEDULES_BRAIN_URL", "http://brain:7700",
+                settings,
+                "Z4J_SCHEDULES_BRAIN_URL",
+                "http://brain:7700",
             ),
             "api_token": getattr(
-                settings, "Z4J_SCHEDULES_API_TOKEN", None,
+                settings,
+                "Z4J_SCHEDULES_API_TOKEN",
+                None,
             ),
             "source": getattr(
-                settings, "Z4J_SCHEDULES_SOURCE", "declarative_django",
+                settings,
+                "Z4J_SCHEDULES_SOURCE",
+                "declarative_django",
             ),
         }
 
     def _brain_get(self, cfg: dict[str, Any], path: str) -> Any:
-        import httpx  # noqa: PLC0415
+        import httpx
 
         headers = {}
         if cfg.get("api_token"):
@@ -262,9 +261,12 @@ class Command(BaseCommand):  # type: ignore[misc]
         return response.json()
 
     def _brain_post(
-        self, cfg: dict[str, Any], path: str, body: dict,
+        self,
+        cfg: dict[str, Any],
+        path: str,
+        body: dict,
     ) -> Any:
-        import httpx  # noqa: PLC0415
+        import httpx
 
         headers = {"Content-Type": "application/json"}
         if cfg.get("api_token"):
@@ -277,8 +279,7 @@ class Command(BaseCommand):  # type: ignore[misc]
         )
         if response.status_code >= 400:
             raise CommandError(
-                f"brain POST {path} returned {response.status_code}: "
-                f"{response.text}",
+                f"brain POST {path} returned {response.status_code}: {response.text}",
             )
         if response.status_code == 204 or not response.content:
             return None

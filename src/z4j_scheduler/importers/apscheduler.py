@@ -55,16 +55,15 @@ def read_apscheduler(
             APScheduler uses out of the box.
     """
     try:
-        from apscheduler.schedulers.background import (  # noqa: PLC0415
-            BackgroundScheduler,
-        )
-        from apscheduler.jobstores.sqlalchemy import (  # noqa: PLC0415
+        from apscheduler.jobstores.sqlalchemy import (
             SQLAlchemyJobStore,
+        )
+        from apscheduler.schedulers.background import (
+            BackgroundScheduler,
         )
     except ImportError as exc:
         raise RuntimeError(
-            "apscheduler importer requires `pip install apscheduler "
-            "sqlalchemy`",
+            "apscheduler importer requires `pip install apscheduler sqlalchemy`",
         ) from exc
 
     scheduler = BackgroundScheduler()
@@ -88,7 +87,8 @@ def read_apscheduler(
         except _UnsupportedTriggerError as exc:
             logger.warning(
                 "z4j.scheduler.importers.apscheduler: skipping %r - %s",
-                job.id, exc,
+                job.id,
+                exc,
             )
             continue
         if sched is not None:
@@ -195,6 +195,7 @@ def _render_cron_trigger(trigger: Any) -> str:
     ignore year/week/second - the 5-field form covers every cron
     schedule a developer normally writes by hand.
     """
+
     def _f(field_name: str, default: str = "*") -> str:
         # CronTrigger exposes fields as ``BaseField`` objects with
         # an ``expressions`` list; the string repr of one expression

@@ -14,7 +14,8 @@ add the second check.
 from __future__ import annotations
 
 import logging
-from typing import Any, Awaitable, Callable
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 import grpc
 
@@ -30,7 +31,8 @@ class TriggerAllowlistInterceptor(grpc.aio.ServerInterceptor):
     async def intercept_service(
         self,
         continuation: Callable[
-            [grpc.HandlerCallDetails], Awaitable[grpc.RpcMethodHandler],
+            [grpc.HandlerCallDetails],
+            Awaitable[grpc.RpcMethodHandler],
         ],
         handler_call_details: grpc.HandlerCallDetails,
     ) -> grpc.RpcMethodHandler:
@@ -99,13 +101,21 @@ async def _enforce_cn(
 
     # ``removeprefix`` (NOT ``lstrip``) - lstrip strips a SET of
     # characters and would silently corrupt CNs starting with D/N/S
-    # or colon. Mirrors the brain-side fix.
-    normalised = {c.removeprefix("DNS:").strip() for c in cn_candidates}
+    # or colon. Strip the SAN general-name prefixes the brain-side
+    # ``_normalise_cn`` strips (DNS:/IP:/URI:/email:), not just DNS:,
+    # so an IP-SAN cert (``IP:10.0.0.5``) matches a bare ``10.0.0.5``
+    # in the allow-list instead of being silently rejected.
+    def _bare_cn(cn: str) -> str:
+        for prefix in ("DNS:", "IP:", "URI:", "email:"):
+            if cn.startswith(prefix):
+                return cn.removeprefix(prefix).strip()
+        return cn.strip()
+
+    normalised = {_bare_cn(c) for c in cn_candidates}
 
     if not normalised & allowed:
         logger.warning(
-            "z4j.scheduler.trigger_grpc: rejected RPC; "
-            "peer CNs %r not in allow-list",
+            "z4j.scheduler.trigger_grpc: rejected RPC; peer CNs %r not in allow-list",
             sorted(normalised),
         )
         await context.abort(

@@ -56,6 +56,7 @@ integration test in ``tests/integration/`` uses
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import logging
 from typing import TYPE_CHECKING, Protocol
@@ -141,7 +142,7 @@ class AsyncpgLockBackend:
         if self._conn is not None:
             return self._conn
         try:
-            import asyncpg  # noqa: PLC0415
+            import asyncpg
         except ImportError as exc:  # pragma: no cover - dep is required
             raise RuntimeError(
                 "PostgresAdvisoryLockLeaderGate requires `asyncpg`",
@@ -159,7 +160,8 @@ class AsyncpgLockBackend:
         # (Postgres reference-counts within a session, so a re-call
         # is a true no-op from the standby's perspective).
         granted = await conn.fetchval(  # type: ignore[attr-defined]
-            "SELECT pg_try_advisory_lock($1::bigint)", key,
+            "SELECT pg_try_advisory_lock($1::bigint)",
+            key,
         )
         return bool(granted)
 
@@ -172,9 +174,10 @@ class AsyncpgLockBackend:
             return
         try:
             await self._conn.fetchval(  # type: ignore[attr-defined]
-                "SELECT pg_advisory_unlock($1::bigint)", key,
+                "SELECT pg_advisory_unlock($1::bigint)",
+                key,
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             # Connection may already be dead; the lock is gone
             # either way. Don't surface the error - release is
             # best-effort by contract.
@@ -186,11 +189,52 @@ class AsyncpgLockBackend:
     async def close(self) -> None:
         if self._conn is None:
             return
-        try:
+        with contextlib.suppress(Exception):
             await self._conn.close()  # type: ignore[attr-defined]
-        except Exception:  # noqa: BLE001
-            pass
         self._conn = None
+
+
+# =====================================================================
+# Shutdown-cleanup machinery (shared by both gates)
+# =====================================================================
+
+# Bound for each backend call made during stop() cleanup (release,
+# close). Mirrors the 5s task-join bound in stop() so a hung
+# connection cannot stall shutdown indefinitely: cleanup runs a
+# finite number of calls and each is individually bounded, so every
+# held lock still gets its release attempt even if an earlier one
+# timed out.
+_STOP_CLEANUP_OP_TIMEOUT_SECONDS = 5.0
+
+
+async def _await_despite_cancel(task: asyncio.Task[None]) -> None:
+    """Await ``task`` to completion, deferring caller cancellation.
+
+    A bare ``asyncio.shield`` is NOT enough for shutdown cleanup:
+    it protects the inner coroutine from cancellation, but when the
+    ENCLOSING task is cancelled the outer ``await`` of the shield
+    still raises CancelledError immediately, abandoning whatever
+    cleanup steps remained (remaining releases, held.clear(),
+    close()). This helper absorbs the cancel, keeps awaiting the
+    SAME task until it finishes, then re-raises the CancelledError
+    so the caller still observes its cancellation. R3-M5.
+    """
+    cancelled: asyncio.CancelledError | None = None
+    while True:
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            if task.cancelled():
+                # The cleanup task itself was cancelled (nothing is
+                # left to wait for) - don't spin, propagate.
+                raise
+            # The CALLER was cancelled mid-cleanup. Remember it and
+            # keep awaiting the same task; cleanup keeps running.
+            cancelled = exc
+            continue
+        break
+    if cancelled is not None:
+        raise cancelled
 
 
 # =====================================================================
@@ -245,44 +289,77 @@ class PostgresAdvisoryLockLeaderGate:
         self._stop_event.clear()
         self._first_cycle.clear()
         self._task = asyncio.create_task(
-            self._run(), name="z4j-scheduler-leader-gate",
+            self._run(),
+            name="z4j-scheduler-leader-gate",
         )
 
     async def stop(self) -> None:
-        """Stop the loop, release the lock, close the connection."""
+        """Stop the loop, release the lock, close the connection.
+
+        The ENTIRE sequence (loop join + release + close) runs inside
+        one dedicated task guarded by :func:`_await_despite_cancel`.
+        R3-M5 moved only the release+close tail into a task, which
+        left a gap round 4 reproduced: a cancel landing during the
+        loop JOIN (before the cleanup task existed) escaped stop()
+        with zero releases, the lock still held, and the backend
+        open. Creating the task FIRST makes every phase
+        cancellation-immune; the caller's cancellation is re-raised
+        after cleanup completes. R4-M4.
+        """
         self._stop_event.set()
+        stopper = asyncio.create_task(
+            self._stop_impl(),
+            name="z4j-scheduler-leader-gate-stop",
+        )
+        await _await_despite_cancel(stopper)
+
+    async def _stop_impl(self) -> None:
+        """Join the loop, then release + close (see stop()).
+
+        A cancel mid-release would otherwise leave the lock held
+        until the asyncpg session timeout, blocking standby
+        instances from leadership for tens of seconds and opening a
+        HA split-brain gap on rolling redeploy. R3-M5.
+        """
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 self._task.cancel()
-                try:
+                with contextlib.suppress(asyncio.CancelledError, Exception):
                     await self._task
-                except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                    pass
             self._task = None
-        # Shield the advisory-lock release + connection close
-        # against lifespan cancel - otherwise a cancel mid-release
-        # leaves the lock held until the asyncpg session timeout,
-        # blocking standby instances from leadership for tens of
-        # seconds and opening a HA split-brain gap on rolling
-        # redeploy.
+        await self._release_and_close()
+
+    async def _release_and_close(self) -> None:
+        """Full stop() cleanup; runs inside its own task (see stop()).
+
+        Each backend call is individually bounded so a hung
+        connection can't stall shutdown, and failures are logged and
+        swallowed so ``close`` is always reached.
+        """
         if self._is_leader:
             try:
-                await asyncio.shield(self._backend.release(self._key))
-            except Exception:  # noqa: BLE001
+                await asyncio.wait_for(
+                    self._backend.release(self._key),
+                    timeout=_STOP_CLEANUP_OP_TIMEOUT_SECONDS,
+                )
+            except Exception:
                 logger.exception(
                     "z4j leader: release failed during stop",
                 )
         self._is_leader = False
         try:
-            await asyncio.shield(self._backend.close())
-        except Exception:  # noqa: BLE001
+            await asyncio.wait_for(
+                self._backend.close(),
+                timeout=_STOP_CLEANUP_OP_TIMEOUT_SECONDS,
+            )
+        except Exception:
             logger.exception(
                 "z4j leader: backend close failed during stop",
             )
 
-    async def wait_for_first_cycle(self, timeout: float = 5.0) -> None:
+    async def wait_for_first_cycle(self, timeout: float = 5.0) -> None:  # noqa: ASYNC109  public API timeout param delegated to asyncio.wait_for
         """Block until the loop has done at least one acquisition pass."""
         await asyncio.wait_for(self._first_cycle.wait(), timeout=timeout)
 
@@ -290,7 +367,7 @@ class PostgresAdvisoryLockLeaderGate:
     # Read surface (Protocol-conforming)
     # ------------------------------------------------------------------
 
-    def is_leader(self, project_id: UUID) -> bool:  # noqa: ARG002
+    def is_leader(self, project_id: UUID) -> bool:
         """Synchronous leader check. Project id ignored in global mode."""
         return self._is_leader
 
@@ -320,8 +397,7 @@ class PostgresAdvisoryLockLeaderGate:
                         if granted:
                             self._is_leader = True
                             logger.info(
-                                "z4j.scheduler.leader.postgres: "
-                                "became LEADER (key=%d)",
+                                "z4j.scheduler.leader.postgres: became LEADER (key=%d)",
                                 self._key,
                             )
                     else:
@@ -330,21 +406,20 @@ class PostgresAdvisoryLockLeaderGate:
                         # restart) this raises and the except branch
                         # demotes us to standby.
                         await self._backend.health_check()
-                except Exception:  # noqa: BLE001
+                except Exception:
                     if self._is_leader:
                         logger.warning(
                             "z4j.scheduler.leader.postgres: "
                             "LOST LEADER status (key=%d) - reason: %s",
-                            self._key, "backend error",
+                            self._key,
+                            "backend error",
                         )
                     self._is_leader = False
                     # Force the connection closed so the next cycle
                     # opens a fresh one (the existing one is in an
                     # unknown state).
-                    try:
+                    with contextlib.suppress(Exception):
                         await self._backend.close()
-                    except Exception:  # noqa: BLE001
-                        pass
 
                 # Notify first-cycle waiters AFTER state has settled.
                 self._first_cycle.set()
@@ -356,9 +431,9 @@ class PostgresAdvisoryLockLeaderGate:
                     )
                     # stop_event fired: exit cleanly.
                     return
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     continue
-        except asyncio.CancelledError:
+        except asyncio.CancelledError:  # noqa: TRY203  explicit CancelledError propagation
             raise
 
 
@@ -449,45 +524,84 @@ class PerProjectLeaderGate:
         self._stop_event.clear()
         self._first_cycle.clear()
         self._task = asyncio.create_task(
-            self._run(), name="z4j-scheduler-per-project-gate",
+            self._run(),
+            name="z4j-scheduler-per-project-gate",
         )
 
     async def stop(self) -> None:
-        """Stop loop, release locks, close connection."""
+        """Stop loop, release locks, close connection.
+
+        The ENTIRE sequence (loop join + every release + held.clear()
+        + close) runs inside one dedicated task guarded by
+        :func:`_await_despite_cancel`. R3-M5 protected only the
+        release tail; round 4 reproduced a cancel during the loop
+        JOIN (before the cleanup task existed) escaping with all
+        locks still held and the backend open. Creating the task
+        FIRST makes every phase cancellation-immune; the caller's
+        cancellation is re-raised after cleanup completes. R4-M4.
+        """
         self._stop_event.set()
+        stopper = asyncio.create_task(
+            self._stop_impl(),
+            name="z4j-scheduler-per-project-gate-stop",
+        )
+        await _await_despite_cancel(stopper)
+
+    async def _stop_impl(self) -> None:
+        """Join the loop, then release-all + close (see stop()).
+
+        A cancel mid-release would otherwise leave per-project
+        advisory locks dangling and block standby promotion. R3-M5.
+        """
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 self._task.cancel()
-                try:
+                with contextlib.suppress(asyncio.CancelledError, Exception):
                     await self._task
-                except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                    pass
             self._task = None
-        # Shield each release + the backend close so a lifespan
-        # cancel mid-release can't leave per-project locks dangling
-        # and blocking standby promotion.
+        await self._release_all_and_close()
+
+    async def _release_all_and_close(self) -> None:
+        """Full stop() cleanup; runs inside its own task (see stop()).
+
+        Each backend call is individually bounded so a hung
+        connection can't stall shutdown, and failures are logged and
+        swallowed so every held key gets its release attempt and
+        ``close`` is always reached.
+        """
         for key in list(self._held.values()):
             try:
-                await asyncio.shield(self._backend.release(key))
-            except Exception:  # noqa: BLE001
+                await asyncio.wait_for(
+                    self._backend.release(key),
+                    timeout=_STOP_CLEANUP_OP_TIMEOUT_SECONDS,
+                )
+            except Exception:
+                # stdlib logger: %-format, NOT a structlog ``key=`` kwarg.
+                # A TypeError HERE (inside the except) would abort the
+                # release loop before self._held.clear() + backend.close(),
+                # leaving per-project advisory locks HELD + the connection
+                # open -> a standby cannot promote (split-brain window). B17.
                 logger.exception(
-                    "z4j leader: per-project release failed",
-                    key=key,
+                    "z4j leader: per-project release failed for key=%s",
+                    key,
                 )
         self._held.clear()
         try:
-            await asyncio.shield(self._backend.close())
-        except Exception:  # noqa: BLE001
+            await asyncio.wait_for(
+                self._backend.close(),
+                timeout=_STOP_CLEANUP_OP_TIMEOUT_SECONDS,
+            )
+        except Exception:
             logger.exception(
                 "z4j leader: per-project backend close failed",
             )
 
-    async def wait_for_first_cycle(self, timeout: float = 5.0) -> None:
+    async def wait_for_first_cycle(self, timeout: float = 5.0) -> None:  # noqa: ASYNC109  public API timeout param delegated to asyncio.wait_for
         await asyncio.wait_for(self._first_cycle.wait(), timeout=timeout)
 
-    def is_leader(self, project_id) -> bool:  # noqa: ANN001
+    def is_leader(self, project_id) -> bool:
         """Synchronous read of whether we currently hold this project's lock."""
         return project_id in self._held
 
@@ -507,8 +621,7 @@ class PerProjectLeaderGate:
                         self._project_source,
                     )
                     desired: dict[object, int] = {
-                        pid: _project_key(self._namespace, pid)
-                        for pid in projects
+                        pid: _project_key(self._namespace, pid) for pid in projects
                     }
 
                     # Acquire missing.
@@ -517,7 +630,7 @@ class PerProjectLeaderGate:
                             continue
                         try:
                             granted = await self._backend.acquire(key)
-                        except Exception:  # noqa: BLE001
+                        except Exception:  # noqa: TRY203  documents bail to outer handler
                             # Connection died mid-acquisition. Bail
                             # out of this cycle; the outer except
                             # handles cleanup.
@@ -525,18 +638,16 @@ class PerProjectLeaderGate:
                         if granted:
                             self._held[pid] = key
                             logger.info(
-                                "z4j.scheduler.leader.postgres: "
-                                "acquired project=%s (key=%d)",
-                                pid, key,
+                                "z4j.scheduler.leader.postgres: acquired project=%s (key=%d)",
+                                pid,
+                                key,
                             )
 
                     # Release dropped.
                     for pid in list(self._held):
                         if pid not in desired:
-                            try:
+                            with contextlib.suppress(Exception):
                                 await self._backend.release(self._held[pid])
-                            except Exception:  # noqa: BLE001
-                                pass
                             del self._held[pid]
                             logger.info(
                                 "z4j.scheduler.leader.postgres: "
@@ -546,7 +657,7 @@ class PerProjectLeaderGate:
 
                     # Liveness probe.
                     await self._backend.health_check()
-                except Exception:  # noqa: BLE001
+                except Exception:
                     if self._held:
                         logger.warning(
                             "z4j.scheduler.leader.postgres: "
@@ -554,10 +665,8 @@ class PerProjectLeaderGate:
                             len(self._held),
                         )
                     self._held.clear()
-                    try:
+                    with contextlib.suppress(Exception):
                         await self._backend.close()
-                    except Exception:  # noqa: BLE001
-                        pass
 
                 self._first_cycle.set()
 
@@ -567,13 +676,13 @@ class PerProjectLeaderGate:
                         timeout=self._heartbeat_seconds,
                     )
                     return
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     continue
-        except asyncio.CancelledError:
+        except asyncio.CancelledError:  # noqa: TRY203  explicit CancelledError propagation
             raise
 
 
-def _project_key(namespace: str, project_id) -> int:  # noqa: ANN001
+def _project_key(namespace: str, project_id) -> int:
     """Derive a 63-bit lock key from (namespace, project_id).
 
     Includes the namespace so a single Postgres instance can host
@@ -584,7 +693,7 @@ def _project_key(namespace: str, project_id) -> int:  # noqa: ANN001
     return _namespace_to_key(seed)
 
 
-async def _resolve_project_source(source) -> list:  # noqa: ANN001
+async def _resolve_project_source(source) -> list:
     """Call ``project_source`` accepting both sync and async callables.
 
     The cache exposes ``snapshot()`` as a coroutine; tests prefer

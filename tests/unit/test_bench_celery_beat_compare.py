@@ -15,7 +15,6 @@ celery isn't importable, the renderer produces non-empty output.
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
 import pytest
@@ -37,8 +36,11 @@ class TestBenchNextFireCost:
         # bench module - if any go missing the README table loses
         # a row without warning.
         assert set(out["per_cron"].keys()) == {
-            "every-minute", "every-5-min", "hourly",
-            "daily-3am", "weekly-mon",
+            "every-minute",
+            "every-5-min",
+            "hourly",
+            "daily-3am",
+            "weekly-mon",
         }
         # Every entry has at least the z4j metrics. The celery
         # metrics are conditional on celery being importable.

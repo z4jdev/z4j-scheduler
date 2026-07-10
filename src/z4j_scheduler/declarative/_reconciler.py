@@ -123,8 +123,7 @@ async def reconcile(
         for key, spec in schedules.items():
             if spec.name != key:
                 raise ValueError(
-                    f"declarative dict key {key!r} does not match "
-                    f"ScheduleSpec.name {spec.name!r}",
+                    f"declarative dict key {key!r} does not match ScheduleSpec.name {spec.name!r}",
                 )
             materialised.append(spec)
         schedules = materialised
@@ -146,7 +145,8 @@ async def reconcile(
     logger.info(
         "z4j.scheduler.declarative: reconciled project=%s source=%s "
         "inserted=%d updated=%d unchanged=%d deleted=%d failed=%d",
-        project, source,
+        project,
+        source,
         summary.get("inserted", 0),
         summary.get("updated", 0),
         summary.get("unchanged", 0),
@@ -181,8 +181,7 @@ def reconcile_sync(
         loop = None
     if loop is not None:
         raise RuntimeError(
-            "reconcile_sync called inside a running event loop. "
-            "Use the async reconcile() instead.",
+            "reconcile_sync called inside a running event loop. Use the async reconcile() instead.",
         )
     return asyncio.run(
         reconcile(
@@ -202,7 +201,10 @@ def reconcile_sync(
 
 
 def _to_imported(
-    spec: ScheduleSpec, *, project: str, source: str,
+    spec: ScheduleSpec,
+    *,
+    project: str,
+    source: str,
 ) -> ImportedSchedule:
     """Convert a ScheduleSpec into the ImportedSchedule shape brain expects.
 
@@ -241,7 +243,7 @@ async def _upload_with_mode(
     re-implement the HTTP call here. Same wire format, same
     response shape.
     """
-    import httpx  # noqa: PLC0415
+    import httpx
 
     payload = {
         "schedules": [s.to_dict() for s in schedules],
@@ -249,15 +251,12 @@ async def _upload_with_mode(
         "source_filter": source_filter,
     }
     headers = {"Content-Type": "application/json"}
-    if client._api_token:  # noqa: SLF001 - private but stable within package
-        headers["Authorization"] = f"Bearer {client._api_token}"  # noqa: SLF001
+    if client._api_token:
+        headers["Authorization"] = f"Bearer {client._api_token}"
 
-    url = (
-        f"{client._brain_url}/api/v1/projects/{project_slug}"  # noqa: SLF001
-        f"/schedules:import"
-    )
+    url = f"{client._brain_url}/api/v1/projects/{project_slug}/schedules:import"
 
-    async with httpx.AsyncClient(timeout=client._timeout) as http:  # noqa: SLF001
+    async with httpx.AsyncClient(timeout=client._timeout) as http:
         response = await http.post(url, json=payload, headers=headers)
         if response.status_code == 404:
             raise RuntimeError(

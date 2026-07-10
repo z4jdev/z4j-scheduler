@@ -25,6 +25,7 @@ reconcile from the app factory at boot time::
         ),
     ]
 
+
     def create_app() -> Flask:
         app = Flask(__name__)
         register_z4j_schedules(
@@ -94,17 +95,17 @@ def register_z4j_schedules(
                 "z4j.scheduler.declarative.flask: reconcile complete %r",
                 summary,
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             # Never crash Flask startup over a brain outage.
             logger.exception(
-                "z4j.scheduler.declarative.flask: reconcile failed; "
-                "app will continue",
+                "z4j.scheduler.declarative.flask: reconcile failed; app will continue",
             )
 
     # Register the CLI command. ``app.cli.command`` requires Flask >=
     # 1.0. Failing import (very old Flask) is silent - the operator
     # gets the in-app reconcile but no CLI.
     try:
+
         @app.cli.command("z4j-schedules-sync")
         def _z4j_sync_cmd() -> None:
             """Re-run the z4j-scheduler reconcile from the CLI."""
@@ -116,8 +117,8 @@ def register_z4j_schedules(
                 api_token=api_token,
                 timeout_seconds=timeout_seconds,
             )
-            print(f"z4j reconcile: {summary}")
-    except Exception:  # noqa: BLE001
+            print(f"z4j reconcile: {summary}")  # noqa: T201  CLI output
+    except Exception:
         logger.debug(
             "z4j.scheduler.declarative.flask: could not register CLI",
             exc_info=True,

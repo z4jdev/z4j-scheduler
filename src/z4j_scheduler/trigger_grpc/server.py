@@ -77,8 +77,7 @@ class TriggerGrpcServer:
         """
         if not self._settings.trigger_grpc_enabled:
             logger.info(
-                "z4j.scheduler.trigger_grpc: disabled via settings; "
-                "not starting server",
+                "z4j.scheduler.trigger_grpc: disabled via settings; not starting server",
             )
             return
 
@@ -115,9 +114,7 @@ class TriggerGrpcServer:
             )
 
         creds = _build_server_credentials(self._settings)
-        interceptors = (
-            TriggerAllowlistInterceptor(allowed_cns=allowed_cns),
-        )
+        interceptors = (TriggerAllowlistInterceptor(allowed_cns=allowed_cns),)
         # Keepalive opts. Without server-side keepalive a
         # half-open NAT/proxy could silently wedge the brain's
         # persistent ``TriggerScheduleClient`` channel for hours
@@ -155,8 +152,7 @@ class TriggerGrpcServer:
         pb_grpc.add_SchedulerServiceServicer_to_server(servicer, server)
 
         bind_addr = (
-            f"{self._settings.trigger_grpc_bind_host}"
-            f":{self._settings.trigger_grpc_bind_port}"
+            f"{self._settings.trigger_grpc_bind_host}:{self._settings.trigger_grpc_bind_port}"
         )
         self._bound_port = server.add_secure_port(bind_addr, creds)
         await server.start()
@@ -175,7 +171,7 @@ class TriggerGrpcServer:
             await self._server.stop(
                 grace=float(self._settings.trigger_grpc_grace_seconds),
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception(
                 "z4j.scheduler.trigger_grpc: server.stop crashed",
             )

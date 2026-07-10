@@ -38,10 +38,18 @@ MONOREPO_ROOT = PACKAGE_ROOT.parent.parent
 PROTO_FILE = PACKAGE_ROOT / "proto" / "scheduler.proto"
 
 SCHEDULER_OUT = PACKAGE_ROOT / "src" / "z4j_scheduler" / "proto"
+# The brain backend lives under packages/z4j/backend (it was
+# packages/z4j-brain pre-1.4 consolidation); keep both stub copies in
+# sync so the wire shape never drifts between scheduler and brain.
 BRAIN_OUT = (
     MONOREPO_ROOT
-    / "packages" / "z4j-brain" / "backend" / "src"
-    / "z4j_brain" / "scheduler_grpc" / "proto"
+    / "packages"
+    / "z4j"
+    / "backend"
+    / "src"
+    / "z4j_brain"
+    / "scheduler_grpc"
+    / "proto"
 )
 
 
@@ -50,7 +58,8 @@ def _run_protoc(out_dir: Path) -> None:
     subprocess.run(  # noqa: S603 - inputs are package-internal paths
         [
             sys.executable,
-            "-m", "grpc_tools.protoc",
+            "-m",
+            "grpc_tools.protoc",
             f"-I{PACKAGE_ROOT / 'proto'}",
             f"--python_out={out_dir}",
             f"--grpc_python_out={out_dir}",
@@ -72,8 +81,7 @@ def _rewrite_grpc_import(out_dir: Path, package_path: str) -> None:
         # so future-us catches the regen drift instead of silently
         # producing broken stubs.
         print(  # noqa: T201
-            f"WARNING: expected import line not found in {grpc_file}; "
-            f"manual review needed",
+            f"WARNING: expected import line not found in {grpc_file}; manual review needed",
             file=sys.stderr,
         )
         return

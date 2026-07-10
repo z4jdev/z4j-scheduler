@@ -40,8 +40,8 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 
 from croniter import croniter
 
@@ -114,7 +114,7 @@ def _kwargs_tuple(kwargs: dict) -> tuple:
 
 
 def predict_fires(
-    schedules: list["ImportedSchedule"],
+    schedules: list[ImportedSchedule],
     *,
     window_start: datetime,
     window_end: datetime,
@@ -149,7 +149,7 @@ def predict_fires(
 
 
 def _predict_cron(
-    sched: "ImportedSchedule",
+    sched: ImportedSchedule,
     window_start: datetime,
     window_end: datetime,
 ) -> list[PredictedFire]:
@@ -158,7 +158,7 @@ def _predict_cron(
     except Exception:
         # Unparseable timezone falls back to UTC. Operator sees this
         # in the importer's earlier pass; we don't double-warn here.
-        tz = timezone.utc
+        tz = UTC
     # Anchor at window_start in the schedule's tz so the first
     # ``get_next`` returns the first fire INSIDE the window, not
     # whatever was last triggered.
@@ -174,14 +174,16 @@ def _predict_cron(
         next_dt = cron.get_next(datetime)
         if next_dt > window_end.astimezone(tz):
             break
-        fires.append(PredictedFire(
-            schedule_name=sched.name,
-            fire_time=next_dt.astimezone(timezone.utc),
-            task_name=sched.task_name,
-            args=tuple(sched.args),
-            kwargs=_kwargs_tuple(sched.kwargs),
-            queue=sched.queue,
-        ))
+        fires.append(
+            PredictedFire(
+                schedule_name=sched.name,
+                fire_time=next_dt.astimezone(UTC),
+                task_name=sched.task_name,
+                args=tuple(sched.args),
+                kwargs=_kwargs_tuple(sched.kwargs),
+                queue=sched.queue,
+            )
+        )
         # Defensive cap so a truly malformed expression that fires
         # every nanosecond can't OOM the process.
         if len(fires) > 100_000:
@@ -190,7 +192,7 @@ def _predict_cron(
 
 
 def _predict_interval(
-    sched: "ImportedSchedule",
+    sched: ImportedSchedule,
     window_start: datetime,
     window_end: datetime,
 ) -> list[PredictedFire]:
@@ -200,14 +202,16 @@ def _predict_interval(
     out: list[PredictedFire] = []
     next_dt = window_start
     while next_dt <= window_end:
-        out.append(PredictedFire(
-            schedule_name=sched.name,
-            fire_time=next_dt,
-            task_name=sched.task_name,
-            args=tuple(sched.args),
-            kwargs=_kwargs_tuple(sched.kwargs),
-            queue=sched.queue,
-        ))
+        out.append(
+            PredictedFire(
+                schedule_name=sched.name,
+                fire_time=next_dt,
+                task_name=sched.task_name,
+                args=tuple(sched.args),
+                kwargs=_kwargs_tuple(sched.kwargs),
+                queue=sched.queue,
+            )
+        )
         next_dt = next_dt + timedelta(seconds=seconds)
         if len(out) > 100_000:
             break
@@ -215,7 +219,7 @@ def _predict_interval(
 
 
 def _predict_solar(
-    sched: "ImportedSchedule",
+    sched: ImportedSchedule,
     window_start: datetime,
     window_end: datetime,
 ) -> list[PredictedFire]:
@@ -228,7 +232,7 @@ def _predict_solar(
     or when astral can't compute (perpetual day / night).
     """
     try:
-        from z4j_scheduler.tick.solar import next_solar_fire  # noqa: PLC0415
+        from z4j_scheduler.tick.solar import next_solar_fire
     except ImportError:
         return []
     fires: list[PredictedFire] = []
@@ -240,14 +244,16 @@ def _predict_solar(
             return []
         if nxt is None or nxt > window_end:
             break
-        fires.append(PredictedFire(
-            schedule_name=sched.name,
-            fire_time=nxt,
-            task_name=sched.task_name,
-            args=tuple(sched.args),
-            kwargs=_kwargs_tuple(sched.kwargs),
-            queue=sched.queue,
-        ))
+        fires.append(
+            PredictedFire(
+                schedule_name=sched.name,
+                fire_time=nxt,
+                task_name=sched.task_name,
+                args=tuple(sched.args),
+                kwargs=_kwargs_tuple(sched.kwargs),
+                queue=sched.queue,
+            )
+        )
         cursor = nxt
         if len(fires) > 100_000:
             break
@@ -255,7 +261,7 @@ def _predict_solar(
 
 
 def _predict_one_shot(
-    sched: "ImportedSchedule",
+    sched: ImportedSchedule,
     window_start: datetime,
     window_end: datetime,
 ) -> list[PredictedFire]:
@@ -264,29 +270,31 @@ def _predict_one_shot(
     except ValueError:
         return []
     if target.tzinfo is None:
-        target = target.replace(tzinfo=timezone.utc)
+        target = target.replace(tzinfo=UTC)
     if window_start <= target <= window_end:
-        return [PredictedFire(
-            schedule_name=sched.name,
-            fire_time=target.astimezone(timezone.utc),
-            task_name=sched.task_name,
-            args=tuple(sched.args),
-            kwargs=_kwargs_tuple(sched.kwargs),
-            queue=sched.queue,
-        )]
+        return [
+            PredictedFire(
+                schedule_name=sched.name,
+                fire_time=target.astimezone(UTC),
+                task_name=sched.task_name,
+                args=tuple(sched.args),
+                kwargs=_kwargs_tuple(sched.kwargs),
+                queue=sched.queue,
+            )
+        ]
     return []
 
 
 def _resolve_tz(name: str):
     """Resolve a timezone name to a tzinfo. Falls through to UTC."""
     if not name or name == "UTC":
-        return timezone.utc
+        return UTC
     try:
-        from zoneinfo import ZoneInfo  # noqa: PLC0415
+        from zoneinfo import ZoneInfo
 
         return ZoneInfo(name)
     except Exception:
-        return timezone.utc
+        return UTC
 
 
 def _interval_to_seconds(expression: str) -> int:
@@ -382,13 +390,15 @@ def compare_predicted_fires(
     for key, src_fire in source_by_key.items():
         tgt_fire = target_by_key.get(key)
         if tgt_fire is None:
-            divergences.append(FireDivergence(
-                kind="only_source",
-                schedule_name=src_fire.schedule_name,
-                fire_time=src_fire.fire_time,
-                source=src_fire,
-                target=None,
-            ))
+            divergences.append(
+                FireDivergence(
+                    kind="only_source",
+                    schedule_name=src_fire.schedule_name,
+                    fire_time=src_fire.fire_time,
+                    source=src_fire,
+                    target=None,
+                )
+            )
             continue
         if (
             src_fire.task_name == tgt_fire.task_name
@@ -398,25 +408,29 @@ def compare_predicted_fires(
         ):
             matched += 1
         else:
-            divergences.append(FireDivergence(
-                kind="args_diverge",
-                schedule_name=src_fire.schedule_name,
-                fire_time=src_fire.fire_time,
-                source=src_fire,
-                target=tgt_fire,
-            ))
+            divergences.append(
+                FireDivergence(
+                    kind="args_diverge",
+                    schedule_name=src_fire.schedule_name,
+                    fire_time=src_fire.fire_time,
+                    source=src_fire,
+                    target=tgt_fire,
+                )
+            )
 
     # Target side - any keys that source didn't have at all.
     for key, tgt_fire in target_by_key.items():
         if key in source_by_key:
             continue
-        divergences.append(FireDivergence(
-            kind="only_target",
-            schedule_name=tgt_fire.schedule_name,
-            fire_time=tgt_fire.fire_time,
-            source=None,
-            target=tgt_fire,
-        ))
+        divergences.append(
+            FireDivergence(
+                kind="only_target",
+                schedule_name=tgt_fire.schedule_name,
+                fire_time=tgt_fire.fire_time,
+                source=None,
+                target=tgt_fire,
+            )
+        )
 
     # Sort by (fire_time, schedule_name) for stable output.
     divergences.sort(key=lambda d: (d.fire_time, d.schedule_name, d.kind))
@@ -439,7 +453,9 @@ def compare_predicted_fires(
 
 
 def render_report(
-    report: ShadowComparisonReport, *, max_divergences: int = 50,
+    report: ShadowComparisonReport,
+    *,
+    max_divergences: int = 50,
 ) -> str:
     """Render a markdown-style report for stdout.
 
@@ -466,9 +482,11 @@ def render_report(
         lines.append("Safe to flip the canonical scheduler.")
         return "\n".join(lines) + "\n"
 
-    lines.append(f"DIVERGENCE, flip is NOT safe yet. First "
-                 f"{min(max_divergences, len(report.divergences))} "
-                 f"of {len(report.divergences)}:")
+    lines.append(
+        f"DIVERGENCE, flip is NOT safe yet. First "
+        f"{min(max_divergences, len(report.divergences))} "
+        f"of {len(report.divergences)}:"
+    )
     lines.append("")
     for div in report.divergences[:max_divergences]:
         lines.extend(_render_divergence(div, report))
@@ -482,7 +500,8 @@ def render_report(
 
 
 def _render_divergence(
-    div: FireDivergence, report: ShadowComparisonReport,
+    div: FireDivergence,
+    report: ShadowComparisonReport,
 ) -> list[str]:
     header = (
         f"  [{div.kind.upper().replace('_', ' ')}] {div.schedule_name} "
@@ -498,8 +517,7 @@ def _render_divergence(
     if div.kind == "only_target":
         return [
             header,
-            f"    only {report.target_label} would fire it; "
-            f"{report.source_label} did not.",
+            f"    only {report.target_label} would fire it; {report.source_label} did not.",
             f"    task={div.target.task_name if div.target else '?'}",
         ]
     # args_diverge - both sides fire, payload differs

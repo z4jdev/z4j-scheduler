@@ -136,9 +136,13 @@ class TestEntryRoundTrip:
 class TestEventFromPb:
     def _entry_msg(self) -> pb.Schedule:
         return pb.Schedule(
-            id=str(uuid4()), project_id=str(uuid4()),
-            kind="cron", expression="0 * * * *",
-            timezone="UTC", is_enabled=True, catch_up="skip",
+            id=str(uuid4()),
+            project_id=str(uuid4()),
+            kind="cron",
+            expression="0 * * * *",
+            timezone="UTC",
+            is_enabled=True,
+            catch_up="skip",
         )
 
     # ``resume_token`` is the gRPC stream resume cursor, not a
@@ -148,19 +152,19 @@ class TestEventFromPb:
         ev = pb.ScheduleEvent(
             kind=pb.ScheduleEvent.Kind.CREATED,
             schedule=self._entry_msg(),
-            resume_token="token-1",  # noqa: S106 - opaque stream cursor, not a credential
+            resume_token="token-1",
         )
         result = event_from_pb(ev)
         assert result.kind == "created"
         assert result.schedule is not None
         assert result.deleted_id is None
-        assert result.resume_token == "token-1"  # noqa: S105 - same as above
+        assert result.resume_token == "token-1"
 
     def test_updated_event(self) -> None:
         ev = pb.ScheduleEvent(
             kind=pb.ScheduleEvent.Kind.UPDATED,
             schedule=self._entry_msg(),
-            resume_token="token-2",  # noqa: S106 - opaque stream cursor
+            resume_token="token-2",
         )
         result = event_from_pb(ev)
         assert result.kind == "updated"
@@ -171,7 +175,7 @@ class TestEventFromPb:
         ev = pb.ScheduleEvent(
             kind=pb.ScheduleEvent.Kind.DELETED,
             deleted_id=str(deleted_id),
-            resume_token="token-3",  # noqa: S106 - opaque stream cursor
+            resume_token="token-3",
         )
         result = event_from_pb(ev)
         assert result.kind == "deleted"
@@ -187,8 +191,10 @@ class TestFireRequestResponse:
         fired_at = datetime(2026, 4, 26, 15, 0, 0, 5000, tzinfo=UTC)
 
         request = make_fire_request(
-            schedule_id=sid, fire_id=fid,
-            scheduled_for=scheduled_for, fired_at=fired_at,
+            schedule_id=sid,
+            fire_id=fid,
+            scheduled_for=scheduled_for,
+            fired_at=fired_at,
         )
         assert UUID(request.schedule_id) == sid
         assert UUID(request.fire_id) == fid
@@ -224,8 +230,11 @@ class TestAck:
         fid = uuid4()
         cid = uuid4()
         request = make_ack_request(
-            fire_id=fid, command_id=cid,
-            status="success", new_task_id="abc", error=None,
+            fire_id=fid,
+            command_id=cid,
+            status="success",
+            new_task_id="abc",
+            error=None,
         )
         assert UUID(request.fire_id) == fid
         assert UUID(request.command_id) == cid
@@ -236,8 +245,11 @@ class TestAck:
     def test_make_ack_without_command_id(self) -> None:
         # Failure path - no command was assigned brain-side.
         request = make_ack_request(
-            fire_id=uuid4(), command_id=None,
-            status="failed", new_task_id=None, error="agent_offline",
+            fire_id=uuid4(),
+            command_id=None,
+            status="failed",
+            new_task_id=None,
+            error="agent_offline",
         )
         assert request.command_id == ""
         assert request.error == "agent_offline"

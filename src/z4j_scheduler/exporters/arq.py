@@ -6,6 +6,7 @@ The operator wires it::
 
     from .z4j_arq_schedules import build_cron_jobs
 
+
     class WorkerSettings:
         functions = [send_email, generate_report]
         cron_jobs = build_cron_jobs([send_email, generate_report])
@@ -51,12 +52,12 @@ def render(schedules: Iterable[ExportedSchedule]) -> str:
         "",
         "",
         "def build_cron_jobs(functions):",
-        "    \"\"\"Return a list of arq.cron.CronJob from z4j schedules.",
+        '    """Return a list of arq.cron.CronJob from z4j schedules.',
         "",
         "    ``functions`` is the same list you pass to",
         "    ``WorkerSettings.functions``. We resolve task_name to a",
         "    callable by ``__name__`` lookup.",
-        "    \"\"\"",
+        '    """',
         "    by_name = {",
         "        getattr(fn, '__name__', repr(fn)): fn for fn in functions",
         "    }",
@@ -113,17 +114,12 @@ def _render_one(sched: ExportedSchedule) -> list[str]:
 
     minute, hour, day, month, dow = parts
 
-    queue_note = (
-        f"    # original queue: {json.dumps(sched.queue)}\n"
-        if sched.queue else ""
-    )
+    queue_note = f"    # original queue: {json.dumps(sched.queue)}\n" if sched.queue else ""
     # arq's task_name is the function's __name__, not a dotted
     # module path. Strip the module prefix.
     fn_name = safe_task_name.rsplit(".", 1)[-1]
     return [
-        (
-            f"{queue_note}    if {json.dumps(fn_name)} in by_name:"
-        ),
+        (f"{queue_note}    if {json.dumps(fn_name)} in by_name:"),
         (
             f"        jobs.append(cron("
             f"by_name[{json.dumps(fn_name)}], "

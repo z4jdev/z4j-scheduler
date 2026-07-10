@@ -20,6 +20,7 @@ not installed.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -32,29 +33,26 @@ pytest.importorskip("asyncpg")
 pytest.importorskip("grpc")
 pytest.importorskip("z4j_brain")
 
-from cryptography import x509  # noqa: E402
-from cryptography.hazmat.primitives import hashes, serialization  # noqa: E402
-from cryptography.hazmat.primitives.asymmetric import rsa  # noqa: E402
-from cryptography.x509.oid import NameOID  # noqa: E402
-from sqlalchemy.ext.asyncio import create_async_engine  # noqa: E402
-from testcontainers.postgres import PostgresContainer  # noqa: E402
-
-from z4j_brain.domain.audit_service import AuditService  # noqa: E402
-from z4j_brain.domain.command_dispatcher import CommandDispatcher  # noqa: E402
-from z4j_brain.persistence.base import Base  # noqa: E402
-from z4j_brain.persistence.database import DatabaseManager  # noqa: E402
-from z4j_brain.persistence.enums import ScheduleKind  # noqa: E402
-from z4j_brain.persistence.models import Project, Schedule  # noqa: E402
-from z4j_brain.scheduler_grpc.auth import mint_scheduler_cert  # noqa: E402
-from z4j_brain.scheduler_grpc.server import (  # noqa: E402
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
+from sqlalchemy.ext.asyncio import create_async_engine
+from testcontainers.postgres import PostgresContainer
+from z4j_brain.domain.audit_service import AuditService
+from z4j_brain.domain.command_dispatcher import CommandDispatcher
+from z4j_brain.persistence.base import Base
+from z4j_brain.persistence.database import DatabaseManager
+from z4j_brain.persistence.enums import ScheduleKind
+from z4j_brain.persistence.models import Project, Schedule
+from z4j_brain.scheduler_grpc.auth import mint_scheduler_cert
+from z4j_brain.scheduler_grpc.server import (
     SchedulerGrpcServer,
 )
-from z4j_brain.settings import Settings as BrainSettings  # noqa: E402
-from z4j_brain.websocket.registry import LocalRegistry  # noqa: E402
-
-from z4j_scheduler.settings import Settings as SchedulerSettings  # noqa: E402
-from z4j_scheduler.storage.brain_client import BrainClient  # noqa: E402
-
+from z4j_brain.settings import Settings as BrainSettings
+from z4j_brain.websocket.registry import LocalRegistry
+from z4j_scheduler.settings import Settings as SchedulerSettings
+from z4j_scheduler.storage.brain_client import BrainClient
 
 # =====================================================================
 # Cert + CA helpers (mirror test_brain_scheduler_e2e.py)
@@ -139,27 +137,24 @@ def postgres_container():
     try:
         container = PostgresContainer("postgres:18-alpine")
         container.start()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         pytest.skip(f"could not start Postgres: {exc}")
     yield container
-    try:
+    with contextlib.suppress(Exception):
         container.stop()
-    except Exception:  # noqa: BLE001
-        pass
 
 
 @pytest.fixture(scope="module")
 def asyncpg_dsn(postgres_container) -> str:
     return postgres_container.get_connection_url().replace(
-        "postgresql+psycopg2://", "postgresql+asyncpg://",
+        "postgresql+psycopg2://",
+        "postgresql+asyncpg://",
     )
 
 
 @pytest.fixture
 async def brain_engine(asyncpg_dsn: str):
     """Engine + schema + trigger applied via alembic migrations."""
-    from alembic import command
-    from alembic.config import Config as AlembicConfig
 
     engine = create_async_engine(asyncpg_dsn)
 
@@ -323,7 +318,9 @@ async def scheduler_client(brain_grpc, cert_bundle: dict):
 class TestListenPush:
     @pytest.mark.asyncio
     async def test_create_event_arrives_within_one_second(
-        self, brain_grpc, scheduler_client: BrainClient,
+        self,
+        brain_grpc,
+        scheduler_client: BrainClient,
     ) -> None:
         """LISTEN-driven path: insert a row, expect CREATED in < 1s."""
         _server, _port, db = brain_grpc
@@ -356,7 +353,8 @@ class TestListenPush:
                     kind=ScheduleKind.CRON,
                     expression="0 * * * *",
                     timezone="UTC",
-                    args=[], kwargs={},
+                    args=[],
+                    kwargs={},
                     is_enabled=True,
                 ),
             )
@@ -364,11 +362,10 @@ class TestListenPush:
 
         try:
             await asyncio.wait_for(consume_task, timeout=3.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             consume_task.cancel()
             pytest.fail(
-                "LISTEN-driven WatchSchedules did not emit CREATED "
-                f"within 3s (events={events})",
+                f"LISTEN-driven WatchSchedules did not emit CREATED within 3s (events={events})",
             )
 
         assert len(events) >= 1
@@ -378,7 +375,9 @@ class TestListenPush:
 
     @pytest.mark.asyncio
     async def test_update_then_delete_event_sequence(
-        self, brain_grpc, scheduler_client: BrainClient,
+        self,
+        brain_grpc,
+        scheduler_client: BrainClient,
     ) -> None:
         """Insert + UPDATE + DELETE all flow through LISTEN."""
         _server, _port, db = brain_grpc
@@ -398,7 +397,8 @@ class TestListenPush:
                     kind=ScheduleKind.CRON,
                     expression="0 * * * *",
                     timezone="UTC",
-                    args=[], kwargs={},
+                    args=[],
+                    kwargs={},
                     is_enabled=True,
                 ),
             )
@@ -440,11 +440,10 @@ class TestListenPush:
 
         try:
             await asyncio.wait_for(consume_task, timeout=5.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             consume_task.cancel()
             pytest.fail(
-                "LISTEN path did not deliver both UPDATED + DELETED "
-                f"within 5s (events={events})",
+                f"LISTEN path did not deliver both UPDATED + DELETED within 5s (events={events})",
             )
 
         kinds = [e.kind for e in events]

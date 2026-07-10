@@ -72,7 +72,7 @@ def read_huey_app(
             is not installed.
     """
     try:
-        from huey import Huey  # noqa: F401, PLC0415
+        from huey import Huey  # noqa: F401
     except ImportError as exc:
         raise RuntimeError(
             "huey importer requires `pip install huey`",
@@ -84,8 +84,8 @@ def read_huey_app(
     registry = getattr(huey_inst, "_registry", None)
     if registry is None:
         logger.warning(
-            "z4j.scheduler.importers.huey: huey instance %r has no "
-            "_registry; nothing to import", app_path,
+            "z4j.scheduler.importers.huey: huey instance %r has no _registry; nothing to import",
+            app_path,
         )
         return schedules
 
@@ -103,7 +103,8 @@ def read_huey_app(
                 "z4j.scheduler.importers.huey: skipping %r - "
                 "validator is not a recognised crontab() form "
                 "(custom lambda validators have no derivable "
-                "cron string)", task_name,
+                "cron string)",
+                task_name,
             )
             continue
 
@@ -126,9 +127,10 @@ def read_huey_app(
         )
 
     logger.info(
-        "z4j.scheduler.importers.huey: parsed %d periodic task(s) "
-        "from huey instance %r (%d total)",
-        len(schedules), app_path, seen_periodic,
+        "z4j.scheduler.importers.huey: parsed %d periodic task(s) from huey instance %r (%d total)",
+        len(schedules),
+        app_path,
+        seen_periodic,
     )
     return schedules
 
@@ -146,11 +148,10 @@ def _resolve_huey_app(app_path: str) -> Any:
     """
     if ":" not in app_path:
         raise RuntimeError(
-            f"huey importer: --huey-app must be 'module:attr', "
-            f"got {app_path!r}",
+            f"huey importer: --huey-app must be 'module:attr', got {app_path!r}",
         )
     module_path, _, attr = app_path.partition(":")
-    import importlib  # noqa: PLC0415
+    import importlib
 
     try:
         module = importlib.import_module(module_path)
@@ -162,12 +163,11 @@ def _resolve_huey_app(app_path: str) -> Any:
         return getattr(module, attr)
     except AttributeError as exc:
         raise RuntimeError(
-            f"huey importer: {module_path!r} has no attribute "
-            f"{attr!r}",
+            f"huey importer: {module_path!r} has no attribute {attr!r}",
         ) from exc
 
 
-def _crontab_to_expression(validator: Any) -> str | None:
+def _crontab_to_expression(validator: Any) -> str | None:  # noqa: PLR0911  cron-field dispatch
     """Convert a Huey ``crontab(...)``-produced validator to a cron string.
 
     Huey's ``crontab()`` returns a closure that pre-expands each

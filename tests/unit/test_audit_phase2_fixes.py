@@ -26,14 +26,17 @@ class TestSchedulerInterceptorRemovePrefix:
         from z4j_scheduler.trigger_grpc import auth as trig_auth
 
         source = inspect.getsource(trig_auth)
-        assert "lstrip(\"DNS:\")" not in source
+        assert 'lstrip("DNS:")' not in source
         assert "lstrip('DNS:')" not in source
-        assert (
-            "removeprefix(\"DNS:\")" in source
-            or "removeprefix('DNS:')" in source
-        )
+        # Uses removeprefix, and now strips the FULL SAN general-name
+        # prefix set (DNS:/IP:/URI:/email:) via a loop -- mirroring the
+        # brain-side _normalise_cn -- not just DNS:, so an IP-SAN cert
+        # matches a bare IP in the allow-list.
+        assert "removeprefix(" in source
+        assert '"IP:"' in source
+        assert '"URI:"' in source
 
-    def test_cn_starting_with_S_not_mangled(self) -> None:
+    def test_cn_starting_with_s_not_mangled(self) -> None:
         # The literal symptom on the scheduler-side. If a future
         # refactor copies the lstrip pattern from somewhere else
         # this test catches it.

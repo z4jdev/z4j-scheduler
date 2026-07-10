@@ -1,6 +1,6 @@
 [project]
 name = "z4j-scheduler"
-version = "1.6.7"
+version = "1.7.0"
 description = "Engine-agnostic dynamic scheduler for the z4j stack (Apache 2.0)"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -58,14 +58,19 @@ dependencies = [
     # gRPC server + client (brain <-> scheduler). Async API used
     # throughout. Stubs are committed in src/z4j_scheduler/proto/
     # so the toolchain is build-time only.
-    "grpcio>=1.68",
-    "protobuf>=5.28",
+    # Floors must match the committed gencode: scheduler_pb2_grpc.py
+    # hard-requires grpcio>=1.80.0 and scheduler_pb2.py rejects a protobuf
+    # runtime older than its 6.31.1 gencode, both raised at import time. A
+    # lower floor lets a resolver land a version that crashes the scheduler
+    # on first import of its own stubs.
+    "grpcio>=1.80.0",
+    "protobuf>=6.31.1",
     # asyncpg directly for advisory locks. No SQLAlchemy at the
     # scheduler level - DB usage is narrow (lock + emergency read).
     "asyncpg>=0.30",
     # Validation + settings - pinned to match the rest of z4j.
     "pydantic>=2.9",
-    "pydantic-settings>=2.6",
+    "pydantic-settings>=2.14.2",
     # Cron parsing. Wrapped in src/z4j_scheduler/tick/cron.py so we
     # can swap if needed without touching call sites.
     "croniter>=3.0",

@@ -36,38 +36,52 @@ huey coverage in ``test_engine_matrix_live_e2e.py``.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import gc
 import json
 import os
 from pathlib import Path
 
 import pytest
-
 from z4j_bare.buffer import BufferStore
 from z4j_bare.dispatcher import CommandDispatcher
 from z4j_core.transport.frames import CommandFrame, CommandPayload
 
 from tests.integration.helpers import live_tasks
 
-
 _REDIS_URL = os.environ.get("REDIS_URL")
 
 
-# arq's redis-py async pool occasionally leaks an "unclosed Connection"
-# ResourceWarning at GC time even after explicit ``aclose()``. Pytest's
-# ``PytestUnraisableExceptionWarning`` promotes those to errors, which
-# masks otherwise-passing tests. Suppress at module level - the
-# warnings are GC-timing noise, not real bugs.
-pytestmark = [
-    pytest.mark.filterwarnings("ignore::ResourceWarning"),
-    pytest.mark.filterwarnings(
-        "ignore::pytest.PytestUnraisableExceptionWarning",
-    ),
-]
+# NOTE on resource hygiene: the suite-wide ``filterwarnings = error``
+# policy turns any ResourceWarning raised inside a destructor into an
+# unraisable exception, which pytest pins on whichever test happens to
+# be running when the GC fires - often a test in a LATER module. Every
+# broker client created in this module must therefore be closed
+# deterministically before the test returns (fixture finalizers and
+# try/finally below). Do not add ``filterwarnings`` ignores here; a
+# leak that only shows up at GC time is still a leak.
+
+
+@pytest.fixture(autouse=True)
+def _collect_cycles_eagerly():
+    """Run the cycle collector after each test in this module.
+
+    The broker clients built here (celery app, kombu channels, RQ
+    worker) are cyclic object graphs, so they die in the generational
+    collector, not by refcount. Collecting right away means that if a
+    test DOES leak an open resource, the resulting unraisable error
+    lands on the guilty test instead of an innocent later one. This is
+    attribution, not suppression - the explicit close calls in the
+    fixtures/teardowns are what actually prevent the warnings.
+    """
+    yield
+    gc.collect()
 
 
 def _have_fakeredis() -> bool:
     try:
         import fakeredis  # noqa: F401
+
         return True
     except ImportError:
         return False
@@ -77,9 +91,11 @@ def _make_redis_connection():
     """Return (connection, mode) where mode is 'real' or 'fake'."""
     if _REDIS_URL:
         import redis
+
         return redis.from_url(_REDIS_URL), "real"
     if _have_fakeredis():
         import fakeredis
+
         return fakeredis.FakeStrictRedis(), "fake"
     pytest.skip(
         "no Redis available: set REDIS_URL=redis://host:port or "
@@ -95,32 +111,62 @@ def buf(tmp_path: Path) -> BufferStore:
     store.close()
 
 
+def _close_sync_redis(conn) -> None:
+    """Close a sync redis client AND its connection pool.
+
+    ``Redis.close()`` alone is not always enough: connections checked
+    out (or parked) in the pool keep their sockets open until GC,
+    where ``socket.__del__`` raises ResourceWarning under the strict
+    warning policy. ``disconnect()`` closes every pooled socket now.
+    Works for fakeredis too (same client API).
+    """
+    with contextlib.suppress(Exception):
+        conn.close()
+    pool = getattr(conn, "connection_pool", None)
+    if pool is not None:
+        with contextlib.suppress(Exception):
+            pool.disconnect()
+
+
+@pytest.fixture
+def redis_conn():
+    """(connection, mode) pair with a finalizer that closes both the
+    client and every socket in its pool."""
+    conn, mode = _make_redis_connection()
+    yield conn, mode
+    _close_sync_redis(conn)
+
+
 # =====================================================================
 # RQ
 # =====================================================================
 
 
 @pytest.mark.asyncio
-async def test_rq_live_e2e_through_dispatcher(buf: BufferStore) -> None:
+async def test_rq_live_e2e_through_dispatcher(
+    buf: BufferStore,
+    redis_conn,
+) -> None:
     """schedule.fire → RQ adapter → real(ish) Redis queue → worker
     drains → task body runs (counter increments)."""
     pytest.importorskip("rq")
-    from rq import Queue, SimpleWorker
-
+    from rq import Queue
     from z4j_rq.engine import RqEngineAdapter
 
-    conn, mode = _make_redis_connection()
+    conn, mode = redis_conn
     live_tasks.reset_counter()
 
     class _RqApp:
         """Minimal RQ-app shape z4j-rq expects."""
+
         def __init__(self) -> None:
             self._queues: dict[str, Queue] = {}
 
         def queue_for_name(self, name: str) -> Queue:
             if name not in self._queues:
                 self._queues[name] = Queue(
-                    name=name, connection=conn,
+                    name=name,
+                    connection=conn,
                 )
             return self._queues[name]
 
@@ -216,7 +262,6 @@ async def test_arq_live_e2e_through_dispatcher(buf: BufferStore) -> None:
 
     from arq.connections import RedisSettings
     from arq.worker import Worker
-
     from z4j_arq.engine import ArqEngineAdapter
 
     live_tasks.reset_counter()
@@ -271,19 +316,28 @@ async def test_arq_live_e2e_through_dispatcher(buf: BufferStore) -> None:
     try:
         await worker.async_run()
     finally:
-        # Close the arq adapter's pool (avoids ResourceWarning that
-        # pytest's PytestUnraisableExceptionWarning catches) and the
-        # worker's own pool reference.
+        # Close BOTH redis pools (the adapter's and the worker's)
+        # with the modern ``aclose()`` API. Do NOT use
+        # ``worker.close()``: it goes through redis-py's deprecated
+        # ``pool.close(close_connection_pool=True)`` alias, whose
+        # DeprecationWarning the suite-wide ``filterwarnings =
+        # error`` policy raises as an exception part-way through
+        # cleanup. That is exactly how the worker pool used to leak:
+        # a blanket suppress() swallowed the error, the pool never
+        # disconnected, and its connections + transports hit the GC
+        # unraisable path during a later test.
+        worker_tasks = [t for t in getattr(worker, "tasks", {}).values() if not t.done()]
+        for t in worker_tasks:
+            t.cancel()
+        if worker_tasks:
+            await asyncio.gather(*worker_tasks, return_exceptions=True)
+        worker_pool = getattr(worker, "_pool", None)
+        if worker_pool is not None:
+            await worker_pool.aclose(close_connection_pool=True)
+            worker._pool = None
         adapter_pool = getattr(adapter, "_pool", None)
         if adapter_pool is not None:
-            try:
-                await adapter_pool.aclose()
-            except Exception:  # noqa: BLE001
-                pass
-        try:
-            await worker.close()
-        except Exception:  # noqa: BLE001
-            pass
+            await adapter_pool.aclose()
 
     results = [e for e in buf.drain(20) if e.kind == "command_result"]
     assert len(results) == 1
@@ -297,6 +351,52 @@ async def test_arq_live_e2e_through_dispatcher(buf: BufferStore) -> None:
 # =====================================================================
 # Celery
 # =====================================================================
+
+
+def _close_celery_app(app) -> None:
+    """Deterministically close every connection a test-local Celery
+    app opened, so no open socket survives the test.
+
+    ``Celery.close()`` alone is NOT enough - it only drops the pool
+    reference without disconnecting anything. Left open, the sockets
+    below sit inside the app's cyclic object graph until the
+    generational GC finally collects it (often during a LATER test),
+    where each ``socket.__del__`` raises ResourceWarning under the
+    suite-wide ``filterwarnings = error`` policy and errors out an
+    innocent test ("multiple unraisable exception warnings").
+
+    Three connections leak from a single ``send_task`` round-trip
+    against a redis broker+backend (verified via gc referrer census):
+
+    1. the result-consumer pub/sub connection (``on_task_call``
+       subscribes to the result channel at publish time),
+    2. the redis result-backend client's pooled connection(s),
+    3. the kombu broker (producer pool) connection.
+
+    Reads celery's lazily-created attributes (``_backend``, cached
+    ``amqp``, ``_pool``) without going through the creating
+    properties, so teardown never CREATES an object that did not
+    already exist.
+    """
+    backend = getattr(app, "_backend", None)
+    if backend is not None:
+        consumer = getattr(backend, "result_consumer", None)
+        if consumer is not None:
+            with contextlib.suppress(Exception):
+                consumer.stop()  # closes the pub/sub connection
+        client = backend.__dict__.get("client")
+        if client is not None:
+            with contextlib.suppress(Exception):
+                client.connection_pool.disconnect()
+    amqp = app.__dict__.get("amqp")
+    if amqp is not None and amqp._producer_pool is not None:
+        with contextlib.suppress(Exception):
+            amqp._producer_pool.force_close_all()
+    if app._pool is not None:
+        with contextlib.suppress(Exception):
+            app._pool.force_close_all()
+    with contextlib.suppress(Exception):
+        app.close()
 
 
 @pytest.mark.asyncio
@@ -315,7 +415,6 @@ async def test_celery_live_e2e_through_dispatcher(buf: BufferStore) -> None:
         )
 
     from celery import Celery
-
     from z4j_celery.engine import CeleryEngineAdapter
 
     live_tasks.reset_counter()
@@ -324,9 +423,12 @@ async def test_celery_live_e2e_through_dispatcher(buf: BufferStore) -> None:
     # test run (or another celery app sharing the broker) don't
     # cause spurious extra invocations of our task.
     import redis as _redis_sync
+
     _conn = _redis_sync.from_url(_REDIS_URL)
-    _conn.flushdb()
-    _conn.close()
+    try:
+        _conn.flushdb()
+    finally:
+        _close_sync_redis(_conn)
 
     app = Celery(
         "z4j-live-test",
@@ -355,40 +457,41 @@ async def test_celery_live_e2e_through_dispatcher(buf: BufferStore) -> None:
     # the network; we don't need it for a single-task test.
     from celery.contrib.testing.worker import start_worker
 
-    with start_worker(
-        app,
-        perform_ping_check=False,
-        loglevel="ERROR",
-    ):
-        frame = CommandFrame(
-            id="cmd_celery_live",
-            payload=CommandPayload(
-                action="schedule.fire",
-                target={},
-                parameters={
-                    "task_name": "z4j.test.live.celery_redis_task",
-                    "engine": "celery",
-                    "queue": "celery",
-                    "args": [1],
-                    "kwargs": {},
-                    "fire_id": "f1",
-                },
-            ),
-            hmac="deadbeef" * 8,
-        )
-        await dispatcher.handle(frame)
+    try:
+        with start_worker(
+            app,
+            perform_ping_check=False,
+            loglevel="ERROR",
+        ):
+            frame = CommandFrame(
+                id="cmd_celery_live",
+                payload=CommandPayload(
+                    action="schedule.fire",
+                    target={},
+                    parameters={
+                        "task_name": "z4j.test.live.celery_redis_task",
+                        "engine": "celery",
+                        "queue": "celery",
+                        "args": [1],
+                        "kwargs": {},
+                        "fire_id": "f1",
+                    },
+                ),
+                hmac="deadbeef" * 8,
+            )
+            await dispatcher.handle(frame)
 
-        # Wait up to 10s for the worker thread to drain.
-        deadline = asyncio.get_event_loop().time() + 10.0
-        while live_tasks.get_counter() == 0:
-            if asyncio.get_event_loop().time() > deadline:
-                break
-            await asyncio.sleep(0.1)
+            # Wait up to 10s for the worker thread to drain.
+            deadline = asyncio.get_event_loop().time() + 10.0
+            while live_tasks.get_counter() == 0:
+                if asyncio.get_event_loop().time() > deadline:
+                    break
+                await asyncio.sleep(0.1)
+    finally:
+        _close_celery_app(app)
 
     results = [e for e in buf.drain(20) if e.kind == "command_result"]
     assert len(results) == 1
     parsed = json.loads(results[0].payload.decode("utf-8"))
     assert parsed["payload"]["status"] == "success"
-    assert live_tasks.get_counter() == 1, (
-        "celery worker should have run the task body within 10s"
-    )
+    assert live_tasks.get_counter() == 1, "celery worker should have run the task body within 10s"

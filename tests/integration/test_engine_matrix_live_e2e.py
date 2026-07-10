@@ -53,18 +53,15 @@ What this does NOT prove
 
 from __future__ import annotations
 
-import asyncio
 import json
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
-
 from z4j_bare.buffer import BufferStore
 from z4j_bare.dispatcher import CommandDispatcher
 from z4j_core.transport.frames import CommandFrame, CommandPayload
-
 
 # Each builder returns
 # ``(engine_name, adapter, task_name, run_pending_async, assert_executed)``
@@ -84,7 +81,6 @@ def _build_celery_eager() -> _LiveBuilderResult:
     """Celery with task_always_eager=True - tasks run synchronously."""
     pytest.importorskip("celery")
     from celery import Celery
-
     from z4j_celery.engine import CeleryEngineAdapter
 
     app = Celery("z4j-test", broker="memory://")
@@ -108,8 +104,7 @@ def _build_celery_eager() -> _LiveBuilderResult:
 
     def _assert() -> None:
         assert counter["n"] == 1, (
-            f"celery eager task should have incremented counter to 1; "
-            f"got {counter['n']}"
+            f"celery eager task should have incremented counter to 1; got {counter['n']}"
         )
 
     return "celery", adapter, "z4j.test.live.celery_task", _no_op_drain, _assert
@@ -121,7 +116,6 @@ def _build_dramatiq_stub() -> _LiveBuilderResult:
     import dramatiq
     from dramatiq.brokers.stub import StubBroker
     from dramatiq.worker import Worker
-
     from z4j_dramatiq.engine import DramatiqEngineAdapter
 
     saved = dramatiq.broker.global_broker
@@ -147,17 +141,18 @@ def _build_dramatiq_stub() -> _LiveBuilderResult:
 
     def _assert() -> None:
         try:
-            assert counter["n"] == 1, (
-                f"dramatiq task should have run; counter={counter['n']}"
-            )
+            assert counter["n"] == 1, f"dramatiq task should have run; counter={counter['n']}"
         finally:
             worker.stop()
             broker.close()
             dramatiq.broker.global_broker = saved
 
     return (
-        "dramatiq", adapter, "z4j.test.live.dramatiq_task",
-        _drain, _assert,
+        "dramatiq",
+        adapter,
+        "z4j.test.live.dramatiq_task",
+        _drain,
+        _assert,
     )
 
 
@@ -165,7 +160,6 @@ def _build_huey_immediate() -> _LiveBuilderResult:
     """Huey with immediate=True - tasks run synchronously."""
     pytest.importorskip("huey")
     from huey import MemoryHuey
-
     from z4j_huey.engine import HueyEngineAdapter
 
     huey_inst = MemoryHuey("live-test", immediate=True)
@@ -180,7 +174,8 @@ def _build_huey_immediate() -> _LiveBuilderResult:
     adapter = HueyEngineAdapter(huey=huey_inst)
 
     full_name = next(
-        k for k in huey_inst._registry._registry
+        k
+        for k in huey_inst._registry._registry
         if k.endswith(".huey_task") or k == "z4j.test.live.huey_task"
     )
 
@@ -188,9 +183,7 @@ def _build_huey_immediate() -> _LiveBuilderResult:
         return None
 
     def _assert() -> None:
-        assert counter["n"] == 1, (
-            f"huey immediate task should have run; counter={counter['n']}"
-        )
+        assert counter["n"] == 1, f"huey immediate task should have run; counter={counter['n']}"
 
     return "huey", adapter, full_name, _no_op_drain, _assert
 
@@ -199,7 +192,6 @@ def _build_taskiq_inmemory() -> _LiveBuilderResult:
     """Taskiq InMemoryBroker - kiq() runs the task immediately."""
     pytest.importorskip("taskiq")
     from taskiq import InMemoryBroker
-
     from z4j_taskiq.engine import TaskiqEngineAdapter
 
     broker = InMemoryBroker()
@@ -212,9 +204,7 @@ def _build_taskiq_inmemory() -> _LiveBuilderResult:
         return counter["n"]
 
     adapter = TaskiqEngineAdapter(broker=broker)
-    full_name = next(
-        k for k in broker.get_all_tasks() if k.endswith(":_live_task")
-    )
+    full_name = next(k for k in broker.get_all_tasks() if k.endswith(":_live_task"))
 
     async def _drain() -> None:
         # InMemoryBroker runs the task in the kiq() coroutine. Nothing
@@ -223,8 +213,7 @@ def _build_taskiq_inmemory() -> _LiveBuilderResult:
 
     def _assert() -> None:
         assert counter["n"] == 1, (
-            f"taskiq InMemoryBroker task should have run; "
-            f"counter={counter['n']}"
+            f"taskiq InMemoryBroker task should have run; counter={counter['n']}"
         )
 
     started = {"v": False}
@@ -244,10 +233,13 @@ def _build_taskiq_inmemory() -> _LiveBuilderResult:
         await _setup_drain()
 
     return (
-        "taskiq", adapter, full_name,
+        "taskiq",
+        adapter,
+        full_name,
         # Replace drain with the teardown wrapper so the test fixture
         # can call it last.
-        _teardown_drain, _assert,
+        _teardown_drain,
+        _assert,
     )
 
 
@@ -297,7 +289,9 @@ async def test_schedule_fire_actually_runs_task(
         # The broker is the adapter's broker; introspect it from
         # the adapter via attribute access.
         broker_attr = getattr(adapter, "broker", None) or getattr(
-            adapter, "_broker", None,
+            adapter,
+            "_broker",
+            None,
         )
         if broker_attr is not None and isinstance(broker_attr, InMemoryBroker):
             await broker_attr.startup()
@@ -338,8 +332,7 @@ async def test_schedule_fire_actually_runs_task(
     assert len(results) == 1
     parsed = json.loads(results[0].payload.decode("utf-8"))
     assert parsed["payload"]["status"] == "success", (
-        f"engine={engine_name}: dispatch failed - "
-        f"{parsed['payload'].get('error')!r}"
+        f"engine={engine_name}: dispatch failed - {parsed['payload'].get('error')!r}"
     )
 
     # The task body actually ran (sentinel mutated).

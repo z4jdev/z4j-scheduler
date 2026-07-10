@@ -32,6 +32,7 @@ Design properties this module commits to:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol
@@ -117,6 +118,9 @@ class Dispatcher(Protocol):
         schedule_id: UUID,
         scheduled_for: datetime,
         schedule_name: str = "",
+        engine: str = "",
+        project_id: UUID | None = None,
+        project_schedule_count: int | None = None,
     ) -> None: ...
 
 
@@ -265,8 +269,7 @@ class TickEngine:
         # could still be in cache awaiting the disable event).
         if not self._watch_healthy():
             logger.debug(
-                "z4j.scheduler.tick: watch stream unhealthy; "
-                "skipping dispatch this iteration",
+                "z4j.scheduler.tick: watch stream unhealthy; skipping dispatch this iteration",
             )
             # Fixed-duration cooperative wait so the watch reconnect
             # task and other asyncio coroutines can run. Past-due
@@ -278,13 +281,11 @@ class TickEngine:
             # restart is the only recovery -- which is exactly the
             # silent-data-loss-on-brain-restart symptom that load
             # testing surfaced.
-            try:
+            with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(
                     self._stop_event.wait(),
                     timeout=_UNHEALTHY_SLEEP_SECONDS,
                 )
-            except (asyncio.TimeoutError, TimeoutError):
-                pass
             return
         now = self._clock()
         due = await self._cache.all_due(before=now)
@@ -320,7 +321,8 @@ class TickEngine:
                 next_at = self._next_fire_for(entry)
                 if next_at is not None:
                     await self._cache.update_fire_state(
-                        entry.id, next_fire_at=next_at,
+                        entry.id,
+                        next_fire_at=next_at,
                     )
         # Apply any disables queued by ``_next_fire_for``. Pop into
         # a local list so a concurrent producer can keep adding while
@@ -330,7 +332,8 @@ class TickEngine:
             self._pending_disables.clear()
             for sched_id in to_disable:
                 await self._cache.update_fire_state(
-                    sched_id, is_enabled=False,
+                    sched_id,
+                    is_enabled=False,
                 )
 
     def _next_fire_for(  # noqa: PLR0911 - per-kind dispatch is idiomatic
@@ -365,7 +368,9 @@ class TickEngine:
             after = last if last is not None else self._clock()
             try:
                 return cron_mod.next_fire(
-                    entry.expression, entry.timezone, after,
+                    entry.expression,
+                    entry.timezone,
+                    after,
                 )
             except cron_mod.CronExpressionError:
                 logger.exception(
@@ -410,7 +415,8 @@ class TickEngine:
         if entry.kind in ("clocked", "one_shot"):
             try:
                 return one_shot_mod.next_fire(
-                    entry.expression, last_fire_at=last,
+                    entry.expression,
+                    last_fire_at=last,
                 )
             except one_shot_mod.OneShotExpressionError:
                 logger.exception(
@@ -438,7 +444,8 @@ class TickEngine:
             anchor = last if last is not None else self._clock()
             try:
                 return solar_mod.next_solar_fire(
-                    entry.expression, after=anchor,
+                    entry.expression,
+                    after=anchor,
                 )
             except (ValueError, RuntimeError):
                 logger.exception(
@@ -453,7 +460,8 @@ class TickEngine:
         # WatchStream upsert can't drop the disable.
         logger.error(
             "z4j.scheduler.tick: unknown schedule kind %r for schedule_id=%s",
-            entry.kind, entry.id,
+            entry.kind,
+            entry.id,
         )
         self._pending_disables.add(entry.id)
         return None
@@ -520,9 +528,7 @@ class TickEngine:
         # one-shot we always fire exactly once regardless of
         # lateness; the caller's ``catch_up`` policy is meaningless
         # for a single-fire schedule.
-        if entry.kind in ("clocked", "one_shot"):
-            plan = [scheduled_for]
-        elif lateness_seconds <= _ON_TIME_GRACE_SECONDS:
+        if entry.kind in ("clocked", "one_shot") or lateness_seconds <= _ON_TIME_GRACE_SECONDS:
             plan = [scheduled_for]
         else:
             # For cron schedules with ``fire_all_missed``,
@@ -546,7 +552,8 @@ class TickEngine:
             # documented degraded mode.
             if entry.kind == "cron":
                 missed_times = self._compute_missed_cron_slots(
-                    entry, scheduled_for=scheduled_for,
+                    entry,
+                    scheduled_for=scheduled_for,
                 )
             else:
                 missed_times = [scheduled_for]
@@ -556,18 +563,32 @@ class TickEngine:
                 now=now,
             )
 
+        # A3: hand the dispatcher this project's schedule count (from the
+        # cache the engine already owns) so IT can decide whether the
+        # fire-variance histogram carries a per-schedule label -- the
+        # cardinality threshold lives with the metric, and the engine
+        # stays metrics-free. Resolved once per fire, not per missed
+        # moment.
+        project_schedule_count = await self._cache.count_for_project(
+            entry.project_id,
+        )
+
         for moment in plan:
             try:
                 await self._dispatcher.dispatch(
                     schedule_id=entry.id,
                     scheduled_for=moment,
                     schedule_name=entry.name,
+                    engine=entry.engine,
+                    project_id=entry.project_id,
+                    project_schedule_count=project_schedule_count,
                 )
             except Exception:
                 logger.exception(
                     "z4j.scheduler.tick: dispatcher raised for "
                     "schedule_id=%s scheduled_for=%s; will retry on next tick",
-                    entry.id, moment,
+                    entry.id,
+                    moment,
                 )
                 # Do NOT advance - we want to retry on next tick. The
                 # dispatcher itself owns the retry contract; a raise
@@ -600,7 +621,7 @@ class TickEngine:
         signal from the non-leader path (we did NOT actually fire,
         so don't pretend we did).
         """
-        from z4j_scheduler.storage.cache import _UNSET as _CACHE_UNSET  # noqa: PLC0415
+        from z4j_scheduler.storage.cache import _UNSET as _CACHE_UNSET
 
         if last_fire_at is None:
             # Non-leader path: anchor on entry's CURRENT
@@ -615,7 +636,8 @@ class TickEngine:
             # Leader path: anchor on the slot we just fired so the
             # next-fire computation walks forward from there.
             next_at = self._next_fire_for(
-                entry, as_of_last_fire_at=last_fire_at,
+                entry,
+                as_of_last_fire_at=last_fire_at,
             )
             await self._cache.update_fire_state(
                 entry.id,
@@ -704,9 +726,7 @@ class TickEngine:
         if next_entry is None or next_entry.next_fire_at is None:
             timeout = self._max_sleep_seconds
         else:
-            wait_seconds = (
-                next_entry.next_fire_at - self._clock()
-            ).total_seconds()
+            wait_seconds = (next_entry.next_fire_at - self._clock()).total_seconds()
             # Clamp: never sleep less than 0 (already past due, exit
             # immediately), never sleep more than the max bound.
             timeout = max(0.0, min(self._max_sleep_seconds, wait_seconds))
@@ -737,7 +757,9 @@ class TickEngine:
                 if not task.done():
                     task.cancel()
             await asyncio.gather(
-                change_task, stop_task, return_exceptions=True,
+                change_task,
+                stop_task,
+                return_exceptions=True,
             )
 
         # Consume the cache event so subsequent mutations re-trigger it.

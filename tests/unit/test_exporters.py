@@ -9,10 +9,8 @@ the output is parseable / matches the target format.
 from __future__ import annotations
 
 import ast
-import json
 
 import pytest
-
 from z4j_scheduler.exporters import apscheduler, celery, cron, rq
 from z4j_scheduler.exporters._client import ExportedSchedule
 
@@ -56,11 +54,11 @@ class TestCeleryRender:
         assert "from celery.schedules import crontab" in out
         assert "from datetime import timedelta" in out
         assert "beat_schedule = {" in out
-        assert "\"hourly\"" in out
+        assert '"hourly"' in out
         # Cron expression rendered as keyword crontab(...) call.
         assert "crontab(" in out
-        assert "minute=\"0\"" in out
-        assert "hour=\"*\"" in out
+        assert 'minute="0"' in out
+        assert 'hour="*"' in out
 
     def test_interval_emits_timedelta(self) -> None:
         out = celery.render([_schedule("poll", kind="interval", expression="60s")])
@@ -82,16 +80,18 @@ class TestCeleryRender:
 
     def test_queue_emits_options(self) -> None:
         out = celery.render([_schedule("hourly", queue="critical")])
-        assert "\"queue\": \"critical\"" in out
+        assert '"queue": "critical"' in out
 
     def test_output_is_valid_python_module(self) -> None:
         # Critical: celery operators paste the output into their
         # config. If it doesn't parse, the export is broken.
-        out = celery.render([
-            _schedule("a"),
-            _schedule("b", kind="interval", expression="30s"),
-            _schedule("c", queue="q"),
-        ])
+        out = celery.render(
+            [
+                _schedule("a"),
+                _schedule("b", kind="interval", expression="30s"),
+                _schedule("c", queue="q"),
+            ]
+        )
         try:
             ast.parse(out)
         except SyntaxError as exc:
@@ -107,7 +107,7 @@ class TestRqRender:
     def test_cron_emits_scheduler_cron(self) -> None:
         out = rq.render([_schedule("hourly")])
         assert "scheduler.cron(" in out
-        assert "cron_string=\"0 * * * *\"" in out
+        assert 'cron_string="0 * * * *"' in out
 
     def test_interval_emits_scheduler_schedule(self) -> None:
         out = rq.render([_schedule("poll", kind="interval", expression="60s")])
@@ -146,21 +146,21 @@ class TestApsRender:
     def test_cron_emits_keyword_fields(self) -> None:
         out = apscheduler.render([_schedule("hourly")])
         assert "scheduler.add_job(" in out
-        assert "\"cron\"" in out
-        assert "minute=\"0\"" in out
-        assert "hour=\"*\"" in out
-        assert "id=\"00000000-0000-0000-0000-000000000001\"" in out
+        assert '"cron"' in out
+        assert 'minute="0"' in out
+        assert 'hour="*"' in out
+        assert 'id="00000000-0000-0000-0000-000000000001"' in out
 
     def test_interval_emits_seconds(self) -> None:
         out = apscheduler.render([_schedule("p", kind="interval", expression="2h")])
-        assert "\"interval\"" in out
+        assert '"interval"' in out
         assert "seconds=7200" in out
 
     def test_one_shot_emits_date_trigger(self) -> None:
         out = apscheduler.render(
             [_schedule("once", kind="one_shot", expression="2026-04-30T00:00:00")],
         )
-        assert "\"date\"" in out
+        assert '"date"' in out
         assert "run_date=datetime.fromisoformat" in out
 
     def test_disabled_emits_paused(self) -> None:
@@ -168,7 +168,9 @@ class TestApsRender:
         assert "paused=True" in out
 
     def test_output_is_valid_python_module(self) -> None:
-        out = apscheduler.render([_schedule("a"), _schedule("b", kind="interval", expression="60s")])
+        out = apscheduler.render(
+            [_schedule("a"), _schedule("b", kind="interval", expression="60s")]
+        )
         try:
             ast.parse(out)
         except SyntaxError as exc:
@@ -293,14 +295,14 @@ def _exec_celery_export(source: str) -> dict:
     # under the same names so the rest of the module body works
     # unchanged.
     body_lines = [
-        line for line in source.splitlines()
-        if not line.startswith("from celery.schedules")
-        and not line.startswith("from datetime")
+        line
+        for line in source.splitlines()
+        if not line.startswith("from celery.schedules") and not line.startswith("from datetime")
     ]
     body = "\n".join(body_lines)
     namespace["crontab"] = _CaptureCrontab
     namespace["timedelta"] = _CaptureTimedelta
-    exec(compile(body, "<celery-export>", "exec"), namespace)  # noqa: S102
+    exec(compile(body, "<celery-export>", "exec"), namespace)
     return namespace["beat_schedule"]
 
 
@@ -308,9 +310,11 @@ class TestCeleryExecRoundTrip:
     """The rendered celery output must exec to a usable beat_schedule."""
 
     def test_cron_exec_recovers_minute_hour(self) -> None:
-        out = celery.render([
-            _schedule("nightly", expression="0 3 * * *"),
-        ])
+        out = celery.render(
+            [
+                _schedule("nightly", expression="0 3 * * *"),
+            ]
+        )
         beat = _exec_celery_export(out)
         assert "nightly" in beat
         entry = beat["nightly"]
@@ -324,40 +328,48 @@ class TestCeleryExecRoundTrip:
         assert entry["kwargs"] == {}
 
     def test_interval_exec_recovers_seconds(self) -> None:
-        out = celery.render([
-            _schedule("poll", kind="interval", expression="5m"),
-        ])
+        out = celery.render(
+            [
+                _schedule("poll", kind="interval", expression="5m"),
+            ]
+        )
         beat = _exec_celery_export(out)
         entry = beat["poll"]
         assert entry["schedule"].kind == "timedelta"
         assert entry["schedule"].seconds == 300
 
     def test_queue_exec_lands_in_options(self) -> None:
-        out = celery.render([
-            _schedule("hourly", queue="critical"),
-        ])
+        out = celery.render(
+            [
+                _schedule("hourly", queue="critical"),
+            ]
+        )
         beat = _exec_celery_export(out)
         assert beat["hourly"]["options"]["queue"] == "critical"
 
     def test_args_kwargs_round_trip(self) -> None:
-        out = celery.render([
-            _schedule(
-                "report",
-                args=["weekly", 7],
-                kwargs={"format": "pdf", "redact": True},
-            ),
-        ])
+        out = celery.render(
+            [
+                _schedule(
+                    "report",
+                    args=["weekly", 7],
+                    kwargs={"format": "pdf", "redact": True},
+                ),
+            ]
+        )
         beat = _exec_celery_export(out)
         entry = beat["report"]
         assert entry["args"] == ["weekly", 7]
         assert entry["kwargs"] == {"format": "pdf", "redact": True}
 
     def test_multiple_schedules_all_recovered(self) -> None:
-        out = celery.render([
-            _schedule("a", expression="*/5 * * * *"),
-            _schedule("b", kind="interval", expression="60s"),
-            _schedule("c", queue="low"),
-        ])
+        out = celery.render(
+            [
+                _schedule("a", expression="*/5 * * * *"),
+                _schedule("b", kind="interval", expression="60s"),
+                _schedule("c", queue="low"),
+            ]
+        )
         beat = _exec_celery_export(out)
         assert set(beat.keys()) == {"a", "b", "c"}
         assert beat["a"]["schedule"].kwargs["minute"] == "*/5"
@@ -369,10 +381,12 @@ class TestRqExecRoundTrip:
     """RQ output is bash-style script - validate the shape via AST."""
 
     def test_rq_emits_scheduler_call_per_schedule(self) -> None:
-        out = rq.render([
-            _schedule("hourly"),
-            _schedule("poll", kind="interval", expression="30s"),
-        ])
+        out = rq.render(
+            [
+                _schedule("hourly"),
+                _schedule("poll", kind="interval", expression="30s"),
+            ]
+        )
         # Expect one ``scheduler.cron(...)`` and one
         # ``scheduler.schedule(...)`` call for the two schedules.
         assert out.count("scheduler.cron(") == 1
@@ -386,10 +400,12 @@ class TestApsExecRoundTrip:
     """APScheduler output is plain ``add_job(...)`` calls."""
 
     def test_aps_emits_add_job_per_schedule(self) -> None:
-        out = apscheduler.render([
-            _schedule("hourly"),
-            _schedule("poll", kind="interval", expression="60s"),
-        ])
+        out = apscheduler.render(
+            [
+                _schedule("hourly"),
+                _schedule("poll", kind="interval", expression="60s"),
+            ]
+        )
         assert out.count("scheduler.add_job(") == 2
         # Each gets a unique job_id derived from the brain UUID so
         # operators can identify and replace the schedule cleanly.
@@ -402,10 +418,12 @@ class TestApsExecRoundTrip:
         # from the rq exporter which comments the call out (rq has no
         # native pause). Operators who want a hard "do not load" must
         # delete the schedule in z4j first.
-        out = apscheduler.render([
-            _schedule("a"),
-            _schedule("b", enabled=False),
-        ])
+        out = apscheduler.render(
+            [
+                _schedule("a"),
+                _schedule("b", enabled=False),
+            ]
+        )
         assert out.count("scheduler.add_job(") == 2
         assert "paused=True" in out
 
@@ -414,18 +432,20 @@ class TestCronExecRoundTrip:
     """Cron output is a crontab(5) text file."""
 
     def test_cron_lines_use_5_field_format(self) -> None:
-        out = cron.render([
-            _schedule("hourly"),  # cron 0 * * * *
-            _schedule("daily", expression="0 3 * * *"),
-        ])
+        out = cron.render(
+            [
+                _schedule("hourly"),  # cron 0 * * * *
+                _schedule("daily", expression="0 3 * * *"),
+            ]
+        )
         # Find every non-comment, non-empty line that's not the
         # WRAPPER assignment - those should be schedule lines.
         import re
+
         schedule_lines = [
-            line for line in out.splitlines()
-            if line.strip()
-            and not line.lstrip().startswith("#")
-            and not line.startswith("WRAPPER")
+            line
+            for line in out.splitlines()
+            if line.strip() and not line.lstrip().startswith("#") and not line.startswith("WRAPPER")
         ]
         assert len(schedule_lines) == 2
         for line in schedule_lines:
@@ -434,9 +454,7 @@ class TestCronExecRoundTrip:
             # since cron is whitespace-agnostic but our renderer
             # uses single spaces.
             fields = re.split(r"\s+", line, maxsplit=5)
-            assert len(fields) == 6, (
-                f"cron line malformed: {line!r}"
-            )
+            assert len(fields) == 6, f"cron line malformed: {line!r}"
             # Field 6 is the command; it must reference the wrapper
             # so operators can drop a single setup-script in once
             # rather than per-line.

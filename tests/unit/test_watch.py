@@ -101,8 +101,10 @@ class TestStreamProcessing:
         client = FakeBrainClient(
             stream_events=[
                 ScheduleEvent(
-                    kind="created", schedule=e,
-                    deleted_id=None, resume_token="t1",  # noqa: S106 - opaque cursor
+                    kind="created",
+                    schedule=e,
+                    deleted_id=None,
+                    resume_token="t1",
                 ),
             ],
         )
@@ -111,7 +113,7 @@ class TestStreamProcessing:
 
         await watch._stream()
         assert await cache.get(e.id) is e
-        assert watch._resume_token == "t1"  # noqa: S105 - opaque cursor
+        assert watch._resume_token == "t1"
 
     async def test_updated_event_replaces(self) -> None:
         sid = uuid4()
@@ -123,8 +125,10 @@ class TestStreamProcessing:
         client = FakeBrainClient(
             stream_events=[
                 ScheduleEvent(
-                    kind="updated", schedule=new,
-                    deleted_id=None, resume_token="t2",  # noqa: S106 - opaque cursor
+                    kind="updated",
+                    schedule=new,
+                    deleted_id=None,
+                    resume_token="t2",
                 ),
             ],
         )
@@ -140,8 +144,10 @@ class TestStreamProcessing:
         client = FakeBrainClient(
             stream_events=[
                 ScheduleEvent(
-                    kind="deleted", schedule=None,
-                    deleted_id=e.id, resume_token="t3",  # noqa: S106 - opaque cursor
+                    kind="deleted",
+                    schedule=None,
+                    deleted_id=e.id,
+                    resume_token="t3",
                 ),
             ],
         )
@@ -228,7 +234,8 @@ class TestPeriodicResync:
         @dataclass
         class CountingClient(FakeBrainClient):
             async def list_schedules(  # type: ignore[override]
-                self, project_id: UUID | None = None,
+                self,
+                project_id: UUID | None = None,
             ) -> AsyncIterator[ScheduleEntry]:
                 nonlocal list_call_count
                 list_call_count += 1
@@ -251,8 +258,7 @@ class TestPeriodicResync:
         # sync, plus one from the periodic timer. Assert >=2 to
         # prove the timer fired independently.
         assert list_call_count >= 2, (
-            f"periodic timer didn't fire: only {list_call_count} "
-            f"list_schedules calls observed"
+            f"periodic timer didn't fire: only {list_call_count} list_schedules calls observed"
         )
 
     async def test_periodic_timer_survives_sync_failure(self) -> None:
@@ -265,7 +271,8 @@ class TestPeriodicResync:
             calls: int = 0
 
             async def list_schedules(  # type: ignore[override]
-                self, project_id: UUID | None = None,
+                self,
+                project_id: UUID | None = None,
             ) -> AsyncIterator[ScheduleEntry]:
                 self.calls += 1
                 if self.calls == 2:
@@ -288,8 +295,7 @@ class TestPeriodicResync:
         # continues). Assert at least 3 to prove the loop didn't
         # die after the failure.
         assert client.calls >= 3, (
-            f"periodic timer died after a failure: only "
-            f"{client.calls} calls observed"
+            f"periodic timer died after a failure: only {client.calls} calls observed"
         )
 
 

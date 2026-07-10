@@ -91,7 +91,8 @@ class TestConstruction:
 
 class TestStart:
     async def test_start_opens_all_subsystems(
-        self, settings: Settings,
+        self,
+        settings: Settings,
     ) -> None:
         app = _AppWithFakeClient(settings)
         await app.start()
@@ -107,14 +108,16 @@ class TestStart:
         assert app._started is True
 
     async def test_start_connects_brain_client(
-        self, settings: Settings,
+        self,
+        settings: Settings,
     ) -> None:
         app = _AppWithFakeClient(settings)
         await app.start()
         assert app.fake_client.connect.await_count == 1
 
     async def test_start_marks_state_subsystems_up(
-        self, settings: Settings,
+        self,
+        settings: Settings,
     ) -> None:
         app = _AppWithFakeClient(settings)
         await app.start()
@@ -143,13 +146,15 @@ class TestStart:
 
 class TestStop:
     async def test_stop_before_start_does_not_raise(
-        self, settings: Settings,
+        self,
+        settings: Settings,
     ) -> None:
         app = SchedulerApp(settings)
         await app.stop()  # nothing to tear down; no exception
 
     async def test_stop_after_start_closes_brain_client(
-        self, settings: Settings,
+        self,
+        settings: Settings,
     ) -> None:
         app = _AppWithFakeClient(settings)
         await app.start()
@@ -166,7 +171,8 @@ class TestStop:
         assert app.fake_client.close.await_count >= 1
 
     async def test_stop_signals_subsystems(
-        self, settings: Settings,
+        self,
+        settings: Settings,
     ) -> None:
         app = _AppWithFakeClient(settings)
         await app.start()

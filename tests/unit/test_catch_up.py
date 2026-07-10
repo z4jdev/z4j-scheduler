@@ -31,13 +31,17 @@ class TestSkipPolicy:
 
     def test_skip_with_one_missed(self, now: datetime) -> None:
         result = plan_catch_up(
-            "skip", missed_times=_times(9), now=now,
+            "skip",
+            missed_times=_times(9),
+            now=now,
         )
         assert result == []
 
     def test_skip_with_many_missed(self, now: datetime) -> None:
         result = plan_catch_up(
-            "skip", missed_times=_times(6, 7, 8, 9, 10, 11), now=now,
+            "skip",
+            missed_times=_times(6, 7, 8, 9, 10, 11),
+            now=now,
         )
         assert result == []
 
@@ -46,14 +50,18 @@ class TestFireOneMissedPolicy:
     def test_no_missed_returns_empty(self, now: datetime) -> None:
         assert (
             plan_catch_up(
-                "fire_one_missed", missed_times=[], now=now,
+                "fire_one_missed",
+                missed_times=[],
+                now=now,
             )
             == []
         )
 
     def test_one_missed_returns_that_one(self, now: datetime) -> None:
         result = plan_catch_up(
-            "fire_one_missed", missed_times=_times(9), now=now,
+            "fire_one_missed",
+            missed_times=_times(9),
+            now=now,
         )
         assert result == _times(9)
 
@@ -63,7 +71,9 @@ class TestFireOneMissedPolicy:
         # latest one once").
         missed = _times(6, 7, 8, 9, 10, 11)
         result = plan_catch_up(
-            "fire_one_missed", missed_times=missed, now=now,
+            "fire_one_missed",
+            missed_times=missed,
+            now=now,
         )
         assert result == _times(11)
 
@@ -72,7 +82,9 @@ class TestFireAllMissedPolicy:
     def test_no_missed_returns_empty(self, now: datetime) -> None:
         assert (
             plan_catch_up(
-                "fire_all_missed", missed_times=[], now=now,
+                "fire_all_missed",
+                missed_times=[],
+                now=now,
             )
             == []
         )
@@ -80,7 +92,9 @@ class TestFireAllMissedPolicy:
     def test_all_missed_returned_in_order(self, now: datetime) -> None:
         missed = _times(6, 7, 8, 9, 10, 11)
         result = plan_catch_up(
-            "fire_all_missed", missed_times=missed, now=now,
+            "fire_all_missed",
+            missed_times=missed,
+            now=now,
         )
         assert result == missed
 
@@ -89,7 +103,9 @@ class TestFireAllMissedPolicy:
         # not be aliasing the input list.
         missed = _times(6, 7, 8)
         result = plan_catch_up(
-            "fire_all_missed", missed_times=missed, now=now,
+            "fire_all_missed",
+            missed_times=missed,
+            now=now,
         )
         assert result == missed
         assert result is not missed

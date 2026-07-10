@@ -26,8 +26,6 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-import pytest
-
 from z4j_scheduler.storage._convert import _DEFAULT_ANCHOR, entry_from_pb
 from z4j_scheduler.tick.interval import next_fire as interval_next_fire
 
@@ -40,9 +38,8 @@ def _build_schedule_message(
     expression: str = "15",
 ):
     """Construct a minimal protobuf-shaped namespace for entry_from_pb."""
-    from google.protobuf.timestamp_pb2 import Timestamp  # noqa: PLC0415
-
-    from z4j_scheduler.proto import scheduler_pb2 as pb  # noqa: PLC0415
+    from google.protobuf.timestamp_pb2 import Timestamp
+    from z4j_scheduler.proto import scheduler_pb2 as pb
 
     msg = pb.Schedule(
         id="00000000-0000-0000-0000-000000000001",
@@ -101,8 +98,7 @@ class TestAnchorAtSelectsRecentTime:
         # the next 15s boundary after now.
         now = datetime.now(UTC)
         assert nxt > now - timedelta(seconds=2), (
-            f"first-fire {nxt} is in the past; year-2000 sentinel "
-            "regression?"
+            f"first-fire {nxt} is in the past; year-2000 sentinel regression?"
         )
         assert nxt < now + timedelta(seconds=20)
 
@@ -122,7 +118,8 @@ class TestAnchorAtSelectsRecentTime:
         last = int((datetime.now(UTC) - timedelta(minutes=5)).timestamp())
         future = int((datetime.now(UTC) + timedelta(hours=1)).timestamp())
         msg = _build_schedule_message(
-            last_run_at_seconds=last, next_run_at_seconds=future,
+            last_run_at_seconds=last,
+            next_run_at_seconds=future,
         )
         entry = entry_from_pb(msg)
 

@@ -91,6 +91,7 @@ class RecordingDispatcher:
         schedule_id: UUID,
         scheduled_for: datetime,
         schedule_name: str = "",  # Phase 4: per-schedule metric label
+        **_kwargs: object,  # A3: engine / project_id / project_schedule_count
     ) -> None:
         if self.raise_count > 0:
             self.raise_count -= 1
@@ -181,8 +182,10 @@ class TestComputeNextFire:
         await cache.upsert(entry)
 
         engine = TickEngine(
-            cache=cache, leader_gate=AlwaysLeader(),
-            dispatcher=RecordingDispatcher(), clock=clock,
+            cache=cache,
+            leader_gate=AlwaysLeader(),
+            dispatcher=RecordingDispatcher(),
+            clock=clock,
         )
         await engine._compute_pending_next_fires()
 
@@ -196,7 +199,8 @@ class TestComputeNextFire:
         await cache.upsert(entry)
 
         engine = TickEngine(
-            cache=cache, leader_gate=AlwaysLeader(),
+            cache=cache,
+            leader_gate=AlwaysLeader(),
             dispatcher=RecordingDispatcher(),
             clock=ManualClock(anchor),
         )
@@ -210,7 +214,8 @@ class TestComputeNextFire:
         await cache.upsert(entry)
 
         engine = TickEngine(
-            cache=cache, leader_gate=AlwaysLeader(),
+            cache=cache,
+            leader_gate=AlwaysLeader(),
             dispatcher=RecordingDispatcher(),
             clock=ManualClock(datetime(2026, 4, 26, tzinfo=UTC)),
         )
@@ -223,7 +228,8 @@ class TestComputeNextFire:
         await cache.upsert(entry)
 
         engine = TickEngine(
-            cache=cache, leader_gate=AlwaysLeader(),
+            cache=cache,
+            leader_gate=AlwaysLeader(),
             dispatcher=RecordingDispatcher(),
             clock=ManualClock(datetime(2026, 4, 26, tzinfo=UTC)),
         )
@@ -248,15 +254,23 @@ class TestDispatchPath:
         await cache.upsert(entry)
 
         engine = TickEngine(
-            cache=cache, leader_gate=AlwaysLeader(),
-            dispatcher=dispatcher, clock=clock,
+            cache=cache,
+            leader_gate=AlwaysLeader(),
+            dispatcher=dispatcher,
+            clock=clock,
         )
         await engine._iteration()
 
         assert len(dispatcher.fires) == 1
         assert dispatcher.fires[0].schedule_id == entry.id
         assert dispatcher.fires[0].scheduled_for == datetime(
-            2026, 4, 26, 15, 0, 0, tzinfo=UTC,
+            2026,
+            4,
+            26,
+            15,
+            0,
+            0,
+            tzinfo=UTC,
         )
         # last_fire_at advanced + next_fire_at recomputed.
         assert entry.last_fire_at == datetime(2026, 4, 26, 15, 0, 0, tzinfo=UTC)
@@ -272,8 +286,10 @@ class TestDispatchPath:
         await cache.upsert(entry)
 
         engine = TickEngine(
-            cache=cache, leader_gate=AlwaysLeader(),
-            dispatcher=dispatcher, clock=clock,
+            cache=cache,
+            leader_gate=AlwaysLeader(),
+            dispatcher=dispatcher,
+            clock=clock,
             max_sleep_seconds=0.01,  # so the iteration returns fast
         )
         await engine._iteration()
@@ -289,8 +305,10 @@ class TestDispatchPath:
         await cache.upsert(entry)
 
         engine = TickEngine(
-            cache=cache, leader_gate=AlwaysLeader(),
-            dispatcher=dispatcher, clock=clock,
+            cache=cache,
+            leader_gate=AlwaysLeader(),
+            dispatcher=dispatcher,
+            clock=clock,
             max_sleep_seconds=0.01,
         )
         await engine._iteration()
@@ -308,8 +326,10 @@ class TestDispatchPath:
         await cache.upsert(entry)
 
         engine = TickEngine(
-            cache=cache, leader_gate=AlwaysLeader(),
-            dispatcher=dispatcher, clock=clock,
+            cache=cache,
+            leader_gate=AlwaysLeader(),
+            dispatcher=dispatcher,
+            clock=clock,
             max_sleep_seconds=0.01,
         )
         await engine._iteration()
@@ -331,14 +351,21 @@ class TestDispatchPath:
         await cache.upsert(entry)
 
         engine = TickEngine(
-            cache=cache, leader_gate=AlwaysLeader(),
-            dispatcher=dispatcher, clock=clock,
+            cache=cache,
+            leader_gate=AlwaysLeader(),
+            dispatcher=dispatcher,
+            clock=clock,
             max_sleep_seconds=0.01,
         )
         await engine._iteration()
         assert len(dispatcher.fires) == 1
         assert dispatcher.fires[0].scheduled_for == datetime(
-            2026, 4, 26, 15, 0, tzinfo=UTC,
+            2026,
+            4,
+            26,
+            15,
+            0,
+            tzinfo=UTC,
         )
 
 
@@ -353,8 +380,10 @@ class TestLeaderGate:
         await cache.upsert(entry)
 
         engine = TickEngine(
-            cache=cache, leader_gate=NeverLeader(),
-            dispatcher=dispatcher, clock=clock,
+            cache=cache,
+            leader_gate=NeverLeader(),
+            dispatcher=dispatcher,
+            clock=clock,
             max_sleep_seconds=0.01,
         )
         await engine._iteration()
@@ -379,7 +408,8 @@ class TestLeaderGate:
         engine = TickEngine(
             cache=cache,
             leader_gate=PerProjectLeader({leader_project}),
-            dispatcher=dispatcher, clock=clock,
+            dispatcher=dispatcher,
+            clock=clock,
             max_sleep_seconds=0.01,
         )
         await engine._iteration()
@@ -402,8 +432,10 @@ class TestDispatcherFailure:
         await cache.upsert(entry)
 
         engine = TickEngine(
-            cache=cache, leader_gate=AlwaysLeader(),
-            dispatcher=dispatcher, clock=clock,
+            cache=cache,
+            leader_gate=AlwaysLeader(),
+            dispatcher=dispatcher,
+            clock=clock,
             max_sleep_seconds=0.01,
         )
         # First iteration: dispatcher raises - no advance.
@@ -427,7 +459,8 @@ class TestSleepAndStop:
     async def test_run_exits_on_stop(self) -> None:
         cache = ScheduleCache()
         engine = TickEngine(
-            cache=cache, leader_gate=AlwaysLeader(),
+            cache=cache,
+            leader_gate=AlwaysLeader(),
             dispatcher=RecordingDispatcher(),
             clock=ManualClock(datetime(2026, 4, 26, tzinfo=UTC)),
             max_sleep_seconds=10.0,
@@ -445,8 +478,10 @@ class TestSleepAndStop:
         clock = ManualClock(datetime(2026, 4, 26, 15, 0, tzinfo=UTC))
 
         engine = TickEngine(
-            cache=cache, leader_gate=AlwaysLeader(),
-            dispatcher=dispatcher, clock=clock,
+            cache=cache,
+            leader_gate=AlwaysLeader(),
+            dispatcher=dispatcher,
+            clock=clock,
             max_sleep_seconds=10.0,  # would sleep forever without cache event
         )
         task = asyncio.create_task(engine.run())

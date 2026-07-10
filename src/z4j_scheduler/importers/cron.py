@@ -37,7 +37,6 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any
 
 from z4j_scheduler.importers._core import ImportedSchedule
 
@@ -101,19 +100,19 @@ def read_crontab(
     # because ``read_text`` materialises the whole file before
     # split. We cap at 1 MB which is ~3 orders of magnitude above
     # any legitimate crontab.
-    import os  # noqa: PLC0415
+    import os
 
-    _MAX_CRONTAB_BYTES = 1 * 1024 * 1024
+    max_crontab_bytes = 1 * 1024 * 1024
     path = Path(crontab_path)
     if not path.is_file():
         raise FileNotFoundError(
             f"crontab file not found: {crontab_path}",
         )
-    if path.stat().st_size > _MAX_CRONTAB_BYTES:
+    if path.stat().st_size > max_crontab_bytes:
         raise ValueError(
             f"crontab file {crontab_path} is "
             f"{path.stat().st_size} bytes; refusing to import "
-            f"(cap is {_MAX_CRONTAB_BYTES} bytes). Trim the file "
+            f"(cap is {max_crontab_bytes} bytes). Trim the file "
             f"or remove non-z4j entries before re-running.",
         )
     # Open with O_NOFOLLOW (POSIX) so a pre-planted symlink can't
@@ -127,19 +126,18 @@ def read_crontab(
         # On POSIX, opening a symlink with O_NOFOLLOW raises
         # ELOOP. Surface a clear message.
         raise ValueError(
-            f"crontab file {crontab_path} could not be opened "
-            f"safely (symlink? permission?): {exc}",
+            f"crontab file {crontab_path} could not be opened safely (symlink? permission?): {exc}",
         ) from exc
     try:
         with os.fdopen(fd, "rb") as fh:
-            raw_bytes = fh.read(_MAX_CRONTAB_BYTES + 1)
+            raw_bytes = fh.read(max_crontab_bytes + 1)
     except OSError:
         os.close(fd)
         raise
-    if len(raw_bytes) > _MAX_CRONTAB_BYTES:
+    if len(raw_bytes) > max_crontab_bytes:
         raise ValueError(
             f"crontab file {crontab_path} grew past "
-            f"{_MAX_CRONTAB_BYTES} bytes during read; refusing to "
+            f"{max_crontab_bytes} bytes during read; refusing to "
             f"import",
         )
     contents = raw_bytes.decode("utf-8", errors="replace")
@@ -167,7 +165,8 @@ def read_crontab(
         except _UnsupportedLineError as exc:
             logger.warning(
                 "z4j.scheduler.importers.cron: skipping line %r - %s",
-                line, exc,
+                line,
+                exc,
             )
             continue
         if sched is not None:
@@ -213,7 +212,7 @@ def _parse_line(
         command = command.strip()
         if has_user_column:
             # ``@reboot user command`` form - drop the user column.
-            user, _, command = command.partition(" ")
+            _user, _, command = command.partition(" ")
             command = command.strip()
         if not command:
             raise _UnsupportedLineError(
@@ -231,19 +230,14 @@ def _parse_line(
         )
 
     fields = line.split(None, 6 if has_user_column else 5)
-    if (has_user_column and len(fields) < 7) or (
-        not has_user_column and len(fields) < 6
-    ):
+    if (has_user_column and len(fields) < 7) or (not has_user_column and len(fields) < 6):
         raise _UnsupportedLineError(
             "line does not have enough fields for a cron entry",
         )
 
     expression = " ".join(fields[:5])
-    if has_user_column:
-        # fields[5] is user, fields[6] is the command (split-7 caps it).
-        command = fields[6]
-    else:
-        command = fields[5]
+    # fields[5] is user, fields[6] is the command (split-7 caps it).
+    command = fields[6] if has_user_column else fields[5]
 
     _validate_cron_expression(expression)
     return _build_schedule(
@@ -293,11 +287,10 @@ def _validate_cron_expression(expression: str) -> None:
     line without aborting the whole import.
     """
     try:
-        from croniter import croniter  # noqa: PLC0415
+        from croniter import croniter
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError(
-            "z4j-scheduler missing croniter dep "
-            "(should be a hard dep)",
+            "z4j-scheduler missing croniter dep (should be a hard dep)",
         ) from exc
 
     if not croniter.is_valid(expression):

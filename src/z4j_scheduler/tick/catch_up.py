@@ -82,8 +82,7 @@ def plan_catch_up(
     """
     if policy not in VALID_POLICIES:
         raise InvalidPolicyError(
-            f"unknown catch-up policy {policy!r}; "
-            f"expected one of {VALID_POLICIES}",
+            f"unknown catch-up policy {policy!r}; expected one of {VALID_POLICIES}",
         )
 
     if not missed_times:

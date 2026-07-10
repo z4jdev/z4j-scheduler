@@ -101,10 +101,11 @@ class TriggerScheduleServicer(pb_grpc.SchedulerServiceServicer):
         # leader gate (a retry that hits a different instance gets
         # ``not_leader``, not a fresh fire, so no cache miss leaks).
         self._idem_cache: dict[
-            tuple[str, str], tuple[float, str],
+            tuple[str, str],
+            tuple[float, str],
         ] = {}
 
-    async def TriggerSchedule(  # noqa: N802 - gRPC-generated name
+    async def TriggerSchedule(  # noqa: N802, PLR0911  gRPC-generated name, status dispatch
         self,
         request: pb.TriggerScheduleRequest,
         context: grpc.aio.ServicerContext,
@@ -147,7 +148,8 @@ class TriggerScheduleServicer(pb_grpc.SchedulerServiceServicer):
             logger.info(
                 "z4j.scheduler.trigger_grpc: not leader for project=%s "
                 "schedule_id=%s; rejecting TriggerSchedule",
-                entry.project_id, schedule_id,
+                entry.project_id,
+                schedule_id,
             )
             return pb.TriggerScheduleResponse(
                 error_code="not_leader",
@@ -181,7 +183,9 @@ class TriggerScheduleServicer(pb_grpc.SchedulerServiceServicer):
                         "z4j.scheduler.trigger_grpc: idempotency hit "
                         "schedule_id=%s key=%s command_id=%s "
                         "(skipping duplicate fire)",
-                        schedule_id, idem_key, cached_command_id,
+                        schedule_id,
+                        idem_key,
+                        cached_command_id,
                     )
                     return pb.TriggerScheduleResponse(
                         command_id=cached_command_id,
@@ -189,12 +193,14 @@ class TriggerScheduleServicer(pb_grpc.SchedulerServiceServicer):
 
         result = await self._dispatcher.trigger_now(
             schedule_id=schedule_id,
+            triggered_by_user_id=request.user_id or "",
         )
         if result.success:
             command_id_str = str(result.command_id)
             if cache_key is not None:
                 self._idem_cache[cache_key] = (
-                    time.monotonic(), command_id_str,
+                    time.monotonic(),
+                    command_id_str,
                 )
             return pb.TriggerScheduleResponse(command_id=command_id_str)
         return pb.TriggerScheduleResponse(

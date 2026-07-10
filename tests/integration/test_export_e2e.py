@@ -24,27 +24,24 @@ import pytest
 
 pytest.importorskip("z4j_brain")
 
-from httpx import ASGITransport  # noqa: E402
-from sqlalchemy.ext.asyncio import create_async_engine  # noqa: E402
-from sqlalchemy.pool import StaticPool  # noqa: E402
-
-from z4j_brain.auth.passwords import PasswordHasher  # noqa: E402
-from z4j_brain.auth.sessions import SessionCookieCodec, cookie_name  # noqa: E402
-from z4j_brain.main import create_app  # noqa: E402
-from z4j_brain.persistence.base import Base  # noqa: E402
-from z4j_brain.persistence import models  # noqa: E402,F401
-from z4j_brain.persistence.enums import ScheduleKind  # noqa: E402
-from z4j_brain.persistence.models import (  # noqa: E402
+from httpx import ASGITransport
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.pool import StaticPool
+from z4j_brain.auth.passwords import PasswordHasher
+from z4j_brain.auth.sessions import SessionCookieCodec, cookie_name
+from z4j_brain.main import create_app
+from z4j_brain.persistence import models  # noqa: F401
+from z4j_brain.persistence.base import Base
+from z4j_brain.persistence.enums import ScheduleKind
+from z4j_brain.persistence.models import (
     Project,
     Schedule,
     Session,
     User,
 )
-from z4j_brain.settings import Settings as BrainSettings  # noqa: E402
-
-from z4j_scheduler.exporters import apscheduler, celery, cron, rq  # noqa: E402
-from z4j_scheduler.exporters._client import fetch_schedules  # noqa: E402
-
+from z4j_brain.settings import Settings as BrainSettings
+from z4j_scheduler.exporters import apscheduler, celery, cron, rq
+from z4j_scheduler.exporters._client import fetch_schedules
 
 # =====================================================================
 # Brain fixture (mirror test_declarative_e2e.py)
@@ -125,7 +122,8 @@ async def admin_seed(brain_settings: BrainSettings, brain_app):
                 kind=ScheduleKind.CRON,
                 expression="0 * * * *",
                 timezone="UTC",
-                args=[1, 2], kwargs={"k": "v"},
+                args=[1, 2],
+                kwargs={"k": "v"},
                 is_enabled=True,
                 source="dashboard",
             ),
@@ -140,7 +138,8 @@ async def admin_seed(brain_settings: BrainSettings, brain_app):
                 kind=ScheduleKind.INTERVAL,
                 expression="60s",
                 timezone="UTC",
-                args=[], kwargs={},
+                args=[],
+                kwargs={},
                 is_enabled=True,
                 source="declarative_django",
             ),
@@ -155,7 +154,8 @@ async def admin_seed(brain_settings: BrainSettings, brain_app):
                 kind=ScheduleKind.CRON,
                 expression="0 0 * * *",
                 timezone="UTC",
-                args=[], kwargs={},
+                args=[],
+                kwargs={},
                 is_enabled=True,
                 source="dashboard",
             ),
@@ -171,7 +171,10 @@ async def admin_seed(brain_settings: BrainSettings, brain_app):
 
 @pytest.fixture
 async def export_via_asgi(
-    brain_app, brain_settings: BrainSettings, admin_seed: dict, monkeypatch,
+    brain_app,
+    brain_settings: BrainSettings,
+    admin_seed: dict,
+    monkeypatch,
 ):
     """Patch httpx.AsyncClient so fetch_schedules talks to the in-proc app."""
     from z4j_brain.auth.csrf import csrf_cookie_name
@@ -206,7 +209,8 @@ async def export_via_asgi(
 class TestFetchSchedules:
     @pytest.mark.asyncio
     async def test_default_filters_to_z4j_scheduler(
-        self, export_via_asgi,
+        self,
+        export_via_asgi,
     ) -> None:
         rows = await fetch_schedules(
             brain_url="http://testserver",
@@ -219,7 +223,8 @@ class TestFetchSchedules:
 
     @pytest.mark.asyncio
     async def test_source_filter_narrows(
-        self, export_via_asgi,
+        self,
+        export_via_asgi,
     ) -> None:
         rows = await fetch_schedules(
             brain_url="http://testserver",
@@ -233,7 +238,8 @@ class TestFetchSchedules:
 class TestExportRoundTrip:
     @pytest.mark.asyncio
     async def test_celery_output_parses_as_python(
-        self, export_via_asgi,
+        self,
+        export_via_asgi,
     ) -> None:
         rows = await fetch_schedules(
             brain_url="http://testserver",
@@ -244,15 +250,16 @@ class TestExportRoundTrip:
         # Must be a valid Python module the operator can paste.
         ast.parse(rendered)
         # Both schedules present.
-        assert "\"hourly\"" in rendered
-        assert "\"poll\"" in rendered
+        assert '"hourly"' in rendered
+        assert '"poll"' in rendered
         # cron emits crontab(...), interval emits timedelta(...).
         assert "crontab(" in rendered
         assert "timedelta(seconds=60)" in rendered
 
     @pytest.mark.asyncio
     async def test_rq_output_parses_as_python(
-        self, export_via_asgi,
+        self,
+        export_via_asgi,
     ) -> None:
         rows = await fetch_schedules(
             brain_url="http://testserver",
@@ -266,7 +273,8 @@ class TestExportRoundTrip:
 
     @pytest.mark.asyncio
     async def test_apscheduler_output_parses_as_python(
-        self, export_via_asgi,
+        self,
+        export_via_asgi,
     ) -> None:
         rows = await fetch_schedules(
             brain_url="http://testserver",
@@ -276,12 +284,13 @@ class TestExportRoundTrip:
         rendered = apscheduler.render(rows)
         ast.parse(rendered)
         # Both job kinds present.
-        assert "\"cron\"" in rendered
-        assert "\"interval\"" in rendered
+        assert '"cron"' in rendered
+        assert '"interval"' in rendered
 
     @pytest.mark.asyncio
     async def test_cron_output_has_wrapper_header(
-        self, export_via_asgi,
+        self,
+        export_via_asgi,
     ) -> None:
         rows = await fetch_schedules(
             brain_url="http://testserver",

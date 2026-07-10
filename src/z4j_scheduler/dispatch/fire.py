@@ -87,10 +87,7 @@ def derive_fire_id(schedule_id: UUID, scheduled_for: datetime) -> UUID:
     if scheduled_for.tzinfo is None:
         raise ValueError("derive_fire_id requires tz-aware scheduled_for")
     truncated = scheduled_for.astimezone(UTC).replace(microsecond=0)
-    canonical = (
-        f"{schedule_id}:"
-        f"{truncated.isoformat()}"
-    )
+    canonical = f"{schedule_id}:{truncated.isoformat()}"
     return uuid5(_FIRE_ID_NAMESPACE, canonical)
 
 
@@ -115,6 +112,7 @@ class FireDispatcher:
         self,
         *,
         schedule_id: UUID,
+        triggered_by_user_id: str = "",
     ) -> object:
         """Fire a schedule on operator demand. Returns the FireResult.
 
@@ -130,10 +128,15 @@ class FireDispatcher:
           ``command_id`` back to brain. The normal :meth:`dispatch`
           path is void because the tick engine doesn't need it.
 
+        ``triggered_by_user_id`` (from the TriggerSchedule request) is
+        forwarded to the brain's FireSchedule so the fire-history row is
+        attributed to the operator who clicked; empty for the cadence
+        :meth:`dispatch` path.
+
         Same retry + ack semantics as :meth:`dispatch` so a flaky
         brain doesn't make the operator's click look like a no-op.
         """
-        from uuid import uuid4 as _uuid4  # noqa: PLC0415
+        from uuid import uuid4 as _uuid4
 
         fire_id = _uuid4()
         scheduled_for = datetime.now(UTC)
@@ -145,6 +148,7 @@ class FireDispatcher:
             fire_id=fire_id,
             scheduled_for=scheduled_for,
             fired_at=fired_at,
+            triggered_by_user_id=triggered_by_user_id,
         )
         elapsed = time.monotonic() - start
         m.fire_latency_seconds.observe(elapsed)
@@ -173,6 +177,9 @@ class FireDispatcher:
         schedule_id: UUID,
         scheduled_for: datetime,
         schedule_name: str = "",
+        engine: str = "",
+        project_id: UUID | None = None,
+        project_schedule_count: int | None = None,
     ) -> None:
         """Fire a schedule. Returns silently on success.
 
@@ -185,6 +192,13 @@ class FireDispatcher:
         labels (Phase 4). Optional - older callers that don't pass
         it get the empty-string label which Prometheus aggregates
         as the "unknown name" series.
+
+        ``engine`` / ``project_id`` / ``project_schedule_count`` (A3)
+        label the fire-variance histogram; the per-schedule label is
+        emitted only while the project has fewer than
+        ``FIRE_VARIANCE_SCHEDULE_ID_MAX`` schedules so cardinality stays
+        bounded on large tenants (``None`` = unknown -> no per-schedule
+        label).
         """
         fire_id = derive_fire_id(schedule_id, scheduled_for)
         fired_at = datetime.now(UTC)
@@ -199,6 +213,23 @@ class FireDispatcher:
 
         elapsed = time.monotonic() - start
         m.fire_latency_seconds.observe(elapsed)
+        # A3: fire-time variance (fired_at - next_fire_at) sliced by
+        # engine + project (+ per-schedule label only for small
+        # projects). Clamp tiny negative skew to 0. Metrics must never
+        # break a fire; swallow emission errors.
+        try:
+            emit_schedule_id = (
+                project_schedule_count is not None
+                and project_schedule_count < m.FIRE_VARIANCE_SCHEDULE_ID_MAX
+            )
+            variance = max(0.0, (fired_at - scheduled_for).total_seconds())
+            m.fire_variance_seconds.labels(
+                schedule_id=str(schedule_id) if emit_schedule_id else "",
+                engine=engine,
+                project=str(project_id) if project_id is not None else "",
+            ).observe(variance)
+        except Exception:
+            logger.debug("fire variance metric emission failed", exc_info=True)
         # Phase 4: per-schedule latency slice. Same value, additional
         # label dimension. Cardinality bounded by schedule count.
         try:
@@ -206,7 +237,7 @@ class FireDispatcher:
                 schedule_id=str(schedule_id),
                 schedule_name=schedule_name,
             ).observe(elapsed)
-        except Exception:  # noqa: BLE001
+        except Exception:
             # Metrics emission must never break a fire path. Swallow
             # silently - missing one data point is preferable to
             # missing the fire.
@@ -221,13 +252,16 @@ class FireDispatcher:
                     schedule_name=schedule_name,
                     status=status_label,
                 ).inc()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.debug("per-schedule counter inc failed", exc_info=True)
             logger.info(
                 "z4j.scheduler.dispatch: fire %s schedule_id=%s fire_id=%s "
                 "command_id=%s elapsed=%.3fs",
-                status_label, schedule_id, fire_id,
-                result.command_id, elapsed,
+                status_label,
+                schedule_id,
+                fire_id,
+                result.command_id,
+                elapsed,
             )
             # Best-effort ack - brain doesn't actually need this in
             # the success path (it created the Command), but the
@@ -246,13 +280,16 @@ class FireDispatcher:
                     schedule_name=schedule_name,
                     status="failed",
                 ).inc()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.debug("per-schedule counter inc failed", exc_info=True)
             logger.warning(
                 "z4j.scheduler.dispatch: fire FAILED schedule_id=%s "
                 "fire_id=%s error_code=%s message=%s elapsed=%.3fs",
-                schedule_id, fire_id, result.error_code,
-                result.error_message, elapsed,
+                schedule_id,
+                fire_id,
+                result.error_code,
+                result.error_message,
+                elapsed,
             )
             await self._best_effort_ack(
                 fire_id=fire_id,
@@ -262,8 +299,7 @@ class FireDispatcher:
             )
             # Surface to the engine so it knows not to advance.
             raise FireDispatchError(
-                f"fire failed: code={result.error_code!r} "
-                f"message={result.error_message!r}",
+                f"fire failed: code={result.error_code!r} message={result.error_message!r}",
             )
 
     # ------------------------------------------------------------------
@@ -277,6 +313,7 @@ class FireDispatcher:
         fire_id: UUID,
         scheduled_for: datetime,
         fired_at: datetime,
+        triggered_by_user_id: str = "",
     ) -> FireResult:
         """Single fire with retry on transient gRPC errors."""
         attempt = 0
@@ -291,16 +328,15 @@ class FireDispatcher:
                     fire_id=fire_id,
                     scheduled_for=scheduled_for,
                     fired_at=fired_at,
+                    triggered_by_user_id=triggered_by_user_id,
                 )
             except grpc.aio.AioRpcError as exc:
-                if (
-                    exc.code() not in _RETRYABLE_STATUS_CODES
-                    or attempt >= max_attempts
-                ):
+                if exc.code() not in _RETRYABLE_STATUS_CODES or attempt >= max_attempts:
                     logger.warning(
-                        "z4j.scheduler.dispatch: gRPC error %s on attempt "
-                        "%d/%d - giving up",
-                        exc.code(), attempt, max_attempts,
+                        "z4j.scheduler.dispatch: gRPC error %s on attempt %d/%d - giving up",
+                        exc.code(),
+                        attempt,
+                        max_attempts,
                     )
                     raise
                 # Capped exponential + small jitter so a flock of
@@ -314,7 +350,10 @@ class FireDispatcher:
                 logger.info(
                     "z4j.scheduler.dispatch: transient gRPC error %s; "
                     "retrying in %.2fs (attempt %d/%d)",
-                    exc.code(), delay, attempt, max_attempts,
+                    exc.code(),
+                    delay,
+                    attempt,
+                    max_attempts,
                 )
                 await asyncio.sleep(delay)
 

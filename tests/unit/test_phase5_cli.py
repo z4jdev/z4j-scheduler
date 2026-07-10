@@ -14,15 +14,11 @@ the fast unit-level regressions that catch typer arg-spec drift.
 
 from __future__ import annotations
 
-import json
 import sys
 from unittest.mock import patch
 
-import pytest
 from typer.testing import CliRunner
-
 from z4j_scheduler.cli import app
-
 
 runner = CliRunner()
 
@@ -38,18 +34,14 @@ class TestSchedulesSubcommandsExist:
         assert result.exit_code == 0
         # All five Phase-5 subcommands present in --help.
         for cmd in ("add", "list", "trigger", "disable", "enable"):
-            assert cmd in result.stdout, (
-                f"`schedules {cmd}` missing from help: {result.stdout}"
-            )
+            assert cmd in result.stdout, f"`schedules {cmd}` missing from help: {result.stdout}"
 
     def test_schedules_add_help_lists_required_options(self) -> None:
         result = runner.invoke(app, ["schedules", "add", "--help"])
         assert result.exit_code == 0
         # Required options are documented.
         for opt in ("--project", "--name", "--kind", "--expression", "--task-name"):
-            assert opt in result.stdout, (
-                f"`add` missing required option {opt}"
-            )
+            assert opt in result.stdout, f"`add` missing required option {opt}"
 
 
 # =====================================================================
@@ -72,21 +64,30 @@ class TestImportVerifyFlag:
         # expression (update), one identical to brain (unchanged).
         # Brain also has a fourth row that source dropped (delete).
         new_sched = ImportedSchedule(
-            project_slug="p", name="new",
-            engine="celery", kind="cron",
-            expression="0 * * * *", task_name="t",
+            project_slug="p",
+            name="new",
+            engine="celery",
+            kind="cron",
+            expression="0 * * * *",
+            task_name="t",
             source="src",
         )
         changed = ImportedSchedule(
-            project_slug="p", name="changed",
-            engine="celery", kind="cron",
-            expression="*/15 * * * *", task_name="t",  # different from brain
+            project_slug="p",
+            name="changed",
+            engine="celery",
+            kind="cron",
+            expression="*/15 * * * *",
+            task_name="t",  # different from brain
             source="src",
         )
         identical = ImportedSchedule(
-            project_slug="p", name="identical",
-            engine="celery", kind="cron",
-            expression="0 0 * * *", task_name="t",
+            project_slug="p",
+            name="identical",
+            engine="celery",
+            kind="cron",
+            expression="0 0 * * *",
+            task_name="t",
             source="src",
         )
         identical_hash = identical.compute_hash()
@@ -158,6 +159,7 @@ class TestDjangoCommandImportable:
         from z4j_scheduler.django_app.management.commands import (
             z4j_schedules,
         )
+
         assert hasattr(z4j_schedules, "Command")
 
     def test_command_has_subcommand_choices(self) -> None:

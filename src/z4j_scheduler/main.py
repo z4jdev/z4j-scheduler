@@ -42,9 +42,6 @@ from z4j_scheduler.storage.watch import WatchStream
 from z4j_scheduler.tick.engine import TickEngine
 
 if TYPE_CHECKING:  # pragma: no cover
-    from z4j_scheduler.leader.postgres import (
-        PostgresAdvisoryLockLeaderGate,
-    )
     from z4j_scheduler.settings import Settings
 
 logger = logging.getLogger("z4j.scheduler.main")
@@ -61,7 +58,7 @@ class SchedulerApp:
         settings = Settings()
         app = SchedulerApp(settings)
         await app.start()
-        await app.run()        # blocks until SIGTERM / SIGINT
+        await app.run()  # blocks until SIGTERM / SIGINT
         await app.stop()
 
     The CLI's ``serve`` command wraps this; tests construct directly
@@ -121,7 +118,8 @@ class SchedulerApp:
 
         # 4. Dispatcher - uses brain client for fire delivery.
         self._dispatcher = FireDispatcher(
-            client=self._client, settings=self.settings,
+            client=self._client,
+            settings=self.settings,
         )
 
         # 5. Tick engine - reads cache, calls dispatcher when leader.
@@ -210,10 +208,12 @@ class SchedulerApp:
                 )
                 tg.create_task(self._tick_engine.run(), name="tick")
                 tg.create_task(
-                    self._uvicorn_server.serve(), name="uvicorn",
+                    self._uvicorn_server.serve(),
+                    name="uvicorn",
                 )
                 tg.create_task(
-                    self._await_stop_then_cancel(), name="shutdown_watcher",
+                    self._await_stop_then_cancel(),
+                    name="shutdown_watcher",
                 )
         except* asyncio.CancelledError:
             # Expected during shutdown - the TaskGroup raises this
@@ -286,10 +286,9 @@ class SchedulerApp:
         if backend in ("postgres", "postgres_per_project"):
             if self.settings.leader_pg_dsn is None:
                 raise RuntimeError(
-                    f"leader_backend={backend!r} requires "
-                    "Z4J_SCHEDULER_LEADER_PG_DSN to be set",
+                    f"leader_backend={backend!r} requires Z4J_SCHEDULER_LEADER_PG_DSN to be set",
                 )
-            from z4j_scheduler.leader.postgres import (  # noqa: PLC0415
+            from z4j_scheduler.leader.postgres import (
                 AsyncpgLockBackend,
                 PerProjectLeaderGate,
                 PostgresAdvisoryLockLeaderGate,
@@ -302,9 +301,7 @@ class SchedulerApp:
                 gate = PostgresAdvisoryLockLeaderGate(
                     backend=lock_backend,
                     namespace=self.settings.leader_namespace,
-                    heartbeat_seconds=(
-                        self.settings.leader_heartbeat_seconds
-                    ),
+                    heartbeat_seconds=(self.settings.leader_heartbeat_seconds),
                 )
             else:
                 # Per-project: project_source pulls the unique
@@ -322,9 +319,7 @@ class SchedulerApp:
                     backend=lock_backend,
                     project_source=_project_source,
                     namespace=self.settings.leader_namespace,
-                    heartbeat_seconds=(
-                        self.settings.leader_heartbeat_seconds
-                    ),
+                    heartbeat_seconds=(self.settings.leader_heartbeat_seconds),
                 )
             await gate.start()
             return gate
@@ -344,7 +339,7 @@ class SchedulerApp:
         """
         if not self.settings.trigger_grpc_enabled:
             return None
-        from z4j_scheduler.trigger_grpc.server import (  # noqa: PLC0415
+        from z4j_scheduler.trigger_grpc.server import (
             TriggerGrpcServer,
         )
 
@@ -411,7 +406,8 @@ class SchedulerApp:
         raise asyncio.CancelledError("z4j-scheduler graceful shutdown")
 
     def _build_uvicorn_server(
-        self, state: SchedulerState,
+        self,
+        state: SchedulerState,
     ) -> uvicorn.Server:
         """Construct the uvicorn Server for the HTTP surface."""
         app = create_app(state)
@@ -423,8 +419,7 @@ class SchedulerApp:
         # but this transparency matters if a future change adds
         # any non-trivial response to /health, /ready, or /metrics.
         logger.info(
-            "z4j.scheduler.api: binding HTTP server to %s:%d "
-            "(/info, /health, /ready, /metrics)",
+            "z4j.scheduler.api: binding HTTP server to %s:%d (/info, /health, /ready, /metrics)",
             self.settings.bind_host,
             self.settings.bind_port,
         )
@@ -457,7 +452,9 @@ _SIGNAL_STOP_TASKS: set[asyncio.Task[None]] = set()
 
 
 def install_signal_handlers(
-    app: SchedulerApp, *, loop: asyncio.AbstractEventLoop | None = None,
+    app: SchedulerApp,
+    *,
+    loop: asyncio.AbstractEventLoop | None = None,
 ) -> None:
     """Register SIGTERM + SIGINT to call :meth:`SchedulerApp.stop`.
 
@@ -474,7 +471,8 @@ def install_signal_handlers(
         )
         # Retain a strong reference until the stop() task completes.
         task = target_loop.create_task(
-            app.stop(), name=f"z4j-scheduler-stop-sig{signum}",
+            app.stop(),
+            name=f"z4j-scheduler-stop-sig{signum}",
         )
         _SIGNAL_STOP_TASKS.add(task)
         task.add_done_callback(_SIGNAL_STOP_TASKS.discard)
@@ -542,7 +540,7 @@ class _GaugePublishingLeaderGate:
         self._inner = inner
 
     def is_leader(self, project_id: object) -> bool:
-        from z4j_scheduler.observability.metrics import (  # noqa: PLC0415
+        from z4j_scheduler.observability.metrics import (
             is_leader as _gauge,
         )
 
@@ -551,11 +549,9 @@ class _GaugePublishingLeaderGate:
         # the same granularity the gate is. Global-mode gates pass
         # the same value for every project_id, which is fine - the
         # gauge just shows N project labels with identical values.
-        try:
+        # Metrics must never break ticks. Swallow.
+        with suppress(Exception):
             _gauge.labels(project=str(project_id)).set(1.0 if result else 0.0)
-        except Exception:  # noqa: BLE001
-            # Metrics must never break ticks. Swallow.
-            pass
         return result
 
 

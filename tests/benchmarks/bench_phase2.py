@@ -49,7 +49,6 @@ except ImportError:  # pragma: no cover
 from z4j_scheduler.storage.cache import ScheduleCache
 from z4j_scheduler.tick._entry import ScheduleEntry
 
-
 # =====================================================================
 # Workload generation
 # =====================================================================
@@ -66,10 +65,8 @@ def build_entries(*, count: int, projects: int) -> list[ScheduleEntry]:
     base = datetime.now(UTC)
     for i in range(count):
         kind = "cron" if i % 10 < 7 else "interval"
-        if kind == "cron":
-            expression = "*/5 * * * *"  # every 5 min
-        else:
-            expression = f"{30 + (i % 60)}s"
+        # cron branch fires every 5 min
+        expression = "*/5 * * * *" if kind == "cron" else f"{30 + (i % 60)}s"
         entries.append(
             ScheduleEntry(
                 id=uuid.uuid4(),
@@ -153,7 +150,8 @@ async def bench_per_project_acquire(
     )
 
     dsn = container.get_connection_url().replace(
-        "postgresql+psycopg2://", "postgresql://",
+        "postgresql+psycopg2://",
+        "postgresql://",
     )
     project_ids = [uuid.uuid4() for _ in range(project_count)]
     gate = PerProjectLeaderGate(
@@ -191,7 +189,8 @@ async def bench_failover(*, container) -> dict:
     )
 
     dsn = container.get_connection_url().replace(
-        "postgresql+psycopg2://", "postgresql://",
+        "postgresql+psycopg2://",
+        "postgresql://",
     )
     namespace = f"bench-failover-{uuid.uuid4()}"
 
@@ -226,9 +225,7 @@ async def bench_failover(*, container) -> dict:
     await gate_b.stop()
 
     return {
-        "failover_ms": (
-            round(promoted_ms, 1) if promoted_ms is not None else None
-        ),
+        "failover_ms": (round(promoted_ms, 1) if promoted_ms is not None else None),
         "succeeded": promoted_ms is not None,
     }
 
@@ -270,11 +267,11 @@ async def _run_all() -> dict:
         results["leader"] = {"skipped": "testcontainers not installed"}
         return results
     try:
-        from testcontainers.postgres import PostgresContainer  # noqa: PLC0415
+        from testcontainers.postgres import PostgresContainer
 
         container = PostgresContainer("postgres:18-alpine")
         container.start()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         results["leader"] = {
             "skipped": f"could not start Postgres: {exc}",
         }
@@ -282,7 +279,8 @@ async def _run_all() -> dict:
 
     try:
         results["per_project_acquire_100"] = await bench_per_project_acquire(
-            project_count=100, container=container,
+            project_count=100,
+            container=container,
         )
         results["failover"] = await bench_failover(container=container)
     finally:
@@ -294,7 +292,7 @@ async def _run_all() -> dict:
 def main() -> int:
     try:
         report = asyncio.run(_run_all())
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         print(json.dumps({"error": str(exc)}), file=sys.stderr)
         return 1
     print(json.dumps(report, indent=2))

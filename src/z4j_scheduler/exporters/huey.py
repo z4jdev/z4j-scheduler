@@ -32,7 +32,6 @@ from collections.abc import Iterable
 
 from z4j_scheduler.exporters._client import ExportedSchedule
 
-
 # Same conservative whitelist the cron exporter uses (Apr 2026
 # audit fix). Refuses DOW letter aliases - operators with those
 # can pre-convert on the brain side.
@@ -58,7 +57,7 @@ def render(schedules: Iterable[ExportedSchedule]) -> str:
         "",
         "",
         "def register_schedules(huey):",
-        "    \"\"\"Apply z4j-managed schedules to a Huey instance.\"\"\"",
+        '    """Apply z4j-managed schedules to a Huey instance."""',
     ]
     if not schedules:
         lines.append("    return  # no z4j schedules to migrate")
@@ -85,7 +84,7 @@ def _render_one(sched: ExportedSchedule) -> list[str]:
     if not sched.is_enabled:
         return [
             f"    # DISABLED in z4j: {safe_name} - {safe_task_name}",
-            f"    # @huey.periodic_task(crontab(...))",
+            "    # @huey.periodic_task(crontab(...))",
             "",
         ]
 
@@ -99,7 +98,7 @@ def _render_one(sched: ExportedSchedule) -> list[str]:
     if not _is_safe_cron_expression(sched.expression):
         return [
             f"    # {safe_name}: REFUSED cron expression {safe_expr!r}",
-            f"    # contains characters outside the cron field vocabulary.",
+            "    # contains characters outside the cron field vocabulary.",
             "",
         ]
 
@@ -109,17 +108,13 @@ def _render_one(sched: ExportedSchedule) -> list[str]:
         # resolution. Drop the seconds field with a comment.
         parts = parts[:5]
         seconds_warning = (
-            f"    # NOTE: original z4j cron had seconds-precision; "
-            f"huey crontab is minute-only.\n"
+            "    # NOTE: original z4j cron had seconds-precision; huey crontab is minute-only.\n"
         )
     else:
         seconds_warning = ""
 
     minute, hour, day, month, dow = parts
-    queue_note = (
-        f"    # original queue: {json.dumps(sched.queue)}\n"
-        if sched.queue else ""
-    )
+    queue_note = f"    # original queue: {json.dumps(sched.queue)}\n" if sched.queue else ""
     return [
         f"{seconds_warning}{queue_note}    # {safe_name}",
         (
@@ -132,18 +127,12 @@ def _render_one(sched: ExportedSchedule) -> list[str]:
             f"))"
         ),
         f"    def _z4j_{_safe_pyname(sched.name)}():",
-        (
-            f"        \"\"\"Auto-registered from z4j. Calls "
-            f"{safe_task_name!r}.\"\"\""
-        ),
+        (f'        """Auto-registered from z4j. Calls {safe_task_name!r}."""'),
         # Operators wire the body themselves - typically calling
         # their existing task by import.
-        f"        from importlib import import_module",
-        (
-            f"        mod_name, _, fn_name = "
-            f"{json.dumps(safe_task_name)}.rpartition('.')"
-        ),
-        f"        getattr(import_module(mod_name), fn_name)()",
+        "        from importlib import import_module",
+        (f"        mod_name, _, fn_name = {json.dumps(safe_task_name)}.rpartition('.')"),
+        "        getattr(import_module(mod_name), fn_name)()",
         "",
     ]
 

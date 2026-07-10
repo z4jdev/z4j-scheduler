@@ -20,7 +20,6 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
-
 from z4j_scheduler.importers._core import ImportedSchedule
 from z4j_scheduler.verify.shadow_comparator import (
     PredictedFire,
@@ -29,7 +28,6 @@ from z4j_scheduler.verify.shadow_comparator import (
     predict_fires,
     render_report,
 )
-
 
 # =====================================================================
 # Duration parsing
@@ -104,13 +102,21 @@ class TestPredictFires:
         )
         assert len(fires) == 6
         assert fires[0].fire_time == datetime(
-            2026, 4, 27, 13, 0, 0, tzinfo=UTC,
+            2026,
+            4,
+            27,
+            13,
+            0,
+            0,
+            tzinfo=UTC,
         )
         assert all(f.task_name == "app.tasks.hourly" for f in fires)
 
     def test_interval_predicts_evenly_spaced_fires(self) -> None:
         sched = _imported(
-            name="poll", kind="interval", expression="60s",
+            name="poll",
+            kind="interval",
+            expression="60s",
         )
         start = datetime(2026, 4, 27, 12, 0, 0, tzinfo=UTC)
         # 5-minute window with a 60-second interval:
@@ -126,7 +132,9 @@ class TestPredictFires:
     def test_one_shot_inside_window_fires_once(self) -> None:
         target = datetime(2026, 4, 27, 15, 30, 0, tzinfo=UTC)
         sched = _imported(
-            name="once", kind="one_shot", expression=target.isoformat(),
+            name="once",
+            kind="one_shot",
+            expression=target.isoformat(),
         )
         start = datetime(2026, 4, 27, 12, 0, 0, tzinfo=UTC)
         fires = predict_fires(
@@ -142,7 +150,9 @@ class TestPredictFires:
         # the "operator ran --verify after the deadline" edge case.
         target = datetime(2027, 1, 1, 0, 0, 0, tzinfo=UTC)
         sched = _imported(
-            name="future", kind="one_shot", expression=target.isoformat(),
+            name="future",
+            kind="one_shot",
+            expression=target.isoformat(),
         )
         start = datetime(2026, 4, 27, 12, 0, 0, tzinfo=UTC)
         fires = predict_fires(
@@ -157,7 +167,9 @@ class TestPredictFires:
         # the comparator, otherwise the report would flag every
         # disabled row as "would fire on source but not target."
         sched = _imported(
-            name="off", kind="cron", expression="0 * * * *",
+            name="off",
+            kind="cron",
+            expression="0 * * * *",
             is_enabled=False,
         )
         start = datetime(2026, 4, 27, 12, 0, 0, tzinfo=UTC)
@@ -184,7 +196,9 @@ class TestPredictFires:
         # Args / kwargs round-trip into the predicted fire so the
         # comparator can detect importer-side data drops.
         sched = _imported(
-            name="report", kind="cron", expression="0 * * * *",
+            name="report",
+            kind="cron",
+            expression="0 * * * *",
             args=["weekly", 7],
             kwargs={"format": "pdf", "redact": True},
             queue="critical",
@@ -236,8 +250,10 @@ class TestCompareFires:
         t = self._start()
         fires = [_fire("a", when=t), _fire("b", when=t + timedelta(minutes=5))]
         report = compare_predicted_fires(
-            source=fires, target=list(fires),
-            window_start=t, window_end=t + timedelta(hours=1),
+            source=fires,
+            target=list(fires),
+            window_start=t,
+            window_end=t + timedelta(hours=1),
         )
         assert report.ok is True
         assert report.matched == 2
@@ -248,7 +264,8 @@ class TestCompareFires:
         report = compare_predicted_fires(
             source=[_fire("orphan-source", when=t)],
             target=[],
-            window_start=t, window_end=t + timedelta(hours=1),
+            window_start=t,
+            window_end=t + timedelta(hours=1),
         )
         assert not report.ok
         assert len(report.divergences) == 1
@@ -262,7 +279,8 @@ class TestCompareFires:
         report = compare_predicted_fires(
             source=[],
             target=[_fire("orphan-target", when=t)],
-            window_start=t, window_end=t + timedelta(hours=1),
+            window_start=t,
+            window_end=t + timedelta(hours=1),
         )
         assert len(report.divergences) == 1
         d = report.divergences[0]
@@ -277,7 +295,8 @@ class TestCompareFires:
         report = compare_predicted_fires(
             source=[_fire("p", when=t, args=("a",))],
             target=[_fire("p", when=t, args=("b",))],
-            window_start=t, window_end=t + timedelta(hours=1),
+            window_start=t,
+            window_end=t + timedelta(hours=1),
         )
         assert report.matched == 0
         assert len(report.divergences) == 1
@@ -288,7 +307,8 @@ class TestCompareFires:
         report = compare_predicted_fires(
             source=[_fire("p", when=t, queue="default")],
             target=[_fire("p", when=t, queue="critical")],
-            window_start=t, window_end=t + timedelta(hours=1),
+            window_start=t,
+            window_end=t + timedelta(hours=1),
         )
         assert report.matched == 0
         assert report.divergences[0].kind == "args_diverge"
@@ -302,8 +322,10 @@ class TestCompareFires:
             _fire("a", when=t + timedelta(hours=1)),
         ]
         report = compare_predicted_fires(
-            source=fires_src, target=[],
-            window_start=t, window_end=t + timedelta(hours=3),
+            source=fires_src,
+            target=[],
+            window_start=t,
+            window_end=t + timedelta(hours=3),
         )
         # Two divergences, sorted by fire_time ascending.
         times = [d.fire_time for d in report.divergences]
@@ -323,8 +345,10 @@ class TestRenderReport:
         t = self._start()
         fires = [_fire("a", when=t)]
         report = compare_predicted_fires(
-            source=fires, target=list(fires),
-            window_start=t, window_end=t + timedelta(hours=1),
+            source=fires,
+            target=list(fires),
+            window_start=t,
+            window_end=t + timedelta(hours=1),
         )
         out = render_report(report)
         assert "OK" in out
@@ -335,8 +359,10 @@ class TestRenderReport:
     def test_diverging_report_says_not_safe(self) -> None:
         t = self._start()
         report = compare_predicted_fires(
-            source=[_fire("p", when=t)], target=[],
-            window_start=t, window_end=t + timedelta(hours=1),
+            source=[_fire("p", when=t)],
+            target=[],
+            window_start=t,
+            window_end=t + timedelta(hours=1),
         )
         out = render_report(report)
         assert "DIVERGENCE" in out
@@ -349,13 +375,12 @@ class TestRenderReport:
         # ceiling and report the remainder count so the operator's
         # terminal isn't flooded.
         t = self._start()
-        src = [
-            _fire(f"sched-{i:03d}", when=t + timedelta(minutes=i))
-            for i in range(200)
-        ]
+        src = [_fire(f"sched-{i:03d}", when=t + timedelta(minutes=i)) for i in range(200)]
         report = compare_predicted_fires(
-            source=src, target=[],
-            window_start=t, window_end=t + timedelta(hours=4),
+            source=src,
+            target=[],
+            window_start=t,
+            window_end=t + timedelta(hours=4),
         )
         out = render_report(report, max_divergences=5)
         assert "... and 195 more" in out

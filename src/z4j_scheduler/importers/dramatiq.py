@@ -40,7 +40,6 @@ from __future__ import annotations
 
 from z4j_scheduler.importers._core import ImportedSchedule
 
-
 _GUIDANCE = """\
 Dramatiq has no built-in scheduler to import from. Three options:
 

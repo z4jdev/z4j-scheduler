@@ -28,7 +28,7 @@ def render(schedules: Iterable[ExportedSchedule]) -> str:
         "",
         "",
         "def register_schedules(scheduler):",
-        "    \"\"\"Apply z4j-managed schedules to an APScheduler Scheduler.\"\"\"",
+        '    """Apply z4j-managed schedules to an APScheduler Scheduler."""',
     ]
     if not schedules:
         lines.append("    return  # no z4j schedules to migrate")
@@ -52,49 +52,46 @@ def _render_one(sched: ExportedSchedule) -> list[str]:
     if sched.kind == "cron":
         cron_kwargs = _cron_to_kwargs(sched.expression)
         return [
-            f"    scheduler.add_job(",
+            "    scheduler.add_job(",
             f"        {json.dumps(sched.task_name)},",
-            f"        \"cron\",",
-            *[
-                f"        {key}={json.dumps(value)},"
-                for key, value in cron_kwargs.items()
-            ],
+            '        "cron",',
+            *[f"        {key}={json.dumps(value)}," for key, value in cron_kwargs.items()],
             f"        timezone={json.dumps(sched.timezone)},",
             f"        id={json.dumps(sched.id)},",
             f"        name={json.dumps(sched.name)},",
             f"        args={args_repr},",
             f"        kwargs={kwargs_repr},",
             f"        replace_existing=True{enabled_kw},",
-            f"    )",
+            "    )",
         ]
     if sched.kind == "interval":
         from z4j_scheduler.exporters.celery import _interval_to_seconds
 
         seconds = _interval_to_seconds(sched.expression)
         return [
-            f"    scheduler.add_job(",
+            "    scheduler.add_job(",
             f"        {json.dumps(sched.task_name)},",
-            f"        \"interval\",",
+            '        "interval",',
             f"        seconds={seconds},",
             f"        id={json.dumps(sched.id)},",
             f"        name={json.dumps(sched.name)},",
             f"        args={args_repr},",
             f"        kwargs={kwargs_repr},",
             f"        replace_existing=True{enabled_kw},",
-            f"    )",
+            "    )",
         ]
     if sched.kind in ("clocked", "one_shot"):
         return [
-            f"    scheduler.add_job(",
+            "    scheduler.add_job(",
             f"        {json.dumps(sched.task_name)},",
-            f"        \"date\",",
+            '        "date",',
             f"        run_date=datetime.fromisoformat({json.dumps(sched.expression)}),",
             f"        id={json.dumps(sched.id)},",
             f"        name={json.dumps(sched.name)},",
             f"        args={args_repr},",
             f"        kwargs={kwargs_repr},",
             f"        replace_existing=True{enabled_kw},",
-            f"    )",
+            "    )",
         ]
     return [f"    # unknown kind {sched.kind!r} for schedule {sched.name!r}"]
 

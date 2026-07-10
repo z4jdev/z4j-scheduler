@@ -69,7 +69,7 @@ def read_arq_settings(
         RuntimeError: settings cannot be resolved or arq missing.
     """
     try:
-        import arq.cron  # noqa: F401, PLC0415
+        import arq.cron  # noqa: F401
     except ImportError as exc:
         raise RuntimeError(
             "arq importer requires `pip install arq`",
@@ -97,7 +97,8 @@ def read_arq_settings(
         except _UnsupportedCronJobError as exc:
             logger.warning(
                 "z4j.scheduler.importers.arq: skipping %r - %s",
-                _job_label(job), exc,
+                _job_label(job),
+                exc,
             )
             continue
         if sched is not None:
@@ -105,7 +106,8 @@ def read_arq_settings(
 
     logger.info(
         "z4j.scheduler.importers.arq: parsed %d cron job(s) from %r",
-        len(schedules), settings_path,
+        len(schedules),
+        settings_path,
     )
     return schedules
 
@@ -122,11 +124,10 @@ class _UnsupportedCronJobError(Exception):
 def _resolve_arq_settings(settings_path: str) -> Any:
     if ":" not in settings_path:
         raise RuntimeError(
-            f"arq importer: --arq-settings must be 'module:Class', "
-            f"got {settings_path!r}",
+            f"arq importer: --arq-settings must be 'module:Class', got {settings_path!r}",
         )
     module_path, _, attr = settings_path.partition(":")
-    import importlib  # noqa: PLC0415
+    import importlib
 
     try:
         module = importlib.import_module(module_path)
@@ -138,8 +139,7 @@ def _resolve_arq_settings(settings_path: str) -> Any:
         return getattr(module, attr)
     except AttributeError as exc:
         raise RuntimeError(
-            f"arq importer: {module_path!r} has no attribute "
-            f"{attr!r}",
+            f"arq importer: {module_path!r} has no attribute {attr!r}",
         ) from exc
 
 
@@ -201,8 +201,13 @@ def _cron_job_to_cron_string(job: Any) -> str:
 
 
 _WEEKDAY_ALIASES: dict[str, str] = {
-    "mon": "1", "tues": "2", "wed": "3", "thurs": "4",
-    "fri": "5", "sat": "6", "sun": "0",
+    "mon": "1",
+    "tues": "2",
+    "wed": "3",
+    "thurs": "4",
+    "fri": "5",
+    "sat": "6",
+    "sun": "0",
 }
 
 
@@ -235,9 +240,13 @@ def _coroutine_name(coroutine: Any) -> str:
 
 
 def _job_label(job: Any) -> str:
-    return getattr(job, "name", None) or _coroutine_name(
-        getattr(job, "coroutine", None),
-    ) or "<unnamed>"
+    return (
+        getattr(job, "name", None)
+        or _coroutine_name(
+            getattr(job, "coroutine", None),
+        )
+        or "<unnamed>"
+    )
 
 
 __all__ = ["read_arq_settings"]

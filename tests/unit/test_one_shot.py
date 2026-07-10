@@ -20,7 +20,8 @@ class TestNextFireFirstTime:
 
     def test_iso_explicit_offset(self) -> None:
         result = next_fire(
-            "2026-04-30T15:00:00+00:00", last_fire_at=None,
+            "2026-04-30T15:00:00+00:00",
+            last_fire_at=None,
         )
         assert result is not None
         assert result.year == 2026 and result.month == 4 and result.day == 30
@@ -29,7 +30,8 @@ class TestNextFireFirstTime:
     def test_iso_non_utc_offset(self) -> None:
         # NYC in winter is -05:00.
         result = next_fire(
-            "2026-01-15T09:00:00-05:00", last_fire_at=None,
+            "2026-01-15T09:00:00-05:00",
+            last_fire_at=None,
         )
         assert result is not None
         # Same instant in UTC = 14:00 UTC.
@@ -38,7 +40,8 @@ class TestNextFireFirstTime:
 
     def test_iso_with_microseconds(self) -> None:
         result = next_fire(
-            "2026-04-30T15:00:00.123456Z", last_fire_at=None,
+            "2026-04-30T15:00:00.123456Z",
+            last_fire_at=None,
         )
         assert result is not None
         assert result.microsecond == 123456

@@ -70,8 +70,16 @@ fire_latency_seconds = Histogram(
     "z4j_scheduler_fire_latency_seconds",
     "End-to-end fire dispatch latency from FireSchedule call to result.",
     buckets=(
-        0.005, 0.010, 0.025, 0.050, 0.100, 0.250,
-        0.500, 1.0, 2.5, 5.0,
+        0.005,
+        0.010,
+        0.025,
+        0.050,
+        0.100,
+        0.250,
+        0.500,
+        1.0,
+        2.5,
+        5.0,
     ),
     registry=default_registry,
 )
@@ -80,11 +88,39 @@ tick_drift_seconds = Histogram(
     "z4j_scheduler_tick_drift_seconds",
     "How late each fire was vs its scheduled_for time.",
     buckets=(
-        0.100, 0.250, 0.500, 1.0, 5.0, 30.0,
-        300.0, 3600.0,
+        0.100,
+        0.250,
+        0.500,
+        1.0,
+        5.0,
+        30.0,
+        300.0,
+        3600.0,
     ),
     registry=default_registry,
 )
+
+# Dispatch-moment fire-time variance: ``fired_at - next_fire_at`` at the
+# instant a schedule is dispatched (A3). Distinct from
+# ``tick_drift_seconds`` (also lateness, but unlabelled and coarser
+# bucketed): this one is sliced by engine + project so operators can
+# graph p50/p95/p99 fire accuracy per project/engine. The ``schedule_id``
+# label is emitted ONLY for projects with fewer than
+# ``FIRE_VARIANCE_SCHEDULE_ID_MAX`` schedules -- above that the tick
+# engine passes an empty ``schedule_id`` so per-schedule cardinality
+# stays bounded on large tenants.
+fire_variance_seconds = Histogram(
+    "z4j_scheduler_fire_variance_seconds",
+    "Fire-time variance (fired_at - next_fire_at) at dispatch, "
+    "by engine + project (+ schedule_id for small projects).",
+    labelnames=("schedule_id", "engine", "project"),
+    buckets=(0.01, 0.05, 0.1, 0.5, 1.0, 5.0),
+    registry=default_registry,
+)
+
+#: Cardinality guard: emit the per-schedule label on the fire-variance
+#: histogram only while a project stays under this many schedules.
+FIRE_VARIANCE_SCHEDULE_ID_MAX = 100
 
 # ---------------------------------------------------------------------------
 # Leadership
@@ -136,7 +172,7 @@ engine_iterations_total = Counter(
 # We label by ``schedule_id`` (a UUID, stable across renames) AND
 # ``schedule_name`` (the human label, also stable per identity).
 # Including both lets operators query by either - the trade-off is
-# 2× the label space, which is fine at this cardinality.
+# 2x the label space, which is fine at this cardinality.
 
 per_schedule_fires_total = Counter(
     "z4j_scheduler_per_schedule_fires_total",
@@ -150,17 +186,27 @@ per_schedule_fire_latency_seconds = Histogram(
     "Per-schedule fire dispatch latency (FireSchedule call → result).",
     labelnames=("schedule_id", "schedule_name"),
     buckets=(
-        0.005, 0.010, 0.025, 0.050, 0.100, 0.250,
-        0.500, 1.0, 2.5, 5.0,
+        0.005,
+        0.010,
+        0.025,
+        0.050,
+        0.100,
+        0.250,
+        0.500,
+        1.0,
+        2.5,
+        5.0,
     ),
     registry=default_registry,
 )
 
 
 __all__ = [
+    "FIRE_VARIANCE_SCHEDULE_ID_MAX",
     "default_registry",
     "engine_iterations_total",
     "fire_latency_seconds",
+    "fire_variance_seconds",
     "fires_total",
     "grpc_calls_total",
     "is_leader",

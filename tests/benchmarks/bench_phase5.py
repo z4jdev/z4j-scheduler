@@ -37,16 +37,16 @@ import sys
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 # These are pure-Python imports - no Postgres, no network. We can
 # benchmark in any environment.
 from z4j_scheduler.dispatch.fire import FireDispatcher
 from z4j_scheduler.leader import SingleInstanceLeaderGate
-from z4j_scheduler.storage.cache import ScheduleCache
 from z4j_scheduler.storage._models import FireResult
+from z4j_scheduler.storage.cache import ScheduleCache
 from z4j_scheduler.tick._entry import ScheduleEntry
 from z4j_scheduler.tick.engine import TickEngine
-
 
 # =====================================================================
 # Memory + startup
@@ -70,11 +70,11 @@ def _rss_mb() -> float:
     SCHEDULER.md spec depend on this number, so a silent ``-1.0``
     masquerading as "well under target" is a real correctness bug.
     """
-    import sys  # noqa: PLC0415
+    import sys
 
     # 1. psutil - works everywhere, accurate, tested.
     try:
-        import psutil  # noqa: PLC0415
+        import psutil
 
         return psutil.Process().memory_info().rss / (1024 * 1024)
     except ImportError:
@@ -83,23 +83,19 @@ def _rss_mb() -> float:
     # 2. Unix: resource.getrusage. Not on Windows.
     if sys.platform != "win32":
         try:
-            import resource  # noqa: PLC0415
+            import resource
 
             rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
             # Linux reports kilobytes; macOS reports bytes. Heuristic:
             # if the number is implausibly large (>1B), assume bytes.
-            return (
-                (rss / 1024)
-                if rss < 1_000_000_000
-                else (rss / (1024 * 1024))
-            )
+            return (rss / 1024) if rss < 1_000_000_000 else (rss / (1024 * 1024))
         except ImportError:
             pass
 
     # 3. Linux fallback if ``resource`` missing for some reason.
     if sys.platform.startswith("linux"):
         try:
-            with open("/proc/self/status") as fh:
+            with Path("/proc/self/status").open() as fh:
                 for line in fh:
                     if line.startswith("VmRSS:"):
                         # "VmRSS:    12345 kB"
@@ -118,10 +114,10 @@ def _rss_mb() -> float:
     # report.
     if sys.platform == "win32":
         try:
-            import ctypes  # noqa: PLC0415
-            from ctypes import wintypes  # noqa: PLC0415
+            import ctypes
+            from ctypes import wintypes
 
-            class _PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+            class _PROCESS_MEMORY_COUNTERS(ctypes.Structure):  # noqa: N801  mirrors Win32 PROCESS_MEMORY_COUNTERS struct
                 _fields_ = [
                     ("cb", wintypes.DWORD),
                     ("PageFaultCount", wintypes.DWORD),
@@ -245,7 +241,7 @@ async def _bench_memory_at(n: int) -> dict:
     def _q(samples: list[float], q: float) -> float:
         if not samples:
             return 0.0
-        idx = max(0, min(len(samples) - 1, int(round(q * (len(samples) - 1)))))
+        idx = max(0, min(len(samples) - 1, round(q * (len(samples) - 1))))
         return samples[idx]
 
     return {
@@ -278,6 +274,7 @@ def bench_startup_components() -> dict:
     timings["leader_init_ms"] = round((time.perf_counter() - t0) * 1000, 3)
 
     t0 = time.perf_counter()
+
     # Fake dispatcher - no brain connection.
     class _FakeClient:
         async def fire_schedule(self, **_kw):
@@ -302,13 +299,15 @@ def bench_startup_components() -> dict:
     )
     dispatcher = FireDispatcher(client=_FakeClient(), settings=settings)
     timings["dispatcher_init_ms"] = round(
-        (time.perf_counter() - t0) * 1000, 3,
+        (time.perf_counter() - t0) * 1000,
+        3,
     )
 
     t0 = time.perf_counter()
     TickEngine(cache=cache, leader_gate=leader, dispatcher=dispatcher)
     timings["tick_engine_init_ms"] = round(
-        (time.perf_counter() - t0) * 1000, 3,
+        (time.perf_counter() - t0) * 1000,
+        3,
     )
 
     timings["total_ms"] = round(sum(timings.values()), 3)
@@ -333,7 +332,12 @@ class _LatencyRecordingDispatcher:
         self.calls: list[tuple[uuid.UUID, datetime, float]] = []
 
     async def dispatch(
-        self, *, schedule_id, scheduled_for, schedule_name="",
+        self,
+        *,
+        schedule_id,
+        scheduled_for,
+        schedule_name="",
+        **_kwargs,
     ):
         self.calls.append((schedule_id, scheduled_for, time.perf_counter()))
 
@@ -388,7 +392,7 @@ async def bench_sustained_load(
         await engine.stop()
         try:
             await asyncio.wait_for(task, timeout=2.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             task.cancel()
 
     if not dispatcher.calls:
@@ -470,7 +474,8 @@ async def _run_all() -> dict:
     # Sustained-load tick latency. 100 schedules @ 1s = 100 fires/sec
     # target.
     results["sustained_load"] = await bench_sustained_load(
-        schedule_count=100, duration_seconds=5.0,
+        schedule_count=100,
+        duration_seconds=5.0,
     )
 
     return results
@@ -479,7 +484,7 @@ async def _run_all() -> dict:
 def main() -> int:
     try:
         report = asyncio.run(_run_all())
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         print(json.dumps({"error": str(exc)}), file=sys.stderr)
         return 1
     print(json.dumps(report, indent=2))
