@@ -80,9 +80,13 @@ z4j-scheduler serve
 Embedded inside z4j (recommended for homelab and small teams):
 
 ```bash
-pip install 'z4j[scheduler-embedded]'
-# enable in brain settings: Z4J_EMBEDDED_SCHEDULER=true
+pip install z4j z4j-scheduler
+# then enable in brain settings: Z4J_EMBEDDED_SCHEDULER=true
 ```
+
+With the flag on, the brain spawns and supervises a
+`z4j-scheduler serve` subprocess for you, no separate deployment
+unit to manage.
 
 Migrate existing schedules in:
 
@@ -97,8 +101,10 @@ z4j-scheduler import \
 ```
 
 The other importer subcommands follow the same shape (`--from rq`,
-`--from apscheduler`, `--from django-celery-beat`, etc.). All run in
-`--dry-run` mode by default; you review the diff before any write.
+`--from apscheduler`, `--from django-celery-beat`, etc.). Add
+`--dry-run` to print the parsed schedules as JSONL for review
+instead of writing them to the brain; without it, imports are
+pushed immediately.
 
 ## When to choose z4j-scheduler
 

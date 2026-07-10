@@ -47,7 +47,7 @@ dependencies = [
     # api_key_id) don't fail/downgrade. z4j-scheduler doesn't
     # depend on any 1.2-specific API surface, so the broader
     # range is safe.
-    "z4j-core>=1.4.0,<2",
+    "z4j-core>=1.7.0,<2",
     # Async HTTP server for /health, /ready, /metrics, /info.
     # Same FastAPI as z4j-brain so contributors carry over patterns.
     "fastapi>=0.135",
