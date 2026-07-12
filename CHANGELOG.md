@@ -1,8 +1,9 @@
 # Changelog
 
-## 1.7.0 (2026-07-07)
+## 1.7.0 (2026-07-11)
 
 * Brain-side misfire detection, per-operator fire attribution, and a `z4j_scheduler_fire_variance_seconds` histogram.
+* `z4j-scheduler info` is a real command: it queries the running service's `/info` endpoint and prints version, instance id, uptime, readiness, per-subsystem health, and loaded-schedule count, with `--json` for scripting (previously a stub that exited 2).
 * Fixed a Postgres leader-election release-path `TypeError` (a structlog-style kwarg on a stdlib logger) that could abort cleanup before the local held flag cleared, leaving a stale-leader belief.
 * Python 3.11 is now the minimum supported version (3.10 dropped).
 * Part of the coordinated 1.7.0 fleet release (unified fleet version, green lint/format/import-boundary gate).
