@@ -273,7 +273,7 @@ class Settings(BaseSettings):
         """Refuse to start a production scheduler that exposes
         ``/metrics`` publicly.
 
-        z4j-scheduler 1.6.5 (security advisory R3-L1): the
+        z4j-scheduler 1.6.5 (security advisory): the
         scheduler's ``/metrics`` endpoint publishes operational
         metadata (project labels, schedule names, leadership state,
         fire status, latency). Pre-1.6.5 it was unauthenticated by

@@ -27,6 +27,8 @@ from z4j_scheduler.dispatch.fire import (
 )
 from z4j_scheduler.settings import Settings
 from z4j_scheduler.storage._models import FireResult
+from z4j_scheduler.tick._entry import ScheduleEntry
+from z4j_scheduler.tick._prepared import PreparedFire
 
 # NOTE: no module-level ``pytestmark = pytest.mark.asyncio`` because
 # the ``TestDeriveFireId`` class below contains sync tests of the
@@ -126,6 +128,9 @@ class FakeBrainClient:
         scheduled_for: datetime,
         fired_at: datetime,
         triggered_by_user_id: str = "",
+        schedule_entry: ScheduleEntry | None = None,
+        prepared_fire: PreparedFire | None = None,
+        scheduler_protocol_epoch: int = 0,
     ) -> FireResult:
         self.fire_calls.append(
             {
@@ -134,6 +139,9 @@ class FakeBrainClient:
                 "scheduled_for": scheduled_for,
                 "fired_at": fired_at,
                 "triggered_by_user_id": triggered_by_user_id,
+                "schedule_entry": schedule_entry,
+                "prepared_fire": prepared_fire,
+                "scheduler_protocol_epoch": scheduler_protocol_epoch,
             },
         )
         if not self.fire_responses:
@@ -482,6 +490,125 @@ class TestFireVariance:
             )
             == empty_before + 1
         )
+
+
+@pytest.mark.asyncio
+class TestCurrentDispatch:
+    @staticmethod
+    def _entry(when: datetime) -> ScheduleEntry:
+        entry = ScheduleEntry(
+            id=uuid4(),
+            project_id=uuid4(),
+            kind="cron",
+            expression="0 * * * *",
+            timezone="UTC",
+            is_enabled=True,
+            catch_up="skip",
+            anchor_at=when,
+            control_token=uuid4(),
+            schedule_revision=40,
+            definition_digest="d" * 64,
+            cadence_semantics_version=1,
+            cadence_runtime_fingerprint="f" * 64,
+        )
+        entry.next_fire_at = when
+        return entry
+
+    async def test_returns_typed_result_and_forwards_complete_authority(
+        self,
+        settings: Settings,
+    ) -> None:
+        when = datetime(2026, 4, 26, 15, 0, tzinfo=UTC)
+        entry = self._entry(when)
+        prepared = PreparedFire(
+            scheduled_for=when,
+            next_run_at=datetime(2026, 4, 26, 16, 0, tzinfo=UTC),
+        )
+        accepted = FireResult(
+            command_id=uuid4(),
+            error_code=None,
+            error_message=None,
+            buffered=False,
+            disposition="accepted",
+            acceptance_revision=41,
+            accepted_last_run_at=when,
+            accepted_next_run_at=prepared.next_run_at,
+            live_control_token=entry.control_token,
+            live_revision=41,
+            live_last_run_at=when,
+            live_next_run_at=prepared.next_run_at,
+        )
+        client = FakeBrainClient(fire_responses=[accepted])
+        dispatcher = FireDispatcher(client=client, settings=settings)  # type: ignore[arg-type]
+
+        result = await dispatcher.dispatch(
+            schedule_id=entry.id,
+            scheduled_for=when,
+            prepared_fire=prepared,
+            schedule_entry=entry,
+        )
+
+        assert result is accepted
+        assert client.fire_calls[0]["schedule_entry"] is entry
+        assert client.fire_calls[0]["prepared_fire"] is prepared
+        assert client.fire_calls[0]["scheduler_protocol_epoch"] == 1
+
+    async def test_untyped_success_shape_is_ambiguous_for_current_fire(
+        self,
+        settings: Settings,
+    ) -> None:
+        when = datetime(2026, 4, 26, 15, 0, tzinfo=UTC)
+        entry = self._entry(when)
+        prepared = PreparedFire(scheduled_for=when, next_run_at=None)
+        client = FakeBrainClient(
+            fire_responses=[
+                FireResult(
+                    command_id=uuid4(),
+                    error_code=None,
+                    error_message=None,
+                    buffered=False,
+                ),
+            ],
+        )
+        dispatcher = FireDispatcher(client=client, settings=settings)  # type: ignore[arg-type]
+
+        result = await dispatcher.dispatch(
+            schedule_id=entry.id,
+            scheduled_for=when,
+            prepared_fire=prepared,
+            schedule_entry=entry,
+        )
+
+        assert result is not None
+        assert result.disposition is None
+        assert client.ack_calls == []
+
+    async def test_terminal_result_is_returned_without_generic_failure_ack(
+        self,
+        settings: Settings,
+    ) -> None:
+        when = datetime(2026, 4, 26, 15, 0, tzinfo=UTC)
+        entry = self._entry(when)
+        prepared = PreparedFire(scheduled_for=when, next_run_at=None)
+        terminal = FireResult(
+            command_id=uuid4(),
+            error_code="terminal",
+            error_message="operator resolution required",
+            buffered=False,
+            disposition="terminal_quarantined",
+        )
+        client = FakeBrainClient(fire_responses=[terminal])
+        dispatcher = FireDispatcher(client=client, settings=settings)  # type: ignore[arg-type]
+
+        result = await dispatcher.dispatch(
+            schedule_id=entry.id,
+            scheduled_for=when,
+            prepared_fire=prepared,
+            schedule_entry=entry,
+        )
+
+        assert result is terminal
+        assert client.ack_calls == []
 
 
 @pytest.mark.asyncio

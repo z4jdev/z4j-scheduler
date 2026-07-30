@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.8.0 (2026-07-23)
+
+* `fire_one_missed` / catch-up no longer dispatches the entire missed backlog on recovery (a duplicate-side-effects storm); interval catch-up now coalesces the missed window and the `fire_all_missed` drain is bounded and honors stop / disable mid-drain.
+* Part of the coordinated 1.8.0 fleet release (unified fleet version, green lint/format/import-boundary gate).
+
 ## 1.7.0 (2026-07-11)
 
 * Brain-side misfire detection, per-operator fire attribution, and a `z4j_scheduler_fire_variance_seconds` histogram.

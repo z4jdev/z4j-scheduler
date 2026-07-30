@@ -41,8 +41,10 @@ from z4j_scheduler.observability import metrics as m
 
 if TYPE_CHECKING:  # pragma: no cover
     from z4j_scheduler.settings import Settings
-    from z4j_scheduler.storage._models import FireResult
+    from z4j_scheduler.storage._models import CursorTransitionResult, FireResult
     from z4j_scheduler.storage.brain_client import BrainClient
+    from z4j_scheduler.tick._entry import ScheduleEntry
+    from z4j_scheduler.tick._prepared import PreparedFire
 
 logger = logging.getLogger("z4j.scheduler.dispatch")
 
@@ -171,7 +173,7 @@ class FireDispatcher:
             )
         return result
 
-    async def dispatch(
+    async def dispatch(  # noqa: PLR0912, PLR0915 - explicit protocol state machine
         self,
         *,
         schedule_id: UUID,
@@ -180,13 +182,20 @@ class FireDispatcher:
         engine: str = "",
         project_id: UUID | None = None,
         project_schedule_count: int | None = None,
-    ) -> None:
-        """Fire a schedule. Returns silently on success.
+        prepared_fire: PreparedFire | None = None,
+        schedule_entry: ScheduleEntry | None = None,
+    ) -> FireResult | None:
+        """Fire a schedule and return typed current-protocol outcomes.
 
         Raises :class:`Exception` if every retry attempt fails - the
         tick engine treats this as "do not advance, retry next tick"
         per its contract. The engine clamps the next-tick interval
         so this does not become a tight loop.
+
+        The explicit legacy path returns ``None`` after preserving its
+        historical success/error behavior. A current schedule returns the
+        Brain's typed result without flattening non-accepted dispositions into
+        one generic exception.
 
         ``schedule_name`` is forwarded into per-schedule Prometheus
         labels (Phase 4). Optional - older callers that don't pass
@@ -200,15 +209,34 @@ class FireDispatcher:
         bounded on large tenants (``None`` = unknown -> no per-schedule
         label).
         """
+        if prepared_fire is not None and prepared_fire.scheduled_for != scheduled_for:
+            raise ValueError("prepared fire slot does not match scheduled_for")
+        if schedule_entry is not None and schedule_entry.id != schedule_id:
+            raise ValueError("schedule entry does not match schedule_id")
+        current_entry = (
+            schedule_entry
+            if schedule_entry is not None and schedule_entry.control_token is not None
+            else None
+        )
+        if current_entry is not None and prepared_fire is None:
+            raise ValueError("current fire requires a prepared cadence transition")
         fire_id = derive_fire_id(schedule_id, scheduled_for)
         fired_at = datetime.now(UTC)
         start = time.monotonic()
 
+        scheduler_protocol_epoch = 0
+        if current_entry is not None:
+            from z4j_scheduler.storage._protocol import CURRENT_PROTOCOL_EPOCH
+
+            scheduler_protocol_epoch = CURRENT_PROTOCOL_EPOCH
         result = await self._fire_with_retry(
             schedule_id=schedule_id,
             fire_id=fire_id,
             scheduled_for=scheduled_for,
             fired_at=fired_at,
+            schedule_entry=current_entry,
+            prepared_fire=prepared_fire if current_entry is not None else None,
+            scheduler_protocol_epoch=scheduler_protocol_epoch,
         )
 
         elapsed = time.monotonic() - start
@@ -243,6 +271,17 @@ class FireDispatcher:
             # missing the fire.
             logger.debug("per-schedule metric emission failed", exc_info=True)
 
+        current_response = current_entry is not None
+        if current_response and result.disposition is None:
+            m.fires_total.labels(status="failed").inc()
+            logger.warning(
+                "z4j.scheduler.dispatch: current fire returned an untyped "
+                "response schedule_id=%s fire_id=%s; treating as ambiguous",
+                schedule_id,
+                fire_id,
+            )
+            return result
+
         if result.success:
             status_label = "buffered" if result.buffered else "delivered"
             m.fires_total.labels(status=status_label).inc()
@@ -267,11 +306,14 @@ class FireDispatcher:
             # the success path (it created the Command), but the
             # contract is symmetric and the integration tests rely
             # on it. Failures here are not fatal.
-            await self._best_effort_ack(
-                fire_id=fire_id,
-                command_id=result.command_id,
-                status="success",
-            )
+            if not current_response or result.command_id is not None:
+                await self._best_effort_ack(
+                    fire_id=fire_id,
+                    command_id=result.command_id,
+                    status="success",
+                )
+            if current_response:
+                return result
         else:
             m.fires_total.labels(status="failed").inc()
             try:
@@ -291,6 +333,8 @@ class FireDispatcher:
                 result.error_message,
                 elapsed,
             )
+            if current_response:
+                return result
             await self._best_effort_ack(
                 fire_id=fire_id,
                 command_id=None,
@@ -301,6 +345,34 @@ class FireDispatcher:
             raise FireDispatchError(
                 f"fire failed: code={result.error_code!r} message={result.error_message!r}",
             )
+        return None
+
+    async def advance_cursor(
+        self,
+        *,
+        entry: ScheduleEntry,
+        prepared: PreparedFire,
+    ) -> CursorTransitionResult:
+        """Persist one current-protocol zero-work catch-up transition."""
+
+        from z4j_scheduler.storage._protocol import CURRENT_PROTOCOL_EPOCH
+
+        if entry.control_token is None:
+            raise ValueError("durable cursor advance requires a current schedule")
+        return await self._client.advance_schedule_cursor(
+            project_id=entry.project_id,
+            schedule_id=entry.id,
+            observed_control_token=entry.control_token,
+            definition_digest=entry.definition_digest,
+            expected_schedule_revision=entry.schedule_revision,
+            expected_last_run_at=entry.last_fire_at,
+            expected_next_run_at=entry.next_fire_at,
+            skipped_through=prepared.scheduled_for,
+            prepared_next_run_at=prepared.next_run_at,
+            scheduler_protocol_epoch=CURRENT_PROTOCOL_EPOCH,
+            cadence_semantics_version=entry.cadence_semantics_version,
+            cadence_runtime_fingerprint=entry.cadence_runtime_fingerprint,
+        )
 
     # ------------------------------------------------------------------
     # Retry loop
@@ -314,6 +386,9 @@ class FireDispatcher:
         scheduled_for: datetime,
         fired_at: datetime,
         triggered_by_user_id: str = "",
+        schedule_entry: ScheduleEntry | None = None,
+        prepared_fire: PreparedFire | None = None,
+        scheduler_protocol_epoch: int = 0,
     ) -> FireResult:
         """Single fire with retry on transient gRPC errors."""
         attempt = 0
@@ -323,12 +398,23 @@ class FireDispatcher:
         while True:
             attempt += 1
             try:
+                if schedule_entry is None:
+                    return await self._client.fire_schedule(
+                        schedule_id=schedule_id,
+                        fire_id=fire_id,
+                        scheduled_for=scheduled_for,
+                        fired_at=fired_at,
+                        triggered_by_user_id=triggered_by_user_id,
+                    )
                 return await self._client.fire_schedule(
                     schedule_id=schedule_id,
                     fire_id=fire_id,
                     scheduled_for=scheduled_for,
                     fired_at=fired_at,
                     triggered_by_user_id=triggered_by_user_id,
+                    schedule_entry=schedule_entry,
+                    prepared_fire=prepared_fire,
+                    scheduler_protocol_epoch=scheduler_protocol_epoch,
                 )
             except grpc.aio.AioRpcError as exc:
                 if exc.code() not in _RETRYABLE_STATUS_CODES or attempt >= max_attempts:

@@ -27,8 +27,9 @@ import asyncio
 import logging
 import signal
 from contextlib import suppress
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
+import grpc
 import uvicorn
 
 from z4j_scheduler.api._state import SchedulerState
@@ -36,15 +37,52 @@ from z4j_scheduler.api.app import create_app
 from z4j_scheduler.dispatch.fire import FireDispatcher
 from z4j_scheduler.leader import SingleInstanceLeaderGate
 from z4j_scheduler.observability.logging import configure_logging
+from z4j_scheduler.storage._protocol import (
+    ProtocolNegotiationError,
+    current_capabilities,
+    require_exact_current,
+)
 from z4j_scheduler.storage.brain_client import BrainClient
 from z4j_scheduler.storage.cache import ScheduleCache
+from z4j_scheduler.storage.quarantine import QuarantineReporter
 from z4j_scheduler.storage.watch import WatchStream
+from z4j_scheduler.tick.cadence import cadence_runtime_fingerprint
 from z4j_scheduler.tick.engine import TickEngine
 
 if TYPE_CHECKING:  # pragma: no cover
     from z4j_scheduler.settings import Settings
 
 logger = logging.getLogger("z4j.scheduler.main")
+
+
+async def _select_protocol_mode(
+    client: BrainClient,
+) -> Literal["legacy", "current"]:
+    """Select exactly one authenticated Brain/scheduler protocol.
+
+    Legacy is accepted only when both independent legacy facts agree:
+    Ping advertises epoch zero and negotiation is not implemented. Every
+    partial, future, or contradictory response fails startup closed.
+    """
+
+    ping = await client.ping()
+    offered = current_capabilities(
+        cadence_runtime_fingerprint=cadence_runtime_fingerprint(),
+    )
+    try:
+        selected = await client.negotiate_protocol(offered)
+    except grpc.RpcError as exc:
+        if ping.scheduler_protocol_epoch == 0 and exc.code() is grpc.StatusCode.UNIMPLEMENTED:
+            return "legacy"
+        raise ProtocolNegotiationError(
+            "Brain protocol negotiation failed without an exact legacy pair",
+        ) from exc
+    require_exact_current(
+        selected=selected,
+        expected=offered,
+        ping_protocol_epoch=ping.scheduler_protocol_epoch,
+    )
+    return "current"
 
 
 class SchedulerApp:
@@ -76,6 +114,7 @@ class SchedulerApp:
         self._leader_gate: object | None = None
         self._tick_engine: TickEngine | None = None
         self._watch: WatchStream | None = None
+        self._quarantine_reporter: QuarantineReporter | None = None
         self._dispatcher: FireDispatcher | None = None
         self._state: SchedulerState | None = None
         self._uvicorn_server: uvicorn.Server | None = None
@@ -104,21 +143,38 @@ class SchedulerApp:
 
         # 1. Brain client first - everything else depends on the gRPC
         #    connection being open.
-        self._client = self._build_brain_client()
-        await self._client.connect()
+        client = self._build_brain_client()
+        self._client = client
+        await client.connect()
+        try:
+            protocol_mode = await _select_protocol_mode(client)
+        except BaseException:
+            # start() has not reached the normal teardown lifecycle yet.
+            await client.close()
+            raise
 
         # 2. Cache - in-memory, instant.
         self._cache = ScheduleCache()
+        if protocol_mode == "current":
+            self._quarantine_reporter = QuarantineReporter(
+                client=client,
+                cache=self._cache,
+            )
 
         # 3. Leader gate - backend selected by settings. ``single``
         #    is the v1 default (no infra deps); ``postgres`` is the
         #    HA backend that replaces the always-true gate with a
         #    real advisory-lock race across multiple instances.
         self._leader_gate = await self._build_leader_gate()
+        # Teach the cache which projects this instance leads, so the
+        # watch echo-merge preserves engine fire-state ONLY on the leader and a
+        # follower adopts the leader's brain-advanced state (converges instead of
+        # busy-spinning / replaying after failover).
+        self._cache.is_leader = self._leader_gate.is_leader
 
         # 4. Dispatcher - uses brain client for fire delivery.
         self._dispatcher = FireDispatcher(
-            client=self._client,
+            client=client,
             settings=self.settings,
         )
 
@@ -134,11 +190,13 @@ class SchedulerApp:
         # periodic full re-sync alongside the live event stream
         # (see ``storage/watch.py``).
         self._watch = WatchStream(
-            client=self._client,
+            client=client,
             cache=self._cache,
             full_resync_interval_seconds=float(
                 self.settings.reconcile_interval_seconds,
             ),
+            protocol_mode=protocol_mode,
+            protocol_selector=lambda: _select_protocol_mode(client),
         )
 
         # 5b. Tick engine. The engine receives the watch's
@@ -152,6 +210,12 @@ class SchedulerApp:
             leader_gate=_GaugePublishingLeaderGate(self._leader_gate),
             dispatcher=self._dispatcher,
             watch_healthy=lambda: self._watch.is_healthy if self._watch else True,
+            # The promotion-scoped grace must cover THIS deployment's
+            # failover latency. Feed it the configured leader heartbeat so a slow
+            # heartbeat (supported up to 60s) does not make a promoted leader
+            # classify the slot it parked as a follower as "missed" and drop it.
+            leader_heartbeat_seconds=getattr(self.settings, "leader_heartbeat_seconds", 2.0),
+            quarantine_reporter=self._quarantine_reporter,
         )
 
         # 6.5 TriggerSchedule gRPC server (Phase 2). Off by default.
@@ -207,6 +271,11 @@ class SchedulerApp:
                     name="watch",
                 )
                 tg.create_task(self._tick_engine.run(), name="tick")
+                if self._quarantine_reporter is not None:
+                    tg.create_task(
+                        self._quarantine_reporter.run(),
+                        name="quarantine_reporter",
+                    )
                 tg.create_task(
                     self._uvicorn_server.serve(),
                     name="uvicorn",
@@ -245,6 +314,8 @@ class SchedulerApp:
                 await self._trigger_server.stop()  # type: ignore[attr-defined]
         if self._tick_engine is not None:
             await self._tick_engine.stop()
+        if self._quarantine_reporter is not None:
+            await self._quarantine_reporter.stop()
         if self._watch is not None:
             await self._watch.stop()
         # Leader gate: only the postgres backend has an async stop;

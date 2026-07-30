@@ -31,12 +31,70 @@ pytest.importorskip(
 from z4j_scheduler.exporters import celery as celery_exporter
 from z4j_scheduler.exporters._client import ExportedSchedule
 from z4j_scheduler.importers._core import ImportedSchedule
+from z4j_scheduler.tick import solar as solar_mod
 from z4j_scheduler.tick.solar import (
     VALID_EVENTS,
+    fires_between,
     next_solar_fire,
     parse_solar_expression,
 )
 from z4j_scheduler.verify.shadow_comparator import predict_fires
+
+
+class TestFiresBetweenR9H7:
+    """Solar now enumerates a missed backlog (iterated next_solar_fire),
+    so the tick engine can coalesce fire_one_missed instead of re-firing one solar
+    slot per tick after a multi-boundary outage."""
+
+    def test_iterates_window_ascending(self, monkeypatch) -> None:
+        seq = [
+            datetime(2026, 5, 1, 6, 0, tzinfo=UTC),
+            datetime(2026, 5, 1, 18, 0, tzinfo=UTC),
+            datetime(2026, 5, 2, 6, 0, tzinfo=UTC),
+        ]
+
+        def _fake_next(expression: str, after: datetime, **_kw: object) -> datetime | None:
+            for x in seq:
+                if x > after:
+                    return x
+            return None
+
+        monkeypatch.setattr(solar_mod, "next_solar_fire", _fake_next)
+        out = fires_between(
+            "sunrise@0.0,0.0",
+            after=datetime(2026, 5, 1, 0, 0, tzinfo=UTC),
+            until=datetime(2026, 5, 1, 23, 0, tzinfo=UTC),
+        )
+        # Only the two slots INSIDE (after, until]; the next-day slot is excluded.
+        assert out == seq[:2]
+
+    def test_empty_and_cap(self, monkeypatch) -> None:
+        # No occurrences in the window -> [].
+        monkeypatch.setattr(solar_mod, "next_solar_fire", lambda *a, **k: None)
+        assert (
+            fires_between(
+                "sunrise@0.0,0.0",
+                after=datetime(2026, 5, 1, tzinfo=UTC),
+                until=datetime(2026, 5, 2, tzinfo=UTC),
+            )
+            == []
+        )
+        # A degenerate producer that never advances yields at most ONE slot: the
+        # advance guard (nxt <= cursor -> stop) dedups it and the loop is bounded,
+        # never infinite. A real next_solar_fire always returns a time strictly
+        # after ``after``, so this only ever bites a mock / pathological producer,
+        # and one duplicate slot is strictly better than max_slots duplicates
+        # (which would double-fire the same instant under fire_all_missed).
+        fixed = datetime(2026, 5, 1, 6, 0, tzinfo=UTC)
+        monkeypatch.setattr(solar_mod, "next_solar_fire", lambda *a, **k: fixed)
+        out = fires_between(
+            "sunrise@0.0,0.0",
+            after=datetime(2026, 5, 1, tzinfo=UTC),
+            until=datetime(2026, 5, 2, tzinfo=UTC),
+            max_slots=10,
+        )
+        assert out == [fixed]  # deduped + bounded, not infinite
+
 
 # =====================================================================
 # Expression parser
@@ -302,3 +360,24 @@ class TestCeleryExporterRendersSolar:
         # raise from the renderer (would crash the whole export).
         out = celery_exporter.render([self._exported("bogus")])
         assert "unparseable solar expression" in out
+
+
+class TestPerEventHighLatitudeR10H11:
+    """Request the SPECIFIC solar event, not the sun() bundle, so a
+    bundled event with no occurrence today (high latitude) does not make a
+    computable event fail and skip the whole day until the polar season ends."""
+
+    def test_noon_resolves_during_polar_day_when_bundle_would_raise(self) -> None:
+        pytest.importorskip("astral")
+        from astral import Observer
+        from astral.sun import sun
+
+        # Tromso in polar day: sunrise/sunset do not occur, so the sun() BUNDLE
+        # raises -- the old code skipped the whole day even for noon.
+        polar_day = datetime(2026, 6, 21, 0, 0, tzinfo=UTC)
+        with pytest.raises(Exception):  # noqa: B017  bundle genuinely raises here
+            sun(Observer(69.6, 18.9), date=polar_day.date(), tzinfo=UTC)
+        # The per-event path still computes noon on that exact day.
+        noon = next_solar_fire("noon:69.6:18.9", after=polar_day)
+        assert noon is not None
+        assert noon.date() == polar_day.date()

@@ -217,7 +217,7 @@ async def _await_despite_cancel(task: asyncio.Task[None]) -> None:
     cleanup steps remained (remaining releases, held.clear(),
     close()). This helper absorbs the cancel, keeps awaiting the
     SAME task until it finishes, then re-raises the CancelledError
-    so the caller still observes its cancellation. R3-M5.
+    so the caller still observes its cancellation.
     """
     cancelled: asyncio.CancelledError | None = None
     while True:
@@ -298,13 +298,13 @@ class PostgresAdvisoryLockLeaderGate:
 
         The ENTIRE sequence (loop join + release + close) runs inside
         one dedicated task guarded by :func:`_await_despite_cancel`.
-        R3-M5 moved only the release+close tail into a task, which
+        Moved only the release+close tail into a task, which
         left a gap round 4 reproduced: a cancel landing during the
         loop JOIN (before the cleanup task existed) escaped stop()
         with zero releases, the lock still held, and the backend
         open. Creating the task FIRST makes every phase
         cancellation-immune; the caller's cancellation is re-raised
-        after cleanup completes. R4-M4.
+        after cleanup completes.
         """
         self._stop_event.set()
         stopper = asyncio.create_task(
@@ -319,7 +319,7 @@ class PostgresAdvisoryLockLeaderGate:
         A cancel mid-release would otherwise leave the lock held
         until the asyncpg session timeout, blocking standby
         instances from leadership for tens of seconds and opening a
-        HA split-brain gap on rolling redeploy. R3-M5.
+        HA split-brain gap on rolling redeploy.
         """
         if self._task is not None:
             try:
@@ -533,12 +533,12 @@ class PerProjectLeaderGate:
 
         The ENTIRE sequence (loop join + every release + held.clear()
         + close) runs inside one dedicated task guarded by
-        :func:`_await_despite_cancel`. R3-M5 protected only the
+        func:`_await_despite_cancel`. protected only the
         release tail; round 4 reproduced a cancel during the loop
         JOIN (before the cleanup task existed) escaping with all
         locks still held and the backend open. Creating the task
         FIRST makes every phase cancellation-immune; the caller's
-        cancellation is re-raised after cleanup completes. R4-M4.
+        cancellation is re-raised after cleanup completes.
         """
         self._stop_event.set()
         stopper = asyncio.create_task(
@@ -551,7 +551,7 @@ class PerProjectLeaderGate:
         """Join the loop, then release-all + close (see stop()).
 
         A cancel mid-release would otherwise leave per-project
-        advisory locks dangling and block standby promotion. R3-M5.
+        advisory locks dangling and block standby promotion.
         """
         if self._task is not None:
             try:

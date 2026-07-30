@@ -75,6 +75,103 @@ class ScheduleEntry:
     # pre-field WatchSchedules event still converts.
     engine: str = ""
     next_fire_at: datetime | None = field(default=None, init=False)
+    # Boundary D current-protocol control generation. ``None`` is the
+    # explicitly negotiated 1.7 compatibility shape; random UUID equality is
+    # authority, never an ordering relation.
+    control_token: UUID | None = None
+    # Globally ordered Brain transport revision. Zero is legacy/unknown.
+    schedule_revision: int = 0
+    # Brain-computed digest over the complete execution/cadence definition.
+    # The slim scheduler entry cannot safely reconstruct this from its subset.
+    definition_digest: str = ""
+    # Exact cadence implementation contract selected during channel
+    # negotiation. Zero/empty is the explicit legacy shape.
+    cadence_semantics_version: int = 0
+    cadence_runtime_fingerprint: str = ""
 
 
-__all__ = ["CatchUpPolicy", "ScheduleEntry", "ScheduleKind"]
+def schedule_definition_changed(a: ScheduleEntry, b: ScheduleEntry) -> bool:
+    """True iff the schedule's DEFINITION (its cadence, not enabled/timestamps)
+    differs between two snapshots.
+
+    A catch-up plan or a next-fire time computed from ``a`` is stale and must
+    not be dispatched or persisted against ``b``'s new cadence. Lives next to
+    :class:`ScheduleEntry` so the compared field list cannot drift away from
+    the model; imported by both the tick engine (mid-drain abort) and the
+    cache (compare-and-set fire-state write).
+    """
+    # H7: anchor_at is NOT a cadence field for this comparison. A fire ACK
+    # advances brain's last_run_at, and entry_from_pb derives anchor_at from
+    # last_run_at, so the fire-ack watch echo changes anchor_at WITHOUT any
+    # cadence edit. Including it here made the mid-drain catch-up guard abort a
+    # fire_all_missed drain on the first ACK and DROP the remaining missed slots;
+    # and it made the fire-state compare-and-set reject the engine's own advance.
+    # A genuine start-time-only edit no longer aborts a mid-drain, but such an
+    # edit resets next_fire_at and is recomputed next tick, so it is safe.
+    return schedule_cadence_identity(a) != schedule_cadence_identity(b)
+
+
+def schedule_cadence_identity(entry: ScheduleEntry) -> tuple[object, ...]:
+    """A hashable identity for the schedule's CADENCE.
+
+    Same field list as :func:`schedule_definition_changed`, expressed as a value
+    that can be STORED alongside a remembered slot. State that means "this exact
+    occurrence of this exact cadence" has to carry both: a slot timestamp alone
+    survives an edit that changes the cadence while leaving ``next_fire_at``
+    untouched, and the remembered state then applies to an occurrence that is no
+    longer on the schedule at all.
+    """
+    return (entry.kind, entry.expression, entry.timezone, entry.catch_up)
+
+
+def schedule_control_identity(entry: ScheduleEntry) -> tuple[object, ...]:
+    """Identity used by the scheduler's local safety overlay.
+
+    A current Brain supplies an unguessable control token. The legacy fallback
+    deliberately binds to the canonical cadence identity and therefore remains
+    safety-biased across a same-id/same-definition recreate.
+    """
+
+    if entry.control_token is not None:
+        return ("control-token", entry.control_token)
+    return ("legacy-definition", *schedule_cadence_identity(entry))
+
+
+def schedule_brain_payload(entry: ScheduleEntry) -> tuple[object, ...]:
+    """Canonical received fields for same-revision conflict detection.
+
+    Scheduler-local bookkeeping is deliberately absent. The Brain's complete
+    cursor and effective state are included, so reusing one revision with a
+    different token, definition, cursor, or enabled value is a protocol fault.
+    """
+
+    return (
+        entry.id,
+        entry.project_id,
+        entry.kind,
+        entry.expression,
+        entry.timezone,
+        entry.is_enabled,
+        entry.catch_up,
+        entry.anchor_at,
+        entry.last_fire_at,
+        entry.next_fire_at,
+        entry.name,
+        entry.engine,
+        entry.control_token,
+        entry.schedule_revision,
+        entry.definition_digest,
+        entry.cadence_semantics_version,
+        entry.cadence_runtime_fingerprint,
+    )
+
+
+__all__ = [
+    "CatchUpPolicy",
+    "ScheduleEntry",
+    "ScheduleKind",
+    "schedule_brain_payload",
+    "schedule_cadence_identity",
+    "schedule_control_identity",
+    "schedule_definition_changed",
+]

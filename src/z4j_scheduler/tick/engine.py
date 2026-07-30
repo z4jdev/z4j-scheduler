@@ -34,7 +34,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
 from uuid import UUID
 
@@ -42,13 +42,19 @@ from z4j_scheduler.tick import cron as cron_mod
 from z4j_scheduler.tick import interval as interval_mod
 from z4j_scheduler.tick import one_shot as one_shot_mod
 from z4j_scheduler.tick import solar as solar_mod
+from z4j_scheduler.tick._entry import (
+    schedule_cadence_identity,
+    schedule_definition_changed,
+)
 from z4j_scheduler.tick.catch_up import plan_catch_up
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from z4j_scheduler.storage.cache import ScheduleCache
+    from z4j_scheduler.storage._models import CursorTransitionResult, FireResult
+    from z4j_scheduler.storage.cache import LocalQuarantine, ScheduleCache
     from z4j_scheduler.tick._entry import ScheduleEntry
+    from z4j_scheduler.tick._prepared import PreparedFire
 
 logger = logging.getLogger("z4j.scheduler.tick")
 
@@ -69,6 +75,39 @@ _MAX_SLEEP_SECONDS = 30.0
 #: outage after a brain restart.
 _UNHEALTHY_SLEEP_SECONDS = 1.0
 
+#: RM12: when firing a schedule RAISES (a pathological cadence that overflows
+#: _next_fire_for, a dispatcher bug, ...), the entry's next_fire_at is never
+#: advanced, so it stays past-due and the engine would re-fire it every tick
+#: (a hot-spin). Instead we push next_fire_at forward by an exponential
+#: back-off so the broken schedule retries on a widening interval rather than
+#: monopolising the loop. Base 1s, doubling, capped.
+_BASE_FIRE_BACKOFF_SECONDS = 1.0
+_MAX_FIRE_BACKOFF_SECONDS = 300.0
+_MAX_FIRE_BACKOFF_EXPONENT = 8
+
+#: M8: bound on how many due schedules fire concurrently within one tick. A
+#: burst of due schedules cannot spawn unbounded coroutines, while a single
+#: schedule's long catch-up drain no longer blocks every other due schedule's
+#: on-time fire behind it.
+_MAX_CONCURRENT_FIRES = 16
+
+#: The maximum number of DISTINCT due schedules dispatched in a single
+#: tick. The dispatch phase blocks until its whole batch drains, so an unbounded
+#: batch means a promotion (a leadership grant that must un-park a follower's
+#: slots) is not re-evaluated -- and a just-promoted follower's due slot not
+#: fired -- until the entire current backlog completes. Capping the batch bounds
+#: how long the loop takes to return to its top-of-iteration promotion re-check;
+#: the remainder stays due and is picked up on the very next (immediate) iteration.
+_MAX_DISPATCH_PER_TICK = 256
+
+
+# M10/RM11: the definition-comparison helper now lives next to ScheduleEntry
+# (tick/_entry.py) so the tick engine and the cache's compare-and-set write
+# share ONE field list. Re-exported here under the original private name so the
+# existing call sites keep working.
+_schedule_definition_changed = schedule_definition_changed
+
+
 #: Grace window for distinguishing "on-time" fires from "missed"
 #: fires. A fire whose ``scheduled_for`` is within this many seconds
 #: of ``now`` is treated as on-time and dispatched unconditionally;
@@ -80,6 +119,40 @@ _UNHEALTHY_SLEEP_SECONDS = 1.0
 #: that's >5s late genuinely indicates the scheduler was down or
 #: behind, and catch-up policy is the right behaviour.
 _ON_TIME_GRACE_SECONDS = 5.0
+
+#: PROMOTION-SCOPED grace for a slot THIS instance parked
+#: as a follower and then fires as the just-promoted leader. The extra elapsed
+#: time is our own promotion-detection latency, not a cluster outage, so such a
+#: slot is on-time WITHIN this window; a slot OLDER than it is genuinely missed
+#: and catch_up governs it. It applies ONLY to a follower-parked slot, so
+#: steady-state leaders and single-instance deployments (which never carry a
+#: handoff marker) keep the base on-time grace unchanged.
+#:
+#: This must be DERIVED from the deployment's configured leader
+#: timing, not hard-coded. A fixed 30s was SHORTER than the supported
+#: ``leader_heartbeat_seconds`` maximum (``le=60``), so a deployment with a slow
+#: heartbeat promoted at ~T+60 and the promoted scheduler classified the slot it
+#: had itself parked as missed, dropping it under catch_up="skip". The grace is
+#: therefore ``base on-time grace + leader heartbeat + follower recheck``, which
+#: bounds the realistic worst case: detecting the dead leader (one heartbeat)
+#: plus this engine noticing it is now leader (one recheck).
+# The floor is the grace this code shipped with BEFORE the derivation was
+# introduced. Deriving from the heartbeat alone made the DEFAULT deployment
+# stricter than its parent (2s heartbeat -> 12s), so a handoff slot ~20s late
+# that used to fire was suddenly dropped under catch_up="skip". A fix for slow
+# heartbeats must not tighten the common case: the derived value may only ever
+# RAISE the window.
+_PROMOTION_GRACE_FLOOR_SECONDS = 30.0
+
+
+def _promotion_grace_for(
+    *, leader_heartbeat_seconds: float, follower_recheck_seconds: float
+) -> float:
+    """Worst-case failover latency a follower-parked slot may legitimately age by."""
+    return max(
+        _PROMOTION_GRACE_FLOOR_SECONDS,
+        _ON_TIME_GRACE_SECONDS + leader_heartbeat_seconds + follower_recheck_seconds,
+    )
 
 
 #: Sentinel for :meth:`TickEngine._next_fire_for`'s
@@ -121,7 +194,27 @@ class Dispatcher(Protocol):
         engine: str = "",
         project_id: UUID | None = None,
         project_schedule_count: int | None = None,
-    ) -> None: ...
+        prepared_fire: PreparedFire | None = None,
+        schedule_entry: ScheduleEntry | None = None,
+    ) -> FireResult | None: ...
+
+    async def advance_cursor(
+        self,
+        *,
+        entry: ScheduleEntry,
+        prepared: PreparedFire,
+    ) -> CursorTransitionResult: ...
+
+
+class QuarantineSink(Protocol):
+    """Queue a durable report after the cache has latched locally."""
+
+    def enqueue(
+        self,
+        *,
+        entry: ScheduleEntry,
+        quarantine: LocalQuarantine,
+    ) -> bool: ...
 
 
 def _utc_now() -> datetime:
@@ -156,12 +249,19 @@ class TickEngine:
         clock: Callable[[], datetime] = _utc_now,
         max_sleep_seconds: float = _MAX_SLEEP_SECONDS,
         watch_healthy: Callable[[], bool] | None = None,
+        leader_heartbeat_seconds: float = 2.0,
+        quarantine_reporter: QuarantineSink | None = None,
     ) -> None:
         self._cache = cache
         self._leader_gate = leader_gate
         self._dispatcher = dispatcher
         self._clock = clock
         self._max_sleep_seconds = max_sleep_seconds
+        self._quarantine_reporter = quarantine_reporter
+        # The promotion-scoped grace is derived from the DEPLOYMENT's
+        # configured leader heartbeat, so a slow-heartbeat cluster (the supported
+        # maximum is 60s) does not drop a slot this instance parked as a follower.
+        self._leader_heartbeat_seconds = leader_heartbeat_seconds
         self._stop_event = asyncio.Event()
         # When the watch stream is down, the cache may hold stale
         # state (e.g. an operator
@@ -197,10 +297,81 @@ class TickEngine:
         # failed to parse. That mutation could land on an orphaned
         # entry if the WatchStream upserted concurrently, leaving
         # the broken schedule live. Now ``_next_fire_for`` records
-        # the disable here; the async tick iteration drains the set
+        # the disable here; the async tick iteration drains the map
         # via ``cache.update_fire_state(is_enabled=False)`` which
         # serialises against ``cache.upsert``.
-        self._pending_disables: set[UUID] = set()
+        #
+        # RM12/M10: value is the ENTRY SNAPSHOT whose compute failed, so the
+        # drain can pass it as ``expected_definition`` -- a definition-CAS. If a
+        # watch upsert edited the cadence (e.g. the operator fixed the broken
+        # expression) between the failed compute and the drain, the disable is
+        # skipped rather than clobbering the now-valid schedule. Keyed by id so a
+        # re-queued disable for the same schedule coalesces to the latest snapshot.
+        self._pending_disables: dict[UUID, ScheduleEntry] = {}
+        # RM12: consecutive fire-error counts per schedule, used to widen the
+        # back-off. Cleared on the first clean fire; entries for schedules the
+        # watch has removed are pruned against the live cache in
+        # _compute_pending_next_fires (every iteration). So it stays bounded by
+        # the number of live schedules.
+        self._fire_error_counts: dict[UUID, int] = {}
+        # P1-8b: retry DEADLINE for a schedule whose DISPATCH failed, kept
+        # SEPARATE from next_fire_at so the retry re-fires the ORIGINAL slot (no
+        # cadence drift) and does not dispatch at the back-off instant. The
+        # due-loop skips a schedule until now >= its deadline; _sleep_until_next
+        # wakes when the soonest deadline elapses. Pruned with _fire_error_counts.
+        self._fire_backoff_until: dict[UUID, datetime] = {}
+        # L3: the schedule DEFINITION snapshot captured when the back-off was
+        # recorded, so the prune can tell an EDITED schedule (fixed cadence,
+        # same id) from the still-broken one. The back-off/error state is keyed
+        # by id alone; without this an operator who repairs a failing schedule
+        # would have the corrected cadence inherit up to _MAX_FIRE_BACKOFF_SECONDS
+        # of stale suppression before it could fire. Cleared on a definition
+        # change in the prune, and alongside _fire_error_counts everywhere.
+        self._fire_backoff_def: dict[UUID, ScheduleEntry] = {}
+        # engine:449: a schedule whose NEXT-FIRE COMPUTATION raised (e.g. an
+        # oversized interval -> OverflowError) is disabled locally. But the brain
+        # keeps is_enabled=True (it does not validate interval magnitude) and
+        # re-syncs the row, so the entry keeps coming back next_fire_at=None and
+        # re-raising every tick/resync. Remember the (id -> failing expression) so
+        # the full logger.exception traceback is emitted ONCE per broken
+        # definition instead of storming the log on every re-sync; an operator's
+        # edit changes the expression and re-arms the log. Pruned against the live
+        # cache like the back-off counters.
+        self._compute_quarantined: dict[UUID, str] = {}
+        # H8: slots a NON-leader has already observed as due. A
+        # follower must not advance ANY cadence (a one_shot cannot move past its
+        # configured past-due time, and rewriting cron/interval corrupts the grid
+        # + loses catch-up backlog), so it would re-process the same due slot every
+        # tick (a hot loop). We PARK it here (id -> the parked next_fire_at) and
+        # skip re-dispatch while a follower, WITHOUT touching next_fire_at /
+        # last_fire_at. Cleared on promotion, on a slot change (echo/recompute), or
+        # on removal.
+        self._follower_parked: dict[UUID, datetime] = {}
+        # Slots a follower OBSERVED live-due and merely handed off to the
+        # (eventual) leader, keyed id -> the observed next_fire_at. When THIS
+        # instance is promoted and fires such a slot, the delay is
+        # promotion-DETECTION latency, not cluster unavailability, so it must be
+        # treated as an ON-TIME fire (catch_up governs cluster outages, not a
+        # live-observed handoff) -- otherwise the detection delay can push it past
+        # the on-time grace and catch_up="skip" would drop a slot that was seen
+        # due. Recorded when parking, consumed once on the promoted fire, pruned
+        # with the park.
+        # (Slot, cadence identity). The slot alone survived an edit that
+        # changed the cadence but left next_fire_at untouched, and the marker
+        # then made a slot fire on-time that was no longer on the schedule.
+        self._follower_handoff: dict[UUID, tuple[datetime, tuple[object, ...]]] = {}
+        #: Slots already judged on-time as a handoff. Frozen so a failed
+        #: dispatch cannot let the slot age out of its grace before the retry.
+        self._handoff_entitled: dict[UUID, datetime] = {}
+        # While any entry is parked, a promotion must be noticed promptly.
+        # The parked entries are excluded from the sleep wake computation (they
+        # are past-due but must not force an immediate wake), and a leadership
+        # change does NOT set cache.changed, so without this a just-promoted
+        # follower would wait the full max-sleep before firing its due slot. When
+        # something is parked we cap the sleep to this short re-check interval so
+        # the loop re-evaluates leadership within a bounded delay. A single-
+        # instance (always-leader) deployment never parks, so it never pays this.
+        self._follower_recheck_seconds: float = 5.0
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -290,18 +461,184 @@ class TickEngine:
         now = self._clock()
         due = await self._cache.all_due(before=now)
         if due:
-            for entry in due:
-                if entry.id in self._in_flight:
-                    continue
-                self._in_flight.add(entry.id)
+            # M8: fire due schedules CONCURRENTLY (bounded), not sequentially.
+            # A single schedule's fire_all_missed drain can be up to the 10k
+            # slot cap; awaiting each inline delayed every OTHER due schedule's
+            # on-time fire behind it.
+            # P1-8b: skip a schedule that is in fire back-off (a prior dispatch
+            # failed) until its retry deadline, so we neither hot-spin on it nor
+            # advance its next_fire_at (the retry re-fires the original slot).
+            runnable = [
+                e
+                for e in due
+                if e.id not in self._in_flight
+                and self._fire_backoff_until.get(e.id, now) <= now
+                # A one_shot/clocked slot this follower already observed
+                # is parked; skip re-dispatch until promotion (the leader gate in
+                # _is_follower_parked releases it) or the slot changes.
+                and not self._is_follower_parked(e)
+            ]
+            # Cap the per-tick dispatch batch so the loop returns to its
+            # top-of-iteration promotion re-check within a bounded time even under
+            # a large backlog. The remainder stays due and is dispatched on the
+            # next (immediate, since something is still due) iteration.
+            if len(runnable) > _MAX_DISPATCH_PER_TICK:
+                runnable = runnable[:_MAX_DISPATCH_PER_TICK]
+            for e in runnable:
+                self._in_flight.add(e.id)
+            if runnable:
+                # RM13: bound the number of SPAWNED coroutines, not just the
+                # number that hold a semaphore. The old
+                # ``gather(*(_run(e) for e in runnable))`` created ONE task per
+                # due entry up front, so a backlog of N due schedules parked
+                # N - 16 tasks blocked on a semaphore -- unbounded task/memory
+                # growth on a large fleet or after a long pause. A fixed worker
+                # pool draining a queue keeps at most ``_MAX_CONCURRENT_FIRES``
+                # coroutines alive no matter how many schedules are due.
+                queue: asyncio.Queue[ScheduleEntry] = asyncio.Queue()
+                for e in runnable:
+                    queue.put_nowait(e)
+
+                async def _worker() -> None:
+                    # engine:344: honour a graceful stop between entries. Without
+                    # this a stop signalled mid-fan-out still drains EVERY queued
+                    # due entry (2,000 project-count scans after stop). Entries
+                    # left in the queue are released from _in_flight below.
+                    while not self._stop_event.is_set():
+                        try:
+                            entry = queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            return
+                        try:
+                            ok = await self._fire_with_catch_up(entry, now=now)
+                        except Exception:
+                            # P1-8b: a fire that RAISES means the schedule's
+                            # cadence is broken (e.g. an OverflowError on an
+                            # oversized interval) or a post-dispatch computation
+                            # failed after the task was already sent. Pushing
+                            # next_fire_at forward (the old back-off) made it fire
+                            # REAL tasks at the back-off instants, and re-firing a
+                            # post-dispatch failure duplicates the task. Quarantine
+                            # it (disable) so it stops firing; an operator fixes
+                            # the definition and re-enables.
+                            logger.exception(
+                                "z4j.scheduler.tick: firing schedule_id=%s raised; "
+                                "quarantining (disabling) the schedule",
+                                entry.id,
+                            )
+                            await self._quarantine_after_fire_error(entry)
+                        else:
+                            if ok:
+                                # Clean fire: reset the error back-off state.
+                                self._fire_error_counts.pop(entry.id, None)
+                                self._fire_backoff_until.pop(entry.id, None)
+                                self._fire_backoff_def.pop(entry.id, None)
+                            else:
+                                # DISPATCH failed (no task sent). Back off so the
+                                # SAME slot is retried on a widening interval
+                                # without hot-spinning; not a clean fire, so the
+                                # error count is NOT reset (engine:729).
+                                await self._back_off_after_fire_error(entry)
+                        finally:
+                            self._in_flight.discard(entry.id)
+
+                workers = [
+                    asyncio.create_task(_worker())
+                    for _ in range(min(_MAX_CONCURRENT_FIRES, len(runnable)))
+                ]
                 try:
-                    await self._fire_with_catch_up(entry, now=now)
+                    await asyncio.gather(*workers, return_exceptions=True)
                 finally:
-                    self._in_flight.discard(entry.id)
+                    # engine:344 + engine:328: any entry still queued was never
+                    # dispatched (a graceful stop drained early, or the gather was
+                    # cancelled). Its id was pre-added to _in_flight; release it so
+                    # a reused engine does not leak it and it is re-evaluated on the
+                    # next run. Runs single-threaded, so this drain cannot race a
+                    # worker.
+                    while not queue.empty():
+                        with contextlib.suppress(asyncio.QueueEmpty):
+                            self._in_flight.discard(queue.get_nowait().id)
 
         # Step 3: sleep until the next schedule OR a cache change OR
         # stop signal.
         await self._sleep_until_next()
+
+    def _prune_stale_fire_state(self, snapshot: list[ScheduleEntry]) -> None:
+        """Reconcile the per-schedule fire-error / quarantine bookkeeping.
+
+        RM12: the engine has no schedule-removal hook (it reads the cache), so a
+        schedule that errored and was then DELETED before ever firing cleanly
+        would leak its counters forever. Pruning here (every iteration; the
+        dicts are tiny) keeps them bounded by the number of live schedules.
+
+        L3: additionally clears the back-off for a schedule still LIVE but whose
+        CADENCE was edited under the same id -- an operator who fixes a failing
+        schedule would otherwise wait out up to _MAX_FIRE_BACKOFF_SECONDS of
+        stale suppression before the corrected cadence could fire. A same-cadence
+        replacement (the benign ack echo) does NOT clear it -- the definition-CAS
+        in schedule_definition_changed excludes anchor_at.
+        """
+        if not (
+            self._fire_error_counts
+            or self._fire_backoff_until
+            or self._compute_quarantined
+            or self._follower_parked
+            or self._follower_handoff
+        ):
+            return
+        live_by_id = {entry.id: entry for entry in snapshot}
+        # Drop a parked marker once the entry is GONE, or once its
+        # next_fire_at no longer matches the parked slot (the leader advanced it,
+        # or a fired one_shot's success echo set next_fire_at=None). Both the
+        # due-filter and the sleep skip a next_fire_at=None entry BEFORE calling
+        # _is_follower_parked, so the self-clean there never runs for a consumed
+        # one_shot -- without this the marker would leak for the schedule's whole
+        # lifetime.
+        for sid, parked_at in list(self._follower_parked.items()):
+            live = live_by_id.get(sid)
+            if live is None or live.next_fire_at != parked_at:
+                self._follower_parked.pop(sid, None)
+        # The handoff record follows the same lifecycle -- drop it once the
+        # entry is gone or its slot changed (a stale handoff must never make a
+        # DIFFERENT later slot fire on-time).
+        for sid, (handoff_at, cadence) in list(self._follower_handoff.items()):
+            live = live_by_id.get(sid)
+            # Drop it when the entry is gone, the slot moved, OR the cadence
+            # itself was edited. An edit can leave next_fire_at unchanged, so the
+            # slot comparison alone let a stale marker survive and fire a slot
+            # the new cadence does not contain.
+            # A DISABLE also invalidates it. A follower parks slot T, the
+            # schedule is disabled and re-enabled with the same cadence and the
+            # same next_fire_at, and on promotion T fired "on time" -- even
+            # though catch_up="skip" would have discarded it, and even though
+            # the operator had switched the schedule off across that very slot.
+            # An observed disable is an explicit statement that this occurrence
+            # should not run.
+            if (
+                live is None
+                or not live.is_enabled
+                or live.next_fire_at != handoff_at
+                or schedule_cadence_identity(live) != cadence
+            ):
+                self._follower_handoff.pop(sid, None)
+                self._handoff_entitled.pop(sid, None)
+        for sid in [s for s in self._fire_error_counts if s not in live_by_id]:
+            self._fire_error_counts.pop(sid, None)
+        for sid in [s for s in self._fire_backoff_until if s not in live_by_id]:
+            self._fire_backoff_until.pop(sid, None)
+        for sid in [s for s in self._fire_backoff_def if s not in live_by_id]:
+            self._fire_backoff_def.pop(sid, None)
+        for sid, prior in list(self._fire_backoff_def.items()):
+            live = live_by_id.get(sid)
+            if live is not None and schedule_definition_changed(prior, live):
+                self._fire_error_counts.pop(sid, None)
+                self._fire_backoff_until.pop(sid, None)
+                self._fire_backoff_def.pop(sid, None)
+        # engine:449: drop the log-throttle record for a schedule the watch
+        # removed, so if the same id is later re-created with a still-broken
+        # expression it logs once more.
+        for sid in [s for s in self._compute_quarantined if s not in live_by_id]:
+            self._compute_quarantined.pop(sid, None)
 
     async def _compute_pending_next_fires(self) -> None:
         """Compute next_fire_at for any entry that lacks one.
@@ -316,24 +653,72 @@ class TickEngine:
         ``self._pending_disables`` is drained through the same
         atomic helper.
         """
-        for entry in await self._cache.snapshot():
+        snapshot = await self._cache.snapshot()
+        self._prune_stale_fire_state(snapshot)
+        for entry in snapshot:
             if entry.next_fire_at is None and entry.is_enabled:
-                next_at = self._next_fire_for(entry)
+                try:
+                    next_at = self._next_fire_for(entry)
+                except Exception:
+                    # engine:449: _next_fire_for's per-kind handlers catch only
+                    # their OWN *ExpressionError, but the cadence math can raise
+                    # OTHER exceptions -- e.g. timedelta(seconds=huge) raises
+                    # OverflowError (an ArithmeticError, NOT an
+                    # IntervalExpressionError) on an oversized interval. This is
+                    # the ONLY unguarded _next_fire_for caller (the fire path's
+                    # calls run inside _fire_with_catch_up, which the worker
+                    # try/except quarantines). An uncaught raise here propagates
+                    # through _iteration -> run() -> the TaskGroup and crashes the
+                    # WHOLE scheduler, re-crashing on restart as brain re-syncs
+                    # the row. Quarantine the one bad schedule locally instead
+                    # (mirrors the fire-path quarantine, P1-8b). The brain does
+                    # not validate interval magnitude and keeps re-syncing the row
+                    # is_enabled=True, so throttle the traceback to ONCE per
+                    # (id, failing expression) -- otherwise every re-sync storms
+                    # the log.
+                    if self._compute_quarantined.get(entry.id) != entry.expression:
+                        logger.exception(
+                            "z4j.scheduler.tick: next-fire computation raised for "
+                            "schedule_id=%s (kind=%s, expression=%r); disabling "
+                            "locally",
+                            entry.id,
+                            entry.kind,
+                            entry.expression,
+                        )
+                        self._compute_quarantined[entry.id] = entry.expression
+                    self._pending_disables[entry.id] = entry
+                    continue
+                # L5: the compute SUCCEEDED (including a legitimately-exhausted
+                # one_shot that returns None) -- drop any stale quarantine record
+                # so a subsequent genuine failure logs its traceback afresh
+                # instead of being silently throttled against an old expression.
+                self._compute_quarantined.pop(entry.id, None)
                 if next_at is not None:
+                    # M9: definition-CAS the compute write too. The next-fire we
+                    # computed is for THIS snapshot's cadence; if a watch upsert
+                    # replaced the entry with an edited cadence in between, its
+                    # own recompute owns the fire-state and this write is skipped.
                     await self._cache.update_fire_state(
                         entry.id,
                         next_fire_at=next_at,
+                        expected_definition=entry,
                     )
         # Apply any disables queued by ``_next_fire_for``. Pop into
-        # a local list so a concurrent producer can keep adding while
+        # a local dict so a concurrent producer can keep adding while
         # we drain the snapshot.
         if self._pending_disables:
-            to_disable = list(self._pending_disables)
+            to_disable = dict(self._pending_disables)
             self._pending_disables.clear()
-            for sched_id in to_disable:
-                await self._cache.update_fire_state(
-                    sched_id,
-                    is_enabled=False,
+            for stored in to_disable.values():
+                # M10: definition-CAS the disable. If the operator fixed the
+                # broken cadence between the failed compute and here, the watch
+                # upsert changed the definition and we must NOT disable the
+                # now-valid schedule; the CAS skips it and the next iteration
+                # computes its fire-state.
+                await self._record_local_quarantine(
+                    stored,
+                    code="cadence_definition_invalid",
+                    detail=f"{stored.kind}:{stored.expression}",
                 )
 
     def _next_fire_for(  # noqa: PLR0911 - per-kind dispatch is idiomatic
@@ -388,7 +773,7 @@ class TickEngine:
                 # entry between this read and the mutation; the
                 # disable then lands on an orphaned object and is
                 # silently lost on the next iteration.
-                self._pending_disables.add(entry.id)
+                self._pending_disables[entry.id] = entry
                 return None
         if entry.kind == "interval":
             try:
@@ -410,7 +795,7 @@ class TickEngine:
                 # entry between this read and the mutation; the
                 # disable then lands on an orphaned object and is
                 # silently lost on the next iteration.
-                self._pending_disables.add(entry.id)
+                self._pending_disables[entry.id] = entry
                 return None
         if entry.kind in ("clocked", "one_shot"):
             try:
@@ -431,7 +816,7 @@ class TickEngine:
                 # entry between this read and the mutation; the
                 # disable then lands on an orphaned object and is
                 # silently lost on the next iteration.
-                self._pending_disables.add(entry.id)
+                self._pending_disables[entry.id] = entry
                 return None
         if entry.kind == "solar":
             # Solar schedules are first-class per docs/SCHEDULER.md §5.1
@@ -453,9 +838,9 @@ class TickEngine:
                     "schedule_id=%s; disabling locally",
                     entry.id,
                 )
-                self._pending_disables.add(entry.id)
+                self._pending_disables[entry.id] = entry
                 return None
-        # Unknown kind - log + queue the disable. Same R7-MED race
+        # Unknown kind - log + queue the disable. Same race
         # fix as above: route through the pending-set so a concurrent
         # WatchStream upsert can't drop the disable.
         logger.error(
@@ -463,20 +848,28 @@ class TickEngine:
             entry.kind,
             entry.id,
         )
-        self._pending_disables.add(entry.id)
+        self._pending_disables[entry.id] = entry
         return None
 
     # ------------------------------------------------------------------
     # Dispatch + catch-up
     # ------------------------------------------------------------------
 
-    async def _fire_with_catch_up(
+    async def _fire_with_catch_up(  # noqa: PLR0911, PLR0912, PLR0915 -- explicit safety gates
         self,
         entry: ScheduleEntry,
         *,
         now: datetime,
-    ) -> None:
-        """Resolve the catch-up plan for a due entry and dispatch."""
+    ) -> bool:
+        """Resolve the catch-up plan for a due entry and dispatch.
+
+        Returns True on a clean outcome (fired + advanced, non-leader recompute,
+        nothing-to-fire, aborted, or definition-changed) and False when the
+        DISPATCHER itself failed (no task was sent; caller should back off and
+        retry the same slot, NOT treat it as a clean fire -- engine:729). A
+        raised exception (a broken cadence / post-dispatch computation error) is
+        NOT caught here; the caller quarantines the schedule so it cannot
+        re-dispatch or hot-spin (engine:820 / P1-8b)."""
         # Leader gate: only the leader actually dispatches. Non-leader
         # instances still recompute next_fire_at so they're hot if
         # they take over.
@@ -502,11 +895,11 @@ class TickEngine:
             # standby until promotion. Documented in
             # docs/SCHEDULER.md §HA-failover-corner-cases.
             await self._advance_after_fire(entry, last_fire_at=None)
-            return
+            return True
 
         scheduled_for = entry.next_fire_at
         if scheduled_for is None:
-            return
+            return True
 
         # Distinguish on-time fires from missed fires. A fire whose
         # scheduled_for is within the grace window of now is "current"
@@ -528,7 +921,57 @@ class TickEngine:
         # one-shot we always fire exactly once regardless of
         # lateness; the caller's ``catch_up`` policy is meaningless
         # for a single-fire schedule.
-        if entry.kind in ("clocked", "one_shot") or lateness_seconds <= _ON_TIME_GRACE_SECONDS:
+        # ``advance_anchor`` is the slot we stamp as ``last_fire_at`` after
+        # dispatching, so ``next_fire_at`` recomputes PAST everything we
+        # just handled. For a missed cron backlog it must be the LAST
+        # missed slot, not ``scheduled_for`` (the FIRST) -- otherwise the
+        # engine re-enters once per slot and re-fires the whole backlog
+        # (B3). For on-time / non-cron fires it stays ``scheduled_for``.
+        # A slot this instance observed live-due while a FOLLOWER and is
+        # now firing as the promoted leader -- the elapsed time is our own
+        # promotion-detection latency, not cluster unavailability.
+        # Do NOT consume the marker HERE (before dispatch). If the
+        # dispatch below fails and the caller retries this slot, the retry must
+        # still see the handoff status; the marker is consumed only AFTER a
+        # successful dispatch (post-loop, below), and reconcile drops it once the
+        # slot advances.
+        _handoff = self._follower_handoff.get(entry.id)
+        was_follower_handoff = _handoff is not None and _handoff == (
+            scheduled_for,
+            schedule_cadence_identity(entry),
+        )
+        advance_anchor = scheduled_for
+        # Apply a PROMOTION-SCOPED grace to a handoff slot (base grace +
+        # the promotion re-check interval), rather than FORCING it on-time
+        # regardless of age. A slot within promotion_grace fires on-time; one
+        # OLDER than that is honestly missed and catch_up governs it (the old
+        # force-on-time mislabelled a genuinely-overdue slot). The base grace is
+        # unchanged for steady-state leaders / single-instance -- they never carry
+        # a marker -- so their on-time/skip semantics do not move at all. If
+        # promotion took longer than follower_recheck (e.g. a longer leader-lease
+        # TTL) the slot is correctly classified missed rather than silently
+        # on-time.
+        effective_grace = (
+            _promotion_grace_for(
+                leader_heartbeat_seconds=self._leader_heartbeat_seconds,
+                follower_recheck_seconds=self._follower_recheck_seconds,
+            )
+            if was_follower_handoff
+            else _ON_TIME_GRACE_SECONDS
+        )
+        # FREEZE the entitlement once granted. The classification is
+        # recomputed on every attempt against a moving clock, so a handoff slot
+        # judged on-time at the first attempt could exceed the grace by the
+        # retry a second later -- and under catch_up="skip" the retry then
+        # produced an EMPTY plan, advanced past the slot, and consumed the marker
+        # without ever dispatching it. A dispatch failure must not silently
+        # change what the slot IS. Once entitled, it stays entitled until it
+        # succeeds or the marker is dropped for another reason.
+        entitled = self._handoff_entitled.get(entry.id) == scheduled_for
+        if was_follower_handoff and lateness_seconds <= effective_grace:
+            self._handoff_entitled[entry.id] = scheduled_for
+            entitled = True
+        if entry.kind in ("clocked", "one_shot") or entitled or lateness_seconds <= effective_grace:
             plan = [scheduled_for]
         else:
             # For cron schedules with ``fire_all_missed``,
@@ -545,15 +988,36 @@ class TickEngine:
             #   - fire_one_missed    -> [last_slot]
             #   - fire_all_missed    -> [all slots]
             #
-            # Interval / one_shot / solar schedules don't have a
-            # well-defined "list of missed slots" the way cron
-            # does; fall back to the single-slot behavior for
-            # them. fire_all_missed on those kinds remains a
-            # documented degraded mode.
+            # Both cron AND interval schedules have a well-defined list of
+            # missed slots, so materialise the full backlog for either and
+            # let plan_catch_up coalesce per policy. H4: interval previously
+            # fell into the single-slot else-branch, which made
+            # fire_one_missed (and skip) re-fire the whole interval backlog
+            # one tick at a time -- byte-for-byte the B3 storm, on interval
+            # instead of cron. one_shot / clocked never reach here (handled
+            # above);: solar now materialises its backlog too (via iterated
+            # next_solar_fire), so it no longer stays single-slot.
             if entry.kind == "cron":
                 missed_times = self._compute_missed_cron_slots(
                     entry,
                     scheduled_for=scheduled_for,
+                    now=now,
+                )
+            elif entry.kind == "interval":
+                missed_times = self._compute_missed_interval_slots(
+                    entry,
+                    scheduled_for=scheduled_for,
+                    now=now,
+                )
+            elif entry.kind == "solar":
+                # Solar now materialises its full backlog too, so
+                # fire_one_missed coalesces to the latest slot and the anchor
+                # jumps past the whole backlog in one pass (no per-tick re-entry
+                # storm after a multi-boundary solar outage).
+                missed_times = self._compute_missed_solar_slots(
+                    entry,
+                    scheduled_for=scheduled_for,
+                    now=now,
                 )
             else:
                 missed_times = [scheduled_for]
@@ -562,6 +1026,84 @@ class TickEngine:
                 missed_times=missed_times,
                 now=now,
             )
+            # Advance past the WHOLE backlog in one pass -- the last missed
+            # slot -- regardless of how many the policy chose to fire.
+            if missed_times:
+                advance_anchor = missed_times[-1]
+
+        # Boundary D: finish every fallible successor computation for this
+        # bounded dispatch batch before its first task may be sent. The old
+        # path called ``_next_fire_for`` from ``_advance_after_fire`` after the
+        # dispatcher returned; a parse/overflow failure there left an accepted
+        # task with no reconstructible cursor transition.
+        from z4j_scheduler.tick._prepared import PreparedFire
+
+        bounded_plan = plan[:_MAX_DISPATCH_PER_TICK]
+        prepared_by_slot = {
+            moment: PreparedFire(
+                scheduled_for=moment,
+                next_run_at=self._next_fire_for(
+                    entry,
+                    as_of_last_fire_at=moment,
+                ),
+            )
+            for moment in bounded_plan
+        }
+        prepared_skip = (
+            PreparedFire(
+                scheduled_for=advance_anchor,
+                next_run_at=self._next_fire_for(
+                    entry,
+                    as_of_last_fire_at=advance_anchor,
+                ),
+            )
+            if not plan
+            else None
+        )
+
+        if prepared_skip is not None and entry.control_token is not None:
+            try:
+                transition = await self._dispatcher.advance_cursor(
+                    entry=entry,
+                    prepared=prepared_skip,
+                )
+            except Exception:
+                logger.exception(
+                    "z4j.scheduler.tick: durable no-work cursor advance failed "
+                    "for schedule_id=%s; retaining the original slot",
+                    entry.id,
+                )
+                return False
+            if transition.disposition not in {"applied", "idempotent"}:
+                if transition.disposition == "cadence_semantics_mismatch":
+                    raise RuntimeError(
+                        "Brain rejected the scheduler cadence semantics",
+                    )
+                return False
+            if (
+                transition.committed_last_run_at != prepared_skip.scheduled_for
+                or transition.committed_next_run_at != prepared_skip.next_run_at
+            ):
+                raise RuntimeError(
+                    "Brain committed a cursor different from the prepared transition",
+                )
+            if (
+                transition.live_control_token != entry.control_token
+                or transition.live_revision <= entry.schedule_revision
+            ):
+                return False
+            await self._cache.apply_cursor_transition(
+                entry.id,
+                expected_control_token=entry.control_token,
+                expected_revision=entry.schedule_revision,
+                expected_last_run_at=entry.last_fire_at,
+                expected_next_run_at=entry.next_fire_at,
+                committed_revision=transition.live_revision,
+                committed_last_run_at=transition.live_last_run_at,
+                committed_next_run_at=transition.live_next_run_at,
+            )
+            self._consume_follower_handoff(entry.id, was_follower_handoff)
+            return True
 
         # A3: hand the dispatcher this project's schedule count (from the
         # cache the engine already owns) so IT can decide whether the
@@ -573,15 +1115,66 @@ class TickEngine:
             entry.project_id,
         )
 
+        # M14: a fire_all_missed backlog can be up to the 10k slot cap. The
+        # drain must NOT monopolise the engine: between dispatches we
+        # re-check the stop signal AND the schedule's LIVE enabled state, and
+        # yield to the loop. Otherwise a graceful stop() waited for the whole
+        # backlog, an operator disabling the schedule mid-storm (the natural
+        # remediation) was ignored until it drained, and every other due
+        # schedule's on-time fire queued behind this one coroutine.
+        last_dispatched: datetime | None = None
+        dispatched_this_tick = 0
+        aborted = False
+        definition_changed = False
+        current_protocol = entry.control_token is not None
         for moment in plan:
+            if self._stop_event.is_set():
+                aborted = True
+                break
+            # (Fairness): bound how many slots of ONE schedule's backlog we
+            # drain per tick. A single fire_all_missed schedule can produce up to
+            # the 10k cap; draining it all in this coroutine would starve every
+            # OTHER due schedule's on-time fire (and delay a promotion re-check)
+            # until it finished. Stop after a bounded chunk and advance to what we
+            # dispatched; the aborted-partial path re-evaluates the remainder on
+            # the next tick, so a huge backlog drains a chunk per tick while
+            # everything else keeps firing on time. A handoff / on-time slot is a
+            # single-element plan and never hits this.
+            if dispatched_this_tick >= _MAX_DISPATCH_PER_TICK:
+                aborted = True
+                break
+            # Re-read the entry from the cache: the watch stream may have
+            # delivered a disable (or removal) mid-drain. A snapshot
+            # ``entry`` cannot see it. Halt the drain if it is no longer
+            # enabled or was deleted.
+            live = await self._cache.get(entry.id)
+            if live is None or not live.is_enabled:
+                aborted = True
+                break
+            # M10: also halt if the DEFINITION changed mid-drain (expression /
+            # interval / kind / timezone / catch_up / anchor). ``plan`` was
+            # computed from the stale snapshot; dispatching it now would fire
+            # the OLD backlog AND stamp a next_fire_at from the old cadence
+            # into the freshly-edited schedule. The edit path recomputes
+            # next_fire itself, so we abort WITHOUT advancing (below).
+            if _schedule_definition_changed(entry, live):
+                definition_changed = True
+                break
             try:
-                await self._dispatcher.dispatch(
+                prepared_fire = prepared_by_slot[moment]
+                expected_control_token = entry.control_token
+                expected_revision = entry.schedule_revision
+                expected_last_run_at = entry.last_fire_at
+                expected_next_run_at = entry.next_fire_at
+                fire_result = await self._dispatcher.dispatch(
                     schedule_id=entry.id,
                     scheduled_for=moment,
                     schedule_name=entry.name,
                     engine=entry.engine,
                     project_id=entry.project_id,
                     project_schedule_count=project_schedule_count,
+                    prepared_fire=prepared_fire,
+                    schedule_entry=entry,
                 )
             except Exception:
                 logger.exception(
@@ -590,16 +1183,185 @@ class TickEngine:
                     entry.id,
                     moment,
                 )
-                # Do NOT advance - we want to retry on next tick. The
-                # dispatcher itself owns the retry contract; a raise
-                # here means the dispatcher gave up.
-                return
+                # Do NOT advance -- the task was NOT sent. Signal a dispatch
+                # failure so the caller backs off and retries the SAME slot
+                # (next_fire_at is unchanged), instead of treating this as a
+                # clean fire and hot-spinning on it (engine:729).
+                if last_dispatched is not None and not current_protocol:
+                    prior_prepared = prepared_by_slot[last_dispatched]
+                    await self._apply_prepared_advance(entry, prior_prepared)
+                return False
+            if current_protocol:
+                if fire_result is None or fire_result.disposition is None:
+                    logger.error(
+                        "z4j.scheduler.tick: current fire returned no typed "
+                        "disposition schedule_id=%s scheduled_for=%s",
+                        entry.id,
+                        moment,
+                    )
+                    return False
+                if fire_result.disposition == "cadence_semantics_mismatch":
+                    await self._record_local_quarantine(
+                        entry,
+                        code="cadence_semantics_mismatch",
+                        detail="Brain and scheduler cadence runtimes differ",
+                    )
+                    return True
+                if fire_result.disposition in {
+                    "terminal_quarantined",
+                    "slot_resolved_refresh",
+                    "stale_control_refresh",
+                    "legacy_upgrade_required",
+                }:
+                    if expected_control_token is not None:
+                        await self._cache.latch_current_stop(
+                            entry.id,
+                            expected_control_token=expected_control_token,
+                        )
+                    return True
+                if fire_result.disposition != "accepted":
+                    return False
+                if (
+                    expected_control_token is None
+                    or fire_result.acceptance_revision <= expected_revision
+                    or fire_result.accepted_last_run_at != prepared_fire.scheduled_for
+                    or fire_result.accepted_next_run_at != prepared_fire.next_run_at
+                    or fire_result.live_control_token is None
+                    or fire_result.live_revision < fire_result.acceptance_revision
+                    or fire_result.live_revision <= expected_revision
+                    or fire_result.live_last_run_at is None
+                ):
+                    logger.error(
+                        "z4j.scheduler.tick: malformed accepted fire evidence "
+                        "schedule_id=%s scheduled_for=%s",
+                        entry.id,
+                        moment,
+                    )
+                    return False
+                accepted_cursor = (
+                    fire_result.accepted_last_run_at,
+                    fire_result.accepted_next_run_at,
+                )
+                live_cursor = (
+                    fire_result.live_last_run_at,
+                    fire_result.live_next_run_at,
+                )
+                if (
+                    fire_result.live_revision == fire_result.acceptance_revision
+                    and live_cursor != accepted_cursor
+                ):
+                    logger.error(
+                        "z4j.scheduler.tick: accepted fire returned a conflicting "
+                        "same-revision cursor schedule_id=%s",
+                        entry.id,
+                    )
+                    return False
+                if fire_result.live_control_token != expected_control_token:
+                    await self._cache.latch_current_stop(
+                        entry.id,
+                        expected_control_token=expected_control_token,
+                    )
+                    return True
+                applied = await self._cache.apply_cursor_transition(
+                    entry.id,
+                    expected_control_token=expected_control_token,
+                    expected_revision=expected_revision,
+                    expected_last_run_at=expected_last_run_at,
+                    expected_next_run_at=expected_next_run_at,
+                    committed_revision=fire_result.live_revision,
+                    committed_last_run_at=fire_result.live_last_run_at,
+                    committed_next_run_at=fire_result.live_next_run_at,
+                )
+                if not applied:
+                    return True
+                if fire_result.live_revision != fire_result.acceptance_revision:
+                    return True
+            last_dispatched = moment
+            # This counts successful dispatches, not loop iterations; enumerate
+            # would incorrectly include aborted or failed slots.
+            dispatched_this_tick += 1  # noqa: SIM113
+            # Be polite to the event loop on long backlogs so heartbeats,
+            # watch updates, and other schedules are not starved.
+            await asyncio.sleep(0)
+
+        if definition_changed:
+            # M10: the schedule was re-defined mid-drain. Do NOT advance --
+            # stamping last_fire_at / next_fire_at from the pre-edit cadence
+            # would corrupt the new definition (which recomputes its own next
+            # fire). The new cadence governs from the next tick.
+            return True
+        if aborted:
+            # Partial drain (stop requested, or the schedule was disabled /
+            # removed mid-storm). Advance only past what we ACTUALLY
+            # dispatched so we neither re-fire those slots nor lose the
+            # untouched tail: the remainder is re-evaluated on the next tick
+            # (if still leader + enabled) or after re-enable. If nothing was
+            # dispatched, do not advance at all.
+            if last_dispatched is not None:
+                if not current_protocol:
+                    await self._apply_prepared_advance(
+                        entry,
+                        prepared_by_slot[last_dispatched],
+                    )
+                self._consume_follower_handoff(entry.id, was_follower_handoff)
+            return True
 
         # Advance: stamp last_fire_at and recompute next_fire_at.
-        # Even when the catch-up plan was empty (skip on a missed
-        # fire), we still advance past the missed slot - otherwise
-        # we'd re-evaluate the same scheduled_for every iteration.
-        await self._advance_after_fire(entry, last_fire_at=scheduled_for)
+        # Even when the catch-up plan was empty (skip on a missed fire),
+        # we still advance past the whole missed backlog (``advance_anchor``
+        # = the last missed slot) - otherwise we'd re-evaluate the same
+        # slots every iteration and re-fire them (B3).
+        if not current_protocol:
+            prepared_advance = prepared_skip or prepared_by_slot[advance_anchor]
+            await self._apply_prepared_advance(entry, prepared_advance)
+        # Consume the handoff marker only now that the slot was actually
+        # dispatched. A failed dispatch returned False above without reaching
+        # here, so the marker survives for the retry.
+        self._consume_follower_handoff(entry.id, was_follower_handoff)
+        return True
+
+    async def _apply_prepared_advance(
+        self,
+        entry: ScheduleEntry,
+        prepared: PreparedFire,
+    ) -> None:
+        """Mirror an already-computed transition without cadence work."""
+
+        await self._cache.update_fire_state(
+            entry.id,
+            last_fire_at=prepared.scheduled_for,
+            next_fire_at=prepared.next_run_at,
+            expected_definition=entry,
+        )
+
+    def _is_follower_parked(self, entry: ScheduleEntry) -> bool:
+        """True if this NON-leader has already observed ``entry``'s
+        current due slot (a one_shot/clocked it cannot advance past).
+
+        Self-cleans a stale park: if the slot moved (a watch echo adopted new
+        state, or a recompute), or if this instance is now the LEADER for the
+        project (promotion -- the leader must fire the parked slot), the park is
+        dropped and the entry is treated as un-parked.
+        """
+        parked = self._follower_parked.get(entry.id)
+        if parked is None:
+            return False
+        if parked != entry.next_fire_at:
+            self._follower_parked.pop(entry.id, None)
+            return False
+        if self._leader_gate.is_leader(entry.project_id):
+            self._follower_parked.pop(entry.id, None)
+            return False
+        return True
+
+    def _consume_follower_handoff(self, schedule_id: UUID, was_follower_handoff: bool) -> None:
+        """Drop the follower-handoff marker AFTER a successful dispatch
+        of the slot it covered. Called only on the success paths, never after a
+        failed dispatch (which returns early), so a retry of the same slot
+        preserves the handoff status and its promotion-scoped grace."""
+        if was_follower_handoff:
+            self._follower_handoff.pop(schedule_id, None)
+            self._handoff_entitled.pop(schedule_id, None)
 
     async def _advance_after_fire(
         self,
@@ -621,17 +1383,38 @@ class TickEngine:
         signal from the non-leader path (we did NOT actually fire,
         so don't pretend we did).
         """
-        from z4j_scheduler.storage.cache import _UNSET as _CACHE_UNSET
-
         if last_fire_at is None:
-            # Non-leader path: anchor on entry's CURRENT
-            # last_fire_at (legacy behavior - we do not advance).
-            next_at = self._next_fire_for(entry)
-            await self._cache.update_fire_state(
-                entry.id,
-                last_fire_at=_CACHE_UNSET,
-                next_fire_at=next_at,
-            )
+            # Non-leader path.: a FOLLOWER must NOT mutate the
+            # authoritative fire-state (last_fire_at OR next_fire_at). The prior
+            # Recompute anchored next_fire_at on NOW, which:
+            #   - rewrote an OVERDUE slot to a FUTURE one, so a promoted leader
+            #     then classified the skipped backlog (last_fire..now) as on-time
+            #     and NEVER ran it (H7 -- permanent catch-up loss); and
+            #   - shifted an INTERVAL schedule off its real grid onto a now-based
+            #     cadence (a daily interval anchored at midnight, observed by a
+            #     follower at 18:00, became an 18:00 cadence -- H8), which a later
+            #     promotion could then persist as a phantom slot / mint a fire id
+            #     from an already-fired real boundary.
+            # Instead PARK the entry on its CURRENT next_fire_at: the park excludes
+            # it from the due filter AND the sleep wake (so a behind follower does
+            # not hot-loop) while leaving last_fire_at and next_fire_at exactly as
+            # the leader / persistence set them. On promotion the park self-clears
+            # (_is_follower_parked sees is_leader) and the LEADER path fires the
+            # real slot and replays the catch_up backlog from the true
+            # last_fire_at. This is the mechanism the one_shot path already used;
+            # it now covers EVERY cadence type (cron / interval / solar / one_shot
+            # / clocked) uniformly, so no cadence is ever rewritten by a follower.
+            self._follower_parked[entry.id] = entry.next_fire_at
+            # Remember we OBSERVED this exact slot live-due as a follower.
+            # If we are later promoted and fire it, the elapsed time is our own
+            # promotion-detection latency, not a cluster outage, so it fires
+            # on-time (see _fire_with_catch_up). Only meaningful for a slot with a
+            # concrete next_fire_at.
+            if entry.next_fire_at is not None:
+                self._follower_handoff[entry.id] = (
+                    entry.next_fire_at,
+                    schedule_cadence_identity(entry),
+                )
         else:
             # Leader path: anchor on the slot we just fired so the
             # next-fire computation walks forward from there.
@@ -643,78 +1426,234 @@ class TickEngine:
                 entry.id,
                 last_fire_at=last_fire_at,
                 next_fire_at=next_at,
+                # RM11: this is the path (including the empty catch-up plan at
+                # the call site above) that previously stamped a snapshot-
+                # derived next_fire_at unconditionally. Guard it so a cadence
+                # edit landing between the snapshot and here is not clobbered.
+                expected_definition=entry,
             )
+
+    async def _back_off_after_fire_error(
+        self,
+        entry: ScheduleEntry,
+    ) -> None:
+        """A DISPATCH failed (no task was sent). Retry the SAME slot after an
+        exponential back-off, recorded in a SEPARATE ``_fire_backoff_until``
+        deadline -- NOT by overwriting ``next_fire_at``.
+
+        The old code stamped ``next_fire_at = now + backoff``, which (P1-8b) made
+        the retry dispatch with ``scheduled_for`` = the back-off instant instead
+        of the original slot (drifting the cadence and, for a raising fire,
+        re-dispatching real tasks at +1s/+3s/+7s). Now next_fire_at stays at the
+        original slot; the due-loop skips the entry until its deadline and
+        _sleep_until_next wakes when the deadline elapses, so there is no
+        hot-spin and no drift.
+
+        M12: the deadline base is a FRESH ``self._clock()`` read taken HERE, not
+        the iteration-start ``now``. A slow dispatch (up to the per-fire timeout,
+        several seconds) elapses between the iteration's clock snapshot and this
+        point; anchoring the back-off on the stale snapshot yields a deadline
+        partly (or wholly) in the past, so the due-loop stops skipping the entry
+        immediately and hot-spins the retry with no real back-off. Reading the
+        clock now makes the full ``backoff`` window count from the failure.
+        """
+        count = self._fire_error_counts.get(entry.id, 0) + 1
+        self._fire_error_counts[entry.id] = count
+        backoff = min(
+            _MAX_FIRE_BACKOFF_SECONDS,
+            _BASE_FIRE_BACKOFF_SECONDS * (2 ** min(count - 1, _MAX_FIRE_BACKOFF_EXPONENT)),
+        )
+        self._fire_backoff_until[entry.id] = self._clock() + timedelta(seconds=backoff)
+        # L3: remember the cadence this back-off is for, so a later operator edit
+        # to the same id clears the suppression instead of inheriting it.
+        self._fire_backoff_def[entry.id] = entry
+
+    async def _quarantine_after_fire_error(self, entry: ScheduleEntry) -> None:
+        """P1-8b: a fire that RAISED means the schedule is broken -- its cadence
+        cannot be computed (e.g. an OverflowError on an oversized interval), or a
+        post-dispatch step failed after the task was already sent. Re-firing
+        would re-dispatch a duplicate and hot-spin, so DISABLE the schedule
+        instead of retrying. The disable is guarded by the live definition
+        (RM11), so an operator editing the schedule to something valid is not
+        clobbered. Clears any back-off state for the id.
+        """
+        self._fire_error_counts.pop(entry.id, None)
+        self._fire_backoff_until.pop(entry.id, None)
+        self._fire_backoff_def.pop(entry.id, None)
+        await self._record_local_quarantine(
+            entry,
+            code="post_dispatch_state_ambiguous",
+            detail=f"{entry.kind}:{entry.expression}",
+        )
+
+    async def _record_local_quarantine(
+        self,
+        entry: ScheduleEntry,
+        *,
+        code: str,
+        detail: str,
+    ) -> bool:
+        """Latch first, then enqueue that exact current generation."""
+
+        latched = await self._cache.quarantine_locally(
+            entry.id,
+            expected_definition=entry,
+            code=code,
+            detail=detail,
+        )
+        if not latched or self._quarantine_reporter is None:
+            return latched
+        quarantine = await self._cache.local_quarantine(entry.id)
+        if quarantine is not None:
+            self._quarantine_reporter.enqueue(
+                entry=entry,
+                quarantine=quarantine,
+            )
+        return latched
 
     def _compute_missed_cron_slots(
         self,
         entry: ScheduleEntry,
         *,
         scheduled_for: datetime,
+        now: datetime,
     ) -> list[datetime]:
-        """Return every cron slot in (last_fire_at, scheduled_for].
+        """Return every cron slot in (last_fire_at, now] -- the FULL backlog.
 
-        Audit fix (Apr 2026 follow-up) for the ``fire_all_missed``
-        silent-contract violation. When ``last_fire_at`` is unknown
-        (fresh schedule, post-restart with no brain echo yet), we
-        anchor at ``scheduled_for`` itself so only the current slot
-        fires. Without an anchor we'd have no defensible upper
-        bound on "how far back to walk" and a brand-new schedule
-        with ``fire_all_missed`` would attempt to fire from epoch.
+        B3 fix: the window upper bound is ``now``, NOT ``scheduled_for``
+        (the FIRST missed slot). Bounding at ``scheduled_for`` returned a
+        one-element list on recovery, so ``plan_catch_up`` could not
+        distinguish skip / fire_one_missed / fire_all_missed -- the engine
+        advanced one slot, ``_sleep_until_next`` returned immediately (still
+        past-due), and ``run()`` re-fired, so EVERY missed slot dispatched
+        regardless of the catch-up policy (a fire storm of duplicate,
+        possibly non-idempotent side-effects on every restart). Computing
+        the whole backlog to ``now`` in one pass lets the planner coalesce
+        correctly and the caller advance past the entire backlog at once.
 
-        Slots are capped at :data:`cron_mod.fires_between`'s
-        default (10k); a 365-day outage of a minute cron is closer
-        to half a million slots and would wedge the dispatcher
-        queue. Operators with very long outages should manually
-        trim the schedule before re-enabling.
+        When ``last_fire_at`` is unknown (fresh schedule, post-restart with
+        no brain echo yet), anchor at ``scheduled_for`` so only the current
+        slot fires -- without an anchor a brand-new ``fire_all_missed``
+        schedule would try to fire from epoch.
+
+        Slots are capped at :data:`cron_mod.fires_between`'s default (10k);
+        a 365-day outage of a minute cron is closer to half a million slots
+        and would wedge the dispatcher queue. Operators with very long
+        outages should manually trim the schedule before re-enabling.
         """
-        if entry.last_fire_at is None:
-            return [scheduled_for]
+        # A FRESH schedule (no anchor yet -- a promotion / restart before
+        # any brain echo) that is PAST-DUE must still materialise the FULL backlog
+        # from scheduled_for to now. Returning the single current slot let
+        # fire_one_missed fire the oldest slot, advance one step, and re-enter
+        # next tick -- re-firing the whole backlog one slot at a time (the B3 storm
+        # on a fresh schedule). Anchor the window at scheduled_for (NOT epoch), so
+        # a fresh fire_all_missed never fires from epoch: the window is
+        # [scheduled_for, now].
+        after_anchor = entry.last_fire_at if entry.last_fire_at is not None else scheduled_for
         try:
             slots = cron_mod.fires_between(
                 entry.expression,
                 entry.timezone,
-                after=entry.last_fire_at,
-                until=scheduled_for,
+                after=after_anchor,
+                until=now,
             )
         except cron_mod.CronExpressionError:
             # Bad expression - fall back to the single slot rather
             # than raising. The engine's ``_next_fire_for`` has its
             # own error handling for parse failures.
             return [scheduled_for]
+        if entry.last_fire_at is None:
+            # fires_between is exclusive of ``after``; include scheduled_for itself
+            # as the first missed slot of a fresh past-due schedule.
+            slots = [scheduled_for, *slots]
         if not slots:
-            # Defensive: every well-formed (last_fire_at,
-            # scheduled_for] window for an enabled cron schedule
-            # contains at least the current scheduled_for. If
-            # croniter disagrees (e.g. expression is one-shot-ish
-            # and the slot already passed), ensure we still fire
-            # the requested slot.
+            # Defensive: every well-formed (last_fire_at, now] window for a
+            # past-due cron schedule contains at least ``scheduled_for``
+            # (the first missed slot). If croniter disagrees (boundary /
+            # one-shot-ish expression) still fire the requested slot.
             return [scheduled_for]
-        # Always include scheduled_for as the trailing slot. If
-        # ``fires_between`` already returned it (boundary cases) the
-        # de-dup keeps the list strictly increasing.
-        #
-        # Compare in UTC.
-        # During DST fall-back (Nov first-Sunday in US/Eastern, the
-        # 1am-2am window exists twice, once at fold=0 in DST, once
-        # at fold=1 standard). ``fires_between`` returns both
-        # ambiguous slots; ``scheduled_for`` is one of them. The
-        # naive ``slots[-1] != scheduled_for`` compares wall-clock
-        # equality and reports True for the fold-different twin,
-        # silently de-duping a legitimate second fire that would
-        # otherwise be the second of the two ambiguous slots.
-        # Comparing in UTC distinguishes the folds correctly because
-        # they have distinct UTC offsets.
-        scheduled_utc = scheduled_for.astimezone(UTC)
-        last_slot_utc = slots[-1].astimezone(UTC)
-        if last_slot_utc != scheduled_utc:
-            slots.append(scheduled_for)
+        return slots
+
+    def _compute_missed_interval_slots(
+        self,
+        entry: ScheduleEntry,
+        *,
+        scheduled_for: datetime,
+        now: datetime,
+    ) -> list[datetime]:
+        """Return every interval slot in (last_fire_at, now] -- the FULL backlog.
+
+        H4: the mirror of :meth:`_compute_missed_cron_slots` for interval
+        schedules. Without it interval returned a one-element missed list, so
+        plan_catch_up could not distinguish skip / fire_one_missed /
+        fire_all_missed, and fire_one_missed re-fired the entire backlog one
+        slot per tick (a duplicate, possibly non-idempotent, side-effect
+        storm on every restart -- the same failure B3 fixed for cron).
+
+        When ``last_fire_at`` is unknown (fresh schedule) anchor at
+        ``scheduled_for`` so only the current slot fires. Slots are capped at
+        :func:`interval_mod.fires_between`'s default (10k).
+        """
+        # Fresh past-due interval materialises the FULL backlog from
+        # scheduled_for (see _compute_missed_cron_slots for the rationale).
+        after_anchor = entry.last_fire_at if entry.last_fire_at is not None else scheduled_for
+        try:
+            slots = interval_mod.fires_between(
+                entry.expression,
+                after=after_anchor,
+                until=now,
+            )
+        except interval_mod.IntervalExpressionError:
+            # Bad expression - fall back to the single slot rather than
+            # raising; ``_next_fire_for`` has its own parse-error handling.
+            return [scheduled_for]
+        if entry.last_fire_at is None:
+            slots = [scheduled_for, *slots]
+        if not slots:
+            # Defensive: a past-due interval window contains at least the
+            # first missed slot. If the math disagrees (clock skew, a
+            # last_fire_at newer than now) still fire the requested slot.
+            return [scheduled_for]
+        return slots
+
+    def _compute_missed_solar_slots(
+        self,
+        entry: ScheduleEntry,
+        *,
+        scheduled_for: datetime,
+        now: datetime,
+    ) -> list[datetime]:
+        """Every solar slot in the missed window -- the FULL backlog.
+
+        The mirror of :meth:`_compute_missed_cron_slots` / interval for solar.
+        Without it solar fell into the single-slot else-branch, so
+        ``fire_one_missed`` (and skip) re-fired the whole solar backlog one slot
+        per tick after a multi-boundary outage (the B3 storm, on solar). Anchored
+        at ``scheduled_for`` for a fresh schedule so it never enumerates
+        from epoch; bounded at :func:`solar_mod.fires_between`'s 10k cap.
+        """
+        after_anchor = entry.last_fire_at if entry.last_fire_at is not None else scheduled_for
+        try:
+            slots = solar_mod.fires_between(
+                entry.expression,
+                after=after_anchor,
+                until=now,
+            )
+        except Exception:
+            # A bad solar expression / missing astral -> fall back to the single
+            # slot rather than raising; _next_fire_for handles the parse error.
+            return [scheduled_for]
+        if entry.last_fire_at is None:
+            slots = [scheduled_for, *slots]
+        if not slots:
+            return [scheduled_for]
         return slots
 
     # ------------------------------------------------------------------
     # Sleep coordination
     # ------------------------------------------------------------------
 
-    async def _sleep_until_next(self) -> None:
+    async def _sleep_until_next(self) -> None:  # noqa: PLR0912  wake-time + park + backoff scan
         """Sleep until the next schedule, a cache change, or stop.
 
         Uses :meth:`asyncio.wait` over the cache's ``changed`` event
@@ -722,14 +1661,44 @@ class TickEngine:
         Clears the cache's event after consuming it so subsequent
         mutations re-fire it.
         """
-        next_entry = await self._cache.next_due()
-        if next_entry is None or next_entry.next_fire_at is None:
+        # Wake at the EARLIEST effective-ready time across enabled schedules.
+        # For a schedule in fire back-off, "ready" is its retry deadline, not its
+        # (past-due, un-advanced) next_fire_at -- otherwise a backed-off past-due
+        # entry would make us return immediately every tick (a busy-spin). This
+        # is the same O(n) cost as the cache's next_due() scan plus back-off
+        # awareness.
+        now = self._clock()
+        wake_at: datetime | None = None
+        has_parked = False
+        for entry in await self._cache.snapshot():
+            if not entry.is_enabled or entry.next_fire_at is None:
+                continue
+            # H8: a parked follower slot is past-due but must NOT
+            # force an immediate wake (that is the hot loop); treat it as
+            # not-ready.: remember that SOMETHING is parked so the sleep is
+            # capped for a prompt post-promotion re-check below.
+            if self._is_follower_parked(entry):
+                has_parked = True
+                continue
+            ready = entry.next_fire_at
+            backoff = self._fire_backoff_until.get(entry.id)
+            if backoff is not None and backoff > ready:
+                ready = backoff
+            if wake_at is None or ready < wake_at:
+                wake_at = ready
+        if wake_at is None:
             timeout = self._max_sleep_seconds
         else:
-            wait_seconds = (next_entry.next_fire_at - self._clock()).total_seconds()
-            # Clamp: never sleep less than 0 (already past due, exit
-            # immediately), never sleep more than the max bound.
+            wait_seconds = (wake_at - now).total_seconds()
+            # Clamp: never sleep less than 0 (already ready, exit immediately),
+            # never sleep more than the max bound.
             timeout = max(0.0, min(self._max_sleep_seconds, wait_seconds))
+        # A promotion is not signalled via cache.changed, so bound the
+        # sleep to the re-check interval whenever a parked entry exists -- else a
+        # just-promoted follower would wait the full max-sleep before firing its
+        # (now-eligible) slot.
+        if has_parked and timeout > self._follower_recheck_seconds:
+            timeout = self._follower_recheck_seconds
 
         if timeout <= 0:
             # Already due - return immediately, the next iteration

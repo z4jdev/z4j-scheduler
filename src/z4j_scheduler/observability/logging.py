@@ -49,7 +49,16 @@ def configure_logging(settings: Settings) -> None:
     if settings.log_json:
         renderer: structlog.types.Processor = structlog.processors.JSONRenderer()
     else:
-        renderer = structlog.dev.ConsoleRenderer(colors=sys.stderr.isatty())
+        stderr_is_tty = bool(
+            getattr(sys.stderr, "isatty", lambda: False)(),
+        )
+        renderer = structlog.dev.ConsoleRenderer(
+            colors=stderr_is_tty,
+            force_colors=stderr_is_tty,
+            exception_formatter=(
+                structlog.dev.rich_traceback if stderr_is_tty else structlog.dev.plain_traceback
+            ),
+        )
 
     structlog.configure(
         processors=[*shared_processors, renderer],

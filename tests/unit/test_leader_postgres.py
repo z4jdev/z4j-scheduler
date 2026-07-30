@@ -148,14 +148,14 @@ class TestStartStop:
 
 
 # =====================================================================
-# Cancellation during stop (R3-M5)
+# Cancellation during stop
 # =====================================================================
 
 
 class TestCancelledStop:
     @pytest.mark.asyncio
     async def test_cancel_during_stop_still_completes_cleanup(self) -> None:
-        # R3-M5: cancelling stop() mid-release must not abandon the
+        # Cancelling stop() mid-release must not abandon the
         # cleanup. asyncio.shield alone only protects the inner
         # coroutine - the outer await still raises CancelledError
         # immediately, skipping the demotion + backend close and
@@ -389,7 +389,7 @@ class TestIsLeaderProjectArgIgnored:
 class TestCancelDuringLoopJoin:
     @pytest.mark.asyncio
     async def test_cancel_while_joining_loop_still_cleans_up(self) -> None:
-        # R4-M4: R3-M5 wrapped only the release+close tail in the
+        # Wrapped only the release+close tail in the
         # cancellation-immune task, so a cancel landing while stop()
         # was still JOINING the background loop (before that task
         # existed) escaped with zero releases, the lock held, and the

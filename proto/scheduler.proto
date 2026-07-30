@@ -69,6 +69,32 @@ service SchedulerService {
 
     // Health check.
     rpc Ping(PingRequest) returns (PingResponse);
+
+    // Authenticated, exact protocol selection. A current peer must select the
+    // complete supported tuple; zero/partial values never imply legacy mode.
+    rpc NegotiateSchedulerProtocol(NegotiateSchedulerProtocolRequest)
+        returns (NegotiateSchedulerProtocolResponse);
+
+    // Current-protocol point-in-time snapshot. The client must buffer through
+    // the terminal frame and validate count/digest/watermark before applying.
+    rpc ListScheduleSnapshot(ListScheduleSnapshotRequest)
+        returns (stream ScheduleSnapshotFrame);
+
+    // Current-protocol ordered replay strictly after a committed revision.
+    rpc WatchSchedulesV2(WatchSchedulesV2Request)
+        returns (stream ScheduleWatchFrame);
+
+    // Revision-bounded per-id recovery for retained local overlays.
+    rpc GetScheduleState(GetScheduleStateRequest)
+        returns (GetScheduleStateResponse);
+
+    // Persist a deterministic local definition quarantine by token CAS.
+    rpc QuarantineSchedule(QuarantineScheduleRequest)
+        returns (QuarantineScheduleResponse);
+
+    // Persist a prepared zero-dispatch catch-up cursor transition.
+    rpc AdvanceScheduleCursor(AdvanceScheduleCursorRequest)
+        returns (AdvanceScheduleCursorResponse);
 }
 
 
@@ -112,6 +138,13 @@ message Schedule {
     google.protobuf.Timestamp next_run_at = 16;
     int64 total_runs = 17;
     string source_hash = 18;
+    // Boundary D current-protocol control generation. Empty/zero is the
+    // explicitly negotiated legacy shape; current peers send both fields.
+    string control_token = 19;
+    int64 schedule_revision = 20;
+    string definition_digest = 21;
+    int32 cadence_semantics_version = 22;
+    string cadence_runtime_fingerprint = 23;
 }
 
 message ScheduleEvent {
@@ -142,6 +175,26 @@ message FireScheduleRequest {
     // the schedule_fires row so the fire-history + personal-activity
     // views attribute a "fire now" to the operator who clicked it.
     string triggered_by_user_id = 5;
+    int32 scheduler_protocol_epoch = 6;
+    string observed_control_token = 7;
+    string definition_digest = 8;
+    int64 expected_schedule_revision = 9;
+    google.protobuf.Timestamp expected_last_run_at = 10;
+    google.protobuf.Timestamp expected_next_run_at = 11;
+    google.protobuf.Timestamp prepared_next_run_at = 12;
+    int32 cadence_semantics_version = 13;
+    string cadence_runtime_fingerprint = 14;
+}
+
+enum FireDisposition {
+    FIRE_DISPOSITION_UNSPECIFIED = 0;
+    FIRE_ACCEPTED = 1;
+    FIRE_RETRYABLE_OR_AMBIGUOUS = 2;
+    FIRE_TERMINAL_QUARANTINED = 3;
+    FIRE_SLOT_RESOLVED_REFRESH = 4;
+    FIRE_STALE_CONTROL_REFRESH = 5;
+    FIRE_LEGACY_UPGRADE_REQUIRED = 6;
+    FIRE_CADENCE_SEMANTICS_MISMATCH = 7;
 }
 
 message FireScheduleResponse {
@@ -152,6 +205,14 @@ message FireScheduleResponse {
     // because no agent was online (and the schedule's catch_up
     // policy supports buffering).
     bool buffered = 4;
+    FireDisposition disposition = 5;
+    int64 acceptance_revision = 6;
+    google.protobuf.Timestamp accepted_last_run_at = 7;
+    google.protobuf.Timestamp accepted_next_run_at = 8;
+    string live_control_token = 9;
+    int64 live_revision = 10;
+    google.protobuf.Timestamp live_last_run_at = 11;
+    google.protobuf.Timestamp live_next_run_at = 12;
 }
 
 message TriggerScheduleRequest {
@@ -183,4 +244,169 @@ message PingRequest {}
 message PingResponse {
     string brain_version = 1;
     google.protobuf.Timestamp brain_time = 2;
+    int32 scheduler_protocol_epoch = 3;
+}
+
+message SchedulerProtocolCapabilities {
+    int32 protocol_epoch = 1;
+    int32 fire_response_version = 2;
+    int32 cursor_transition_version = 3;
+    int32 stable_snapshot_version = 4;
+    int32 revision_watch_version = 5;
+    int32 per_id_state_version = 6;
+    int32 quarantine_version = 7;
+    int32 cadence_semantics_version = 8;
+    string cadence_runtime_fingerprint = 9;
+}
+
+message NegotiateSchedulerProtocolRequest {
+    SchedulerProtocolCapabilities offered = 1;
+}
+
+message NegotiateSchedulerProtocolResponse {
+    SchedulerProtocolCapabilities selected = 1;
+}
+
+message ListScheduleSnapshotRequest {
+    string project_id = 1;
+    int32 page_size = 2;
+    int32 snapshot_format_version = 3;
+}
+
+message ScheduleSnapshotHeader {
+    int32 format_version = 1;
+    string snapshot_id = 2;
+    string project_id = 3;
+}
+
+message ScheduleSnapshotRow {
+    string snapshot_id = 1;
+    Schedule schedule = 2;
+}
+
+message ScheduleSnapshotComplete {
+    int32 format_version = 1;
+    string snapshot_id = 2;
+    string project_id = 3;
+    int64 watermark = 4;
+    int64 row_count = 5;
+    string digest = 6;
+}
+
+message ScheduleSnapshotFrame {
+    oneof frame {
+        ScheduleSnapshotHeader header = 1;
+        ScheduleSnapshotRow row = 2;
+        ScheduleSnapshotComplete complete = 3;
+    }
+}
+
+message WatchSchedulesV2Request {
+    string project_id = 1;
+    int64 after_revision = 2;
+    int32 watch_format_version = 3;
+}
+
+message ScheduleChange {
+    enum Kind {
+        CHANGE_UNSPECIFIED = 0;
+        UPSERT = 1;
+        TOMBSTONE = 2;
+    }
+    Kind kind = 1;
+    int64 revision = 2;
+    string project_id = 3;
+    Schedule schedule = 4;
+    string deleted_id = 5;
+}
+
+message ScannedThrough {
+    int64 scanned_through_revision = 1;
+    int64 server_revision = 2;
+}
+
+message ScheduleWatchFrame {
+    int32 format_version = 1;
+    oneof frame {
+        ScheduleChange change = 2;
+        ScannedThrough scanned_through = 3;
+    }
+}
+
+message GetScheduleStateRequest {
+    string project_id = 1;
+    string schedule_id = 2;
+    int64 minimum_observed_revision = 3;
+}
+
+message ScheduleAbsence {
+    string project_id = 1;
+    string schedule_id = 2;
+}
+
+message GetScheduleStateResponse {
+    int64 observed_revision = 1;
+    oneof state {
+        Schedule schedule = 2;
+        ScheduleAbsence absence = 3;
+    }
+}
+
+enum QuarantineOutcome {
+    QUARANTINE_OUTCOME_UNSPECIFIED = 0;
+    QUARANTINE_APPLIED = 1;
+    QUARANTINE_ALREADY_APPLIED = 2;
+    QUARANTINE_STALE_CONTROL = 3;
+    QUARANTINE_NOT_FOUND = 4;
+}
+
+message QuarantineScheduleRequest {
+    string project_id = 1;
+    string schedule_id = 2;
+    string observed_control_token = 3;
+    string reason_code = 4;
+    string detail = 5;
+    int32 scheduler_protocol_epoch = 6;
+}
+
+message QuarantineScheduleResponse {
+    QuarantineOutcome outcome = 1;
+    int64 observed_revision = 2;
+}
+
+enum CursorTransitionDisposition {
+    CURSOR_DISPOSITION_UNSPECIFIED = 0;
+    CURSOR_APPLIED = 1;
+    CURSOR_IDEMPOTENT = 2;
+    CURSOR_SLOT_RESOLVED_REFRESH = 3;
+    CURSOR_STALE_CONTROL_REFRESH = 4;
+    CURSOR_CADENCE_SEMANTICS_MISMATCH = 5;
+}
+
+message AdvanceScheduleCursorRequest {
+    string project_id = 1;
+    string schedule_id = 2;
+    string observed_control_token = 3;
+    string definition_digest = 4;
+    int64 expected_schedule_revision = 5;
+    google.protobuf.Timestamp expected_last_run_at = 6;
+    google.protobuf.Timestamp expected_next_run_at = 7;
+    google.protobuf.Timestamp skipped_through = 8;
+    google.protobuf.Timestamp prepared_next_run_at = 9;
+    int32 scheduler_protocol_epoch = 10;
+    int32 cadence_semantics_version = 11;
+    string cadence_runtime_fingerprint = 12;
+}
+
+message AdvanceScheduleCursorResponse {
+    CursorTransitionDisposition disposition = 1;
+    int64 committed_revision = 2;
+    google.protobuf.Timestamp committed_last_run_at = 3;
+    google.protobuf.Timestamp committed_next_run_at = 4;
+    string live_control_token = 5;
+    int64 live_revision = 6;
+    google.protobuf.Timestamp live_last_run_at = 7;
+    google.protobuf.Timestamp live_next_run_at = 8;
+    string error_code = 9;
+    string error_message = 10;
 }

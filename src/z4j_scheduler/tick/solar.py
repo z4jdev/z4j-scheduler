@@ -30,6 +30,7 @@ in this scenario which we catch and translate.
 
 from __future__ import annotations
 
+from collections import deque
 from datetime import UTC, date, datetime, timedelta
 from typing import Final
 
@@ -38,15 +39,35 @@ from typing import Final
 # is operator-actionable.
 try:
     from astral import LocationInfo, Observer
+    from astral.sun import dawn as _astral_dawn
+    from astral.sun import dusk as _astral_dusk
     from astral.sun import midnight as _astral_midnight
+    from astral.sun import noon as _astral_noon
     from astral.sun import sun
+    from astral.sun import sunrise as _astral_sunrise
+    from astral.sun import sunset as _astral_sunset
 
+    # Call the SPECIFIC event function, not sun() (which computes the
+    # whole daylight bundle). At a high latitude a bundled event can raise
+    # ("Sun never reaches ...") even when the event we asked for is perfectly
+    # computable; sun() would then raise and skip the WHOLE day, dropping a
+    # valid occurrence until the polar season ends. Per-event calls isolate the
+    # failure to the events that genuinely have none.
+    _DAY_EVENT_FUNCS = {
+        "dawn": _astral_dawn,
+        "sunrise": _astral_sunrise,
+        "noon": _astral_noon,
+        "solar_noon": _astral_noon,
+        "sunset": _astral_sunset,
+        "dusk": _astral_dusk,
+    }
     _ASTRAL_AVAILABLE = True
 except ImportError:  # pragma: no cover - exercised in degraded mode
     LocationInfo = None  # type: ignore[assignment]
     Observer = None  # type: ignore[assignment]
     sun = None  # type: ignore[assignment]
     _astral_midnight = None  # type: ignore[assignment]
+    _DAY_EVENT_FUNCS = {}  # type: ignore[assignment]
     _ASTRAL_AVAILABLE = False
 
 
@@ -139,7 +160,7 @@ def next_solar_fire(
     event_key, lat, lon = parse_solar_expression(expression)
     is_midnight_event = event_key in _MIDNIGHT_EVENTS
     if not is_midnight_event:
-        astral_key = _DAY_DICT_KEYS[event_key]
+        event_func = _DAY_EVENT_FUNCS[event_key]
 
     # Anchor at the date of ``after`` and walk forward.
     cursor: date = after.astimezone(UTC).date()
@@ -157,8 +178,10 @@ def next_solar_fire(
                     tzinfo=UTC,
                 )
             else:
-                day_events = sun(observer, date=cursor, tzinfo=UTC)
-                candidate = day_events[astral_key]
+                # The SPECIFIC event function, not sun()[key]. A bundled
+                # event that has no occurrence today (high latitude) no longer
+                # makes THIS event's computation fail and skip the whole day.
+                candidate = event_func(observer, date=cursor, tzinfo=UTC)
         except Exception:
             # Polar latitudes can raise ``ValueError`` ("Sun is
             # always below the horizon"). Skip the day; the
@@ -176,8 +199,47 @@ def next_solar_fire(
     return None
 
 
+def fires_between(
+    expression: str,
+    *,
+    after: datetime,
+    until: datetime,
+    max_slots: int = 10_000,
+) -> list[datetime]:
+    """Every solar occurrence in the half-open window (after, until], in
+    ascending order, so the tick engine can materialise a solar missed-backlog
+    the way it already does for cron and interval.
+
+    Astral has no closed-form inverse, so this iterates :func:`next_solar_fire`
+    (each call walks forward day-by-day) -- the same cost profile as cron's and
+    interval's ``fires_between``. Bounded at ``max_slots`` (matching theirs) so a
+    long outage can never materialise an unbounded backlog that would wedge the
+    dispatcher queue.
+    """
+    # Keep the MOST-RECENT ``max_slots`` occurrences, not the oldest, so
+    # ``out[-1]`` is the true latest slot the engine anchors to (fire_one_missed
+    # must coalesce to the latest, not the max_slots-th oldest). Solar events are
+    # at most a handful per day (never sub-minute), so iterating the whole
+    # (after, until] window is bounded by the outage in days; deque(maxlen)
+    # bounds memory. A generous scan ceiling guards against a degenerate
+    # expression, keeping the most-recent slots seen within it.
+    out: deque[datetime] = deque(maxlen=max_slots)
+    cursor = after
+    scanned = 0
+    scan_ceiling = max_slots * 8
+    while scanned < scan_ceiling:
+        scanned += 1
+        nxt = next_solar_fire(expression, after=cursor)
+        if nxt is None or nxt > until or nxt <= cursor:
+            break
+        out.append(nxt)
+        cursor = nxt
+    return list(out)
+
+
 __all__ = [
     "VALID_EVENTS",
+    "fires_between",
     "next_solar_fire",
     "parse_solar_expression",
 ]

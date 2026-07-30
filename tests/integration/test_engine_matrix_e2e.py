@@ -26,8 +26,8 @@ is proven engine-agnostic at the dispatcher boundary - the same
 brain-side scheduler tick will land correctly on any of the six
 engines.
 
-What this does NOT prove (per CLAUDE.md §2.5)
-=============================================
+What this does NOT prove
+========================
 
 This is a smoke test, not a docker-compose harness. It does NOT
 prove that the engine actually runs the task end-to-end against a

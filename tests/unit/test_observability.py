@@ -7,15 +7,22 @@ definitions and logger config wire correctly. The behavior
 
 from __future__ import annotations
 
+import io
+import sys
 from pathlib import Path
 
 import pytest
+import structlog
 from z4j_scheduler.observability import metrics as m
 from z4j_scheduler.observability.logging import (
     configure_logging,
     reset_for_tests,
 )
 from z4j_scheduler.settings import Settings
+
+
+def _raise_scheduler_logger_failure() -> None:
+    raise RuntimeError("scheduler logger failure")
 
 
 @pytest.fixture
@@ -88,3 +95,31 @@ class TestLoggingConfig:
         configure_logging(non_json_settings)
         # Just verify no exception. The actual output format isn't
         # asserted; structlog wires it.
+
+    def test_non_utf8_pipe_formats_traceback_without_unicode_failure(
+        self,
+        settings: Settings,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        raw = io.BytesIO()
+        stream = io.TextIOWrapper(raw, encoding="cp1252", errors="strict")
+        monkeypatch.setattr(sys, "stderr", stream)
+        monkeypatch.setenv("Z4J_SCHEDULER_LOG_JSON", "false")
+        non_json_settings = Settings(_env_file=None)  # type: ignore[call-arg]
+        reset_for_tests()
+        try:
+            configure_logging(non_json_settings)
+            try:
+                _raise_scheduler_logger_failure()
+            except RuntimeError:
+                structlog.get_logger("z4j.scheduler.non-utf8").exception(
+                    "scheduler traceback remains writable",
+                )
+            stream.flush()
+            rendered = raw.getvalue().decode("cp1252")
+            assert "scheduler traceback remains writable" in rendered
+            assert "RuntimeError: scheduler logger failure" in rendered
+        finally:
+            reset_for_tests()
+            structlog.reset_defaults()
+            stream.close()

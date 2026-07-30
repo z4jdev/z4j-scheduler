@@ -1,8 +1,8 @@
 # z4j-scheduler
 
-[![PyPI version](https://img.shields.io/pypi/v/z4j-scheduler.svg?v=1.7.0)](https://pypi.org/project/z4j-scheduler/)
-[![Python](https://img.shields.io/pypi/pyversions/z4j-scheduler.svg?v=1.7.0)](https://pypi.org/project/z4j-scheduler/)
-[![License](https://img.shields.io/pypi/l/z4j-scheduler.svg?v=1.7.0)](https://github.com/z4jdev/z4j-scheduler/blob/main/LICENSE)
+[![PyPI version](https://img.shields.io/pypi/v/z4j-scheduler.svg?v=1.8.0)](https://pypi.org/project/z4j-scheduler/)
+[![Python](https://img.shields.io/pypi/pyversions/z4j-scheduler.svg?v=1.8.0)](https://pypi.org/project/z4j-scheduler/)
+[![License](https://img.shields.io/pypi/l/z4j-scheduler.svg?v=1.8.0)](https://github.com/z4jdev/z4j-scheduler/blob/main/LICENSE)
 
 The engine-agnostic dynamic scheduler for [z4j](https://z4j.com).
 

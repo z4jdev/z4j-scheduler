@@ -16,12 +16,17 @@ real certs.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock
 
+import grpc
 import pytest
 from z4j_scheduler.main import SchedulerApp
 from z4j_scheduler.settings import Settings
+from z4j_scheduler.storage._models import PingInfo
+from z4j_scheduler.storage._protocol import ProtocolNegotiationError
+from z4j_scheduler.tick.cadence import cadence_runtime_fingerprint
 
 pytestmark = pytest.mark.asyncio
 
@@ -52,6 +57,22 @@ class _FakeBrainClient:
     def __init__(self) -> None:
         self.connect = AsyncMock(return_value=None)
         self.close = AsyncMock(return_value=None)
+        self.ping = AsyncMock(
+            return_value=PingInfo(
+                brain_version="1.8.0",
+                brain_time=datetime.now(UTC),
+                scheduler_protocol_epoch=1,
+            ),
+        )
+        self.negotiate_protocol = AsyncMock(side_effect=lambda offered: offered)
+
+
+class _RpcError(grpc.RpcError):
+    def __init__(self, status: grpc.StatusCode) -> None:
+        self._status = status
+
+    def code(self) -> grpc.StatusCode:
+        return self._status
 
 
 class _AppWithFakeClient(SchedulerApp):
@@ -114,6 +135,60 @@ class TestStart:
         app = _AppWithFakeClient(settings)
         await app.start()
         assert app.fake_client.connect.await_count == 1
+
+    async def test_start_negotiates_and_selects_current_protocol(
+        self,
+        settings: Settings,
+    ) -> None:
+        app = _AppWithFakeClient(settings)
+        await app.start()
+
+        assert app.fake_client.ping.await_count == 1
+        assert app.fake_client.negotiate_protocol.await_count == 1
+        (offered,), _ = app.fake_client.negotiate_protocol.await_args
+        assert offered.cadence_runtime_fingerprint == cadence_runtime_fingerprint()
+        assert app._watch is not None
+        assert app._watch._protocol_mode == "current"
+        assert app._watch._project_id is None
+        assert app._watch._protocol_selector is not None
+        assert app._quarantine_reporter is not None
+        assert app._tick_engine is not None
+        assert app._tick_engine._quarantine_reporter is app._quarantine_reporter
+
+    async def test_start_selects_legacy_only_from_exact_legacy_pair(
+        self,
+        settings: Settings,
+    ) -> None:
+        app = _AppWithFakeClient(settings)
+        app.fake_client.ping.return_value = PingInfo(
+            brain_version="1.7.0",
+            brain_time=datetime.now(UTC),
+            scheduler_protocol_epoch=0,
+        )
+        app.fake_client.negotiate_protocol.side_effect = _RpcError(
+            grpc.StatusCode.UNIMPLEMENTED,
+        )
+
+        await app.start()
+
+        assert app._watch is not None
+        assert app._watch._protocol_mode == "legacy"
+        assert app._quarantine_reporter is None
+
+    async def test_start_fails_closed_on_contradictory_negotiation(
+        self,
+        settings: Settings,
+    ) -> None:
+        app = _AppWithFakeClient(settings)
+        app.fake_client.negotiate_protocol.side_effect = _RpcError(
+            grpc.StatusCode.UNIMPLEMENTED,
+        )
+
+        with pytest.raises(ProtocolNegotiationError, match="exact legacy"):
+            await app.start()
+
+        assert app._started is False
+        assert app.fake_client.close.await_count == 1
 
     async def test_start_marks_state_subsystems_up(
         self,

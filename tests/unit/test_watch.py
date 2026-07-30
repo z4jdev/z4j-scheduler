@@ -19,7 +19,13 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
-from z4j_scheduler.storage._models import ScheduleEvent
+from z4j_scheduler.storage._models import (
+    ScannedThrough,
+    ScheduleEvent,
+    ScheduleSnapshot,
+)
+from z4j_scheduler.storage._protocol import ProtocolNegotiationError
+from z4j_scheduler.storage._snapshot import snapshot_digest
 from z4j_scheduler.storage.cache import ScheduleCache
 from z4j_scheduler.storage.watch import WatchStream
 from z4j_scheduler.tick._entry import ScheduleEntry
@@ -154,6 +160,214 @@ class TestStreamProcessing:
         watch = WatchStream(client=client, cache=cache)  # type: ignore[arg-type]
         await watch._stream()
         assert await cache.get(e.id) is None
+
+
+class TestCurrentProtocolSync:
+    async def test_reconnect_rejects_legacy_to_current_mode_change(self) -> None:
+        async def select_current():
+            return "current"
+
+        watch = WatchStream(
+            client=FakeBrainClient(),  # type: ignore[arg-type]
+            cache=ScheduleCache(),
+            protocol_mode="legacy",
+            protocol_selector=select_current,  # type: ignore[arg-type]
+        )
+
+        with pytest.raises(ProtocolNegotiationError, match="restart"):
+            await watch._refresh_protocol_mode()
+
+    async def test_reconnect_rejects_current_to_legacy_downgrade(self) -> None:
+        async def select_legacy():
+            return "legacy"
+
+        watch = WatchStream(
+            client=FakeBrainClient(),  # type: ignore[arg-type]
+            cache=ScheduleCache(),
+            protocol_mode="current",
+            protocol_selector=select_legacy,  # type: ignore[arg-type]
+        )
+
+        with pytest.raises(ProtocolNegotiationError, match="restart"):
+            await watch._refresh_protocol_mode()
+
+    async def test_snapshot_then_watch_uses_revision_cursor(self) -> None:
+        project_id = uuid4()
+        row = ScheduleEntry(
+            id=uuid4(),
+            project_id=project_id,
+            kind="cron",
+            expression="0 * * * *",
+            timezone="UTC",
+            is_enabled=True,
+            catch_up="skip",
+            anchor_at=datetime(2026, 4, 26, 16, 0, tzinfo=UTC),
+            control_token=uuid4(),
+            schedule_revision=10,
+            definition_digest="d" * 64,
+            cadence_semantics_version=1,
+            cadence_runtime_fingerprint="f" * 64,
+        )
+        row.next_fire_at = datetime(2026, 4, 26, 16, 0, tzinfo=UTC)
+        unfinished = ScheduleSnapshot(
+            snapshot_id=uuid4(),
+            project_id=project_id,
+            watermark=10,
+            rows=(row,),
+            digest="",
+        )
+        snapshot = ScheduleSnapshot(
+            snapshot_id=unfinished.snapshot_id,
+            project_id=project_id,
+            watermark=10,
+            rows=(row,),
+            digest=snapshot_digest(unfinished),
+        )
+
+        class CurrentClient:
+            seen_after_revision: int | None = None
+
+            async def list_schedule_snapshot(self, requested_project_id):
+                assert requested_project_id == project_id
+                return snapshot
+
+            async def watch_schedules_v2(
+                self,
+                requested_project_id,
+                *,
+                after_revision,
+            ):
+                assert requested_project_id == project_id
+                self.seen_after_revision = after_revision
+                yield ScannedThrough(revision=12, server_revision=12)
+
+        client = CurrentClient()
+        cache = ScheduleCache()
+        watch = WatchStream(
+            client=client,  # type: ignore[arg-type]
+            cache=cache,
+            project_id=project_id,
+            protocol_mode="current",
+        )
+
+        await watch._full_sync()
+        await watch._stream()
+
+        assert await cache.get(row.id) is row
+        assert client.seen_after_revision == 10
+        assert watch._revision_cursor == 12
+        assert await cache.project_watermark(project_id) == 10
+
+    async def test_current_empty_snapshot_removes_stale_runnable_row(self) -> None:
+        project_id = uuid4()
+        stale = ScheduleEntry(
+            id=uuid4(),
+            project_id=project_id,
+            kind="cron",
+            expression="0 * * * *",
+            timezone="UTC",
+            is_enabled=True,
+            catch_up="skip",
+            anchor_at=datetime(2026, 4, 26, 16, 0, tzinfo=UTC),
+            control_token=uuid4(),
+            schedule_revision=7,
+            definition_digest="d" * 64,
+            cadence_semantics_version=1,
+            cadence_runtime_fingerprint="f" * 64,
+        )
+        stale.next_fire_at = datetime(2026, 4, 26, 16, 0, tzinfo=UTC)
+        unfinished = ScheduleSnapshot(
+            snapshot_id=uuid4(),
+            project_id=project_id,
+            watermark=10,
+            rows=(),
+            digest="",
+        )
+        snapshot = ScheduleSnapshot(
+            snapshot_id=unfinished.snapshot_id,
+            project_id=project_id,
+            watermark=10,
+            rows=(),
+            digest=snapshot_digest(unfinished),
+        )
+
+        class EmptyClient:
+            async def list_schedule_snapshot(self, requested_project_id):
+                assert requested_project_id == project_id
+                return snapshot
+
+        cache = ScheduleCache()
+        await cache.upsert(stale)
+        watch = WatchStream(
+            client=EmptyClient(),  # type: ignore[arg-type]
+            cache=cache,
+            project_id=project_id,
+            protocol_mode="current",
+        )
+        await watch._full_sync()
+
+        assert await cache.get(stale.id) is None
+        assert watch._revision_cursor == 10
+
+    async def test_current_mode_supports_authenticated_all_project_scope(
+        self,
+    ) -> None:
+        first = _make_entry()
+        first.control_token = uuid4()
+        first.schedule_revision = 10
+        first.definition_digest = "d" * 64
+        first.cadence_semantics_version = 1
+        first.cadence_runtime_fingerprint = "f" * 64
+        second = _make_entry()
+        second.control_token = uuid4()
+        second.schedule_revision = 11
+        second.definition_digest = "e" * 64
+        second.cadence_semantics_version = 1
+        second.cadence_runtime_fingerprint = "f" * 64
+        unfinished = ScheduleSnapshot(
+            snapshot_id=uuid4(),
+            project_id=None,
+            watermark=11,
+            rows=(first, second),
+            digest="",
+        )
+        snapshot = ScheduleSnapshot(
+            snapshot_id=unfinished.snapshot_id,
+            project_id=None,
+            watermark=11,
+            rows=unfinished.rows,
+            digest=snapshot_digest(unfinished),
+        )
+
+        class AllScopeClient:
+            async def list_schedule_snapshot(self, requested_project_id):
+                assert requested_project_id is None
+                return snapshot
+
+            async def watch_schedules_v2(
+                self,
+                requested_project_id,
+                *,
+                after_revision,
+            ):
+                assert requested_project_id is None
+                assert after_revision == 11
+                yield ScannedThrough(revision=12, server_revision=12)
+
+        cache = ScheduleCache()
+        watch = WatchStream(
+            client=AllScopeClient(),  # type: ignore[arg-type]
+            cache=cache,
+            protocol_mode="current",
+        )
+        await watch._full_sync()
+        await watch._stream()
+
+        assert await cache.get(first.id) is first
+        assert await cache.get(second.id) is second
+        assert await cache.project_watermark(first.project_id) == 11
+        assert await cache.project_watermark(second.project_id) == 11
+        assert watch._revision_cursor == 12
 
 
 class TestFullSyncDeleteSweep:

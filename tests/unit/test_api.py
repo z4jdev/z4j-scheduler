@@ -30,7 +30,7 @@ def settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Settings:
     monkeypatch.setenv("Z4J_SCHEDULER_TLS_KEY", str(key))
     monkeypatch.setenv("Z4J_SCHEDULER_TLS_CA", str(ca))
     monkeypatch.setenv("Z4J_SCHEDULER_INSTANCE_ID", "test-instance")
-    # 1.6.5 (audit R3-L1): the new fail-safe refuses to start a
+    # 1.6.5: the new fail-safe refuses to start a
     # production scheduler that binds to 0.0.0.0 with metrics on
     # and no auth token. Existing test fixtures used the default
     # ``environment="production"`` + default ``bind_host="0.0.0.0"``,
@@ -213,7 +213,7 @@ class TestMetrics:
         assert response.status_code == 200
 
     # ------------------------------------------------------------------
-    # 1.6.5 audit R3-L1: honor the metrics_enabled toggle
+    # 1.6.5 audit: honor the metrics_enabled toggle
     # ------------------------------------------------------------------
 
     def test_metrics_disabled_returns_404(
@@ -235,14 +235,14 @@ class TestMetrics:
         client = _make_client(disabled_settings)
         response = client.get("/metrics")
         assert response.status_code == 404, (
-            "1.6.5 R3-L1 regression: when metrics_enabled=false the "
+            "1.6.5 regression: when metrics_enabled=false the "
             "/metrics route MUST NOT be mounted (404), not 200. "
             f"Got {response.status_code}: {response.text[:200]}"
         )
 
 
 # ---------------------------------------------------------------------------
-# 1.6.5 audit R3-L1: production fail-safe -- non-loopback bind + no auth
+# 1.6.5 audit: production fail-safe -- non-loopback bind + no auth
 # token + metrics_enabled = ConfigError at startup, not a silent leak.
 # ---------------------------------------------------------------------------
 

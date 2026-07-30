@@ -155,7 +155,7 @@ class TestStaticProjectSet:
 class TestCancelledStop:
     @pytest.mark.asyncio
     async def test_cancel_during_stop_still_completes_cleanup(self) -> None:
-        # R3-M5: cancelling stop() mid-release must not abandon the
+        # Cancelling stop() mid-release must not abandon the
         # cleanup. asyncio.shield alone only protects the inner
         # coroutine - the outer await still raises CancelledError
         # immediately, so the first release raises, the remaining
@@ -360,8 +360,8 @@ class TestAsyncProjectSource:
 class TestCancelDuringLoopJoin:
     @pytest.mark.asyncio
     async def test_cancel_while_joining_loop_still_releases_all(self) -> None:
-        # R4-M4 (per-project gate): a cancel during stop()'s loop
-        # join, before R3-M5's cleanup task existed, previously left
+        # (Per-project gate): a cancel during stop()'s loop
+        # join, before 's cleanup task existed, previously left
         # every held project lock dangling and the backend open. The
         # whole stop sequence is now the cancellation-immune task.
         class BlockingHealthBackend(FakeBackend):

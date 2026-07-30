@@ -1,6 +1,6 @@
 [project]
 name = "z4j-scheduler"
-version = "1.7.0"
+version = "1.8.0"
 description = "Engine-agnostic dynamic scheduler for the z4j stack (Apache 2.0)"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -47,7 +47,7 @@ dependencies = [
     # api_key_id) don't fail/downgrade. z4j-scheduler doesn't
     # depend on any 1.2-specific API surface, so the broader
     # range is safe.
-    "z4j-core>=1.7.0,<2",
+    "z4j-core>=1.8.0,<2",
     # Async HTTP server for /health, /ready, /metrics, /info.
     # Same FastAPI as z4j-brain so contributors carry over patterns.
     "fastapi>=0.135",
@@ -71,17 +71,21 @@ dependencies = [
     # Validation + settings - pinned to match the rest of z4j.
     "pydantic>=2.9",
     "pydantic-settings>=2.14.2",
-    # Cron parsing. Wrapped in src/z4j_scheduler/tick/cron.py so we
-    # can swap if needed without touching call sites.
-    "croniter>=3.0",
+    # Boundary D: cadence is a wire-level persistence contract.  Keep the
+    # complete cadence-affecting dependency closure exact and identical to the
+    # Brain distribution; a floor would let two valid 1.8 installs compute
+    # different successors.
+    "croniter==6.2.2",
+    "python-dateutil==2.9.0.post0",
+    "six==1.17.0",
     # Astronomical event computation for solar schedules
     # (sunrise / sunset / dawn / dusk / noon / midnight at a given
     # lat/lon). docs/SCHEDULER.md §5.1 lists solar in the v1 kind
     # surface. Pure Python, ~50KB, no native deps.
-    "astral>=3.2",
+    "astral==3.2",
     # Pinned IANA tzdata so deployments are deterministic across
     # base images that may ship stale /usr/share/zoneinfo.
-    "tzdata>=2024.2",
+    "tzdata==2026.1",
     # Same logging stack as the rest of z4j - structured JSON in
     # prod, pretty console in dev.
     "structlog>=25.1",

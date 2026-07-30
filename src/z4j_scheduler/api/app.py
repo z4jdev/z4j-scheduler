@@ -53,7 +53,7 @@ def create_app(state: SchedulerState) -> FastAPI:
     )
     app.state.scheduler_state = state
     app.include_router(health_mod.router)
-    # z4j-scheduler 1.6.5 (audit R3-L1): honor the previously-dead
+    # z4j-scheduler 1.6.5: honor the previously-dead
     # ``metrics_enabled`` toggle. Pre-1.6.5 the setting existed but
     # nothing read it; the /metrics route was mounted regardless
     # so operators who set ``Z4J_SCHEDULER_METRICS_ENABLED=false``

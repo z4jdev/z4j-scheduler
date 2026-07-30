@@ -64,8 +64,22 @@ def read_rq_scheduler(
         redis_conn = Redis.from_url(redis_url)
         scheduler = Scheduler(connection=redis_conn)
     except Exception as exc:
+        # Only the exception TYPE is surfaced below, so a RESP3 negotiation
+        # failure against a pre-6.0 server arrives as a bare "ResponseError"
+        # with nothing to act on. Detect it and append our own fixed text: the
+        # hint is a literal, so it cannot leak the URL the redaction above is
+        # protecting. Not worked around with protocol=2, because rq fails on
+        # the same pairing and a silent fallback would hide that.
+        hint = (
+            ""
+            if "HELLO" not in str(exc)
+            else (
+                "; Redis server predates 6.0 but redis-py is 6.0+, which "
+                'negotiates RESP3 - pin the client: pip install "redis<6"'
+            )
+        )
         raise RuntimeError(
-            f"could not connect to Redis ({_redact_redis_url(redis_url)}): {type(exc).__name__}",
+            f"could not connect to Redis ({_redact_redis_url(redis_url)}): {type(exc).__name__}{hint}",
         ) from None  # ``from None`` chops the original exception
         # so its message (which may also embed the URL) doesn't
         # leak into the chained traceback.

@@ -37,10 +37,18 @@ the underlying croniter + zoneinfo behavior.
 
 from __future__ import annotations
 
-from datetime import datetime
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfoNotFoundError
 
 from croniter import CroniterBadCronError, croniter
+
+from z4j_scheduler.tick._runtime import packaged_zoneinfo
+
+#: How far back to probe for a DST transition when deciding where the corrective
+#: forward walk must start. Real-world shifts are 30 minutes to 2 hours; 3 hours
+#: covers every current zone with margin, and probing wider costs nothing because
+#: it only reads a UTC offset.
+_MAX_DST_SHIFT = timedelta(hours=3)
 
 
 class CronExpressionError(ValueError):
@@ -109,7 +117,7 @@ def next_fire(
         )
 
     try:
-        zone = ZoneInfo(tz)
+        zone = packaged_zoneinfo(tz)
     except ZoneInfoNotFoundError as exc:
         raise CronExpressionError(f"unknown timezone: {tz!r}") from exc
 
@@ -133,7 +141,7 @@ def next_fire(
     return itr.get_next(datetime)
 
 
-def fires_between(
+def fires_between(  # noqa: PLR0912 -- validation and DST branches are explicit safety gates
     expression: str,
     tz: str,
     *,
@@ -173,31 +181,142 @@ def fires_between(
         raise ValueError(
             "fires_between() requires timezone-aware datetimes",
         )
-    if until <= after:
-        return []
+    # Validate BEFORE any early return, so a bad expression or zone raises
+    # regardless of the window or the cap. Returning [] for a degenerate window
+    # while silently accepting "not-a-cron" would hide a config error until the
+    # window happened to be non-degenerate.
     try:
-        zone = ZoneInfo(tz)
+        zone = packaged_zoneinfo(tz)
     except ZoneInfoNotFoundError as exc:
         raise CronExpressionError(f"unknown timezone: {tz!r}") from exc
-
-    base = after.astimezone(zone)
-    until_in_zone = until.astimezone(zone)
     try:
-        itr = croniter(expression, base)
+        croniter(expression)
+    except (CroniterBadCronError, ValueError) as exc:
+        raise CronExpressionError(
+            f"invalid cron expression: {expression!r}",
+        ) from exc
+    if until <= after:
+        return []
+    # A non-positive cap must not be treated as "unbounded". out[-cap:]
+    # with cap==0 is out[0:], i.e. the WHOLE window, and a negative cap slices
+    # from the wrong end. A cap is a safety bound, so the conservative answer is
+    # no slots rather than an unbounded backlog.
+    if cap <= 0:
+        return []
+
+    after_in_zone = after.astimezone(zone)
+    try:
+        # Two-phase, so we get BOTH properties at once:
+        #
+        # 1. Walk BACKWARD from ``until`` at most ``cap`` slots purely to
+        #    establish a LOWER BOUND. This is what keeps the cap truncation on
+        #    the MOST-RECENT slots (fire_one_missed must coalesce to the
+        #    true latest, and the engine anchors on ``missed_times[-1]``), and it
+        #    keeps the whole call O(cap) rather than O(window), so a fine cadence
+        #    over a long outage never iterates millions of slots. The +1us nudge
+        #    makes an ``until`` that lands exactly on a slot INCLUSIVE (get_prev
+        #    is otherwise strictly-before).
+        # 2. ENUMERATE FORWARD from that bound.: the forward walk is the one
+        #    that reproduces DST fall-back correctly -- a repeated wall-clock
+        #    hour yields BOTH distinct absolute moments (fold 0 and fold 1),
+        #    which this module explicitly commits to. A pure backward walk is
+        #    fold-blind and silently DROPS one of them, which made
+        #    fire_one_missed coalesce to an older slot and the engine creep
+        #    forward a tick later.
+        # Nudge in ABSOLUTE time, then convert. ``until_in_zone + 1us`` is
+        # wall-clock arithmetic, so on a fall-back day it lands one microsecond
+        # after a repeated wall time rather than after the real instant, and the
+        # backward walk starts up to a whole overlap LATE. With a fine cadence
+        # that difference is spent out of the cap: for Antarctica/Troll, a
+        # per-second cron over 22:00Z..00:59:59.999999Z should return the latest
+        # 10,000 of 10,799 due seconds and returned 2,800. Every other bound in
+        # this function is already compared in UTC; this one was the exception.
+        back = croniter(
+            expression,
+            (until.astimezone(UTC) + timedelta(microseconds=1)).astimezone(zone),
+        )
     except (CroniterBadCronError, ValueError) as exc:
         raise CronExpressionError(
             f"invalid cron expression: {expression!r}",
         ) from exc
 
-    out: list[datetime] = []
+    # Every boundary comparison is done in ABSOLUTE (UTC) time. Comparing
+    # two aware datetimes that share the SAME tzinfo makes Python compare the
+    # naive wall-clock fields and IGNORE ``fold`` (documented behaviour), so on a
+    # DST fall-back day an EARLIER instant (01:30 fold=0) compares as "after" a
+    # LATER one (01:17 fold=1). That silently admitted an out-of-window slot and
+    # broke the backward bound. Comparing in UTC is unambiguous.
+    after_utc = after.astimezone(UTC)
+    until_utc = until.astimezone(UTC)
+
+    # The two walks are each blind to one DST direction, so neither alone is
+    # correct and we UNION them, keyed by absolute instant.
+    #
+    #   - ``get_prev`` reports a SPRING-GAP occurrence by snapping the
+    #     nonexistent local time forward (Europe/London "0 1 * * * 30" on
+    #     2026-03-29 has no local 01:00:30, and get_prev yields 02:00:30 BST).
+    #     A forward walk starting just before that instant can NEVER re-report
+    #     it, because 02:00:30 does not match hour=1 -- so the occurrence was
+    #     silently dropped and fire_all_missed skipped it permanently.
+    #   - ``get_next`` is the only one that yields BOTH absolute moments of a
+    #     repeated FALL-BACK hour (fold 0 and fold 1), which this module commits
+    #     to; a backward walk is fold-blind and drops one.
+    #
+    # Collecting from both and de-duplicating by UTC instant gives each walk's
+    # strength without either's blind spot. Both remain bounded by ``cap``.
+    found: dict[datetime, datetime] = {}
+    lower = after_in_zone
+    for _ in range(cap):
+        prv = back.get_prev(datetime)
+        prv_utc = prv.astimezone(UTC)
+        if prv_utc <= after_utc:  # ``after`` is an exclusive bound
+            break
+        lower = prv
+        if prv_utc <= until_utc:
+            found[prv_utc] = prv
+
+    # Step back one second in ABSOLUTE time, not wall-clock time. Plain
+    # ``lower - timedelta`` on an aware datetime is wall-clock arithmetic, so on
+    # a SPRING-FORWARD day it lands inside the hour that does not exist (e.g.
+    # 03:00 EDT minus 1s = 02:59:59, a skipped local time) and croniter then
+    # walks forward past the first real slot, dropping it. Round-tripping
+    # through UTC keeps the instant valid in the zone (01:59:59 EST).
+    # Step back far enough to clear the WHOLE overlap, not one second.
+    #
+    # On a fall-back the backward iterator is fold-blind, so ``lower`` can land
+    # on the SECOND occurrence of a repeated wall-clock time. Starting one second
+    # before that is still inside the overlap, and the forward walk then never
+    # revisits the FIRST occurrence: for Pacific/Chatham (a 45-minute-offset zone)
+    # "*/15 3 * * * 30" over the transition returned four slots where seven are
+    # due, silently dropping three. Backing off by the overlap's own width puts
+    # the start ahead of both folds, and the union plus the cap discard anything
+    # extra that produces.
+    lower_utc = lower.astimezone(UTC)
+    back_off = timedelta(seconds=1)
+    offset_here = lower_utc.astimezone(zone).utcoffset()
+    offset_before = (lower_utc - _MAX_DST_SHIFT).astimezone(zone).utcoffset()
+    if offset_here is not None and offset_before is not None and offset_before != offset_here:
+        # Fall-back (the offset DECREASED) repeats a span equal to the shift.
+        overlap = offset_before - offset_here
+        if overlap > timedelta(0):
+            back_off = overlap + timedelta(seconds=1)
+    start = (lower_utc - back_off).astimezone(zone)
+    if start.astimezone(UTC) < after_utc:
+        start = after_in_zone
+    fwd = croniter(expression, start)
     while True:
-        nxt = itr.get_next(datetime)
-        if nxt > until_in_zone:
+        nxt = fwd.get_next(datetime)
+        nxt_utc = nxt.astimezone(UTC)
+        if nxt_utc > until_utc:
             break
-        out.append(nxt)
-        if len(out) >= cap:
-            break
-    return out
+        if nxt_utc > after_utc:
+            found.setdefault(nxt_utc, nxt)
+    # Sort by ABSOLUTE instant: the zoned values are not safely comparable across
+    # a fold (Python compares naive wall-clock fields when the tzinfo matches).
+    out = [found[key] for key in sorted(found)]
+    # out[-1] is the latest slot <= until. Either walk can contribute a slot the
+    # other misses, so trim to the most-recent ``cap``.
+    return out[-cap:] if len(out) > cap else out
 
 
 __all__ = ["CronExpressionError", "fires_between", "is_valid", "next_fire"]

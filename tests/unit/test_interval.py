@@ -8,11 +8,71 @@ from zoneinfo import ZoneInfo
 import pytest
 from z4j_scheduler.tick.interval import (
     IntervalExpressionError,
+    fires_between,
     next_fire,
     parse,
 )
 
 UTC = ZoneInfo("UTC")
+
+
+class TestFiresBetween:
+    """H4: the full missed-slot backlog for an interval schedule."""
+
+    def test_enumerates_every_slot_in_window(self) -> None:
+        after = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+        until = datetime(2026, 4, 26, 12, 30, tzinfo=UTC)
+        slots = fires_between("5m", after=after, until=until)
+        assert slots == [
+            datetime(2026, 4, 26, 12, 5, tzinfo=UTC),
+            datetime(2026, 4, 26, 12, 10, tzinfo=UTC),
+            datetime(2026, 4, 26, 12, 15, tzinfo=UTC),
+            datetime(2026, 4, 26, 12, 20, tzinfo=UTC),
+            datetime(2026, 4, 26, 12, 25, tzinfo=UTC),
+            datetime(2026, 4, 26, 12, 30, tzinfo=UTC),
+        ]
+
+    def test_half_open_excludes_after_includes_until(self) -> None:
+        after = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+        until = datetime(2026, 4, 26, 12, 10, tzinfo=UTC)
+        slots = fires_between("5m", after=after, until=until)
+        # ``after`` itself is NOT a slot (strict >); the exact ``until``
+        # boundary IS included.
+        assert after not in slots
+        assert until in slots
+        assert slots == [
+            datetime(2026, 4, 26, 12, 5, tzinfo=UTC),
+            datetime(2026, 4, 26, 12, 10, tzinfo=UTC),
+        ]
+
+    def test_empty_window_returns_no_slots(self) -> None:
+        t = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+        assert fires_between("5m", after=t, until=t) == []
+
+    def test_cap_bounds_a_huge_backlog(self) -> None:
+        after = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+        until = datetime(2027, 1, 1, 0, 0, tzinfo=UTC)  # a year of 1m slots
+        slots = fires_between("1m", after=after, until=until, cap=100)
+        assert len(slots) == 100
+
+    def test_cap_keeps_the_most_recent_slots_r10_m2(self) -> None:
+        # When the cap truncates, keep the MOST-RECENT slots so the last
+        # is the true latest (== until here). fire_one_missed coalesces to
+        # slots[-1] and the engine advances its anchor there; oldest-first
+        # truncation fired the 100th-oldest slot and crept forward one cap-window
+        # per tick.
+        after = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+        until = datetime(2027, 1, 1, 0, 0, tzinfo=UTC)  # a year of 1m slots
+        slots = fires_between("1m", after=after, until=until, cap=100)
+        assert len(slots) == 100
+        assert slots[-1] == until
+        assert slots[0] == until - timedelta(minutes=99)
+
+    def test_naive_bounds_rejected(self) -> None:
+        with pytest.raises(ValueError, match="tz-aware"):
+            fires_between(
+                "5m", after=datetime(2026, 4, 26, 12, 0), until=datetime(2026, 4, 26, 13, 0)
+            )
 
 
 class TestParse:

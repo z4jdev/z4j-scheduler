@@ -131,4 +131,48 @@ def next_fire(
     return datetime.fromtimestamp(next_s, tz=anchor_at.tzinfo)
 
 
-__all__ = ["IntervalExpressionError", "next_fire", "parse"]
+def fires_between(
+    expression: str,
+    *,
+    after: datetime,
+    until: datetime,
+    cap: int = 10_000,
+) -> list[datetime]:
+    """Return every interval slot in the half-open window ``(after, until]``.
+
+    Mirrors :func:`z4j_scheduler.tick.cron.fires_between` so the tick engine
+    can materialise the FULL missed backlog for an interval schedule on
+    recovery (H4). Without this the engine could only produce a single-slot
+    missed list for intervals, so ``fire_one_missed`` (and ``skip``)
+    behaved like ``fire_all_missed``: the engine advanced one interval,
+    re-entered still past-due, and re-fired every missed slot one tick at a
+    time -- the same duplicate-fire storm B3 fixed for cron.
+
+    Slots are ``after + k*interval`` for ``k = 1, 2, ...`` while
+    ``<= until``, capped at ``cap`` (a very long outage of a short interval
+    is otherwise closer to millions of slots and would wedge the dispatcher
+    queue). Both bounds must be timezone-aware.
+    """
+    if after.tzinfo is None or until.tzinfo is None:
+        raise ValueError("fires_between() requires tz-aware after/until bounds")
+    interval = parse(expression)
+    if interval <= timedelta(0):
+        # parse() rejects non-positive expressions, but guard against an
+        # infinite loop if that ever changes.
+        return []
+    # Closed-form, keeping the MOST-RECENT ``cap`` slots. Slots are
+    # ``after + k*interval`` for k >= 1 with the slot <= until. Computing k
+    # directly avoids iterating the whole window (a 1-second interval over a
+    # year is ~31M slots) AND makes the cap keep the newest, not the oldest, so
+    # ``slots[-1]`` is the true latest missed slot the engine anchors to.
+    span = until - after
+    if span < interval:
+        return []
+    k_max = int(span // interval)  # after + k_max*interval <= until
+    if k_max < 1:
+        return []
+    k_start = max(1, k_max - cap + 1)
+    return [after + k * interval for k in range(k_start, k_max + 1)]
+
+
+__all__ = ["IntervalExpressionError", "fires_between", "next_fire", "parse"]

@@ -36,11 +36,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import grpc
 
 if TYPE_CHECKING:  # pragma: no cover
+    from collections.abc import Awaitable, Callable
     from uuid import UUID
 
     from z4j_scheduler.storage.brain_client import BrainClient
@@ -83,12 +84,17 @@ class WatchStream:
         cache: ScheduleCache,
         project_id: UUID | None = None,
         full_resync_interval_seconds: float = (_DEFAULT_FULL_RESYNC_INTERVAL_SECONDS),
+        protocol_mode: Literal["legacy", "current"] = "legacy",
+        protocol_selector: (Callable[[], Awaitable[Literal["legacy", "current"]]] | None) = None,
     ) -> None:
         self._client = client
         self._cache = cache
         self._project_id = project_id
         self._stop_event = asyncio.Event()
         self._resume_token = ""
+        self._protocol_mode = protocol_mode
+        self._protocol_selector = protocol_selector
+        self._revision_cursor = 0
         # The reconnect-driven sync and the periodic-timer sync race
         # against each other on first connect (both fire at startup).
         # The lock makes whichever wins exclusive so we don't issue
@@ -256,6 +262,12 @@ class WatchStream:
         ``sync_started_at`` was definitely covered by the sync's
         full snapshot.
         """
+        await self._refresh_protocol_mode()
+        if self._protocol_mode == "current":
+            await self._full_sync()
+            await self._stream()
+            return
+
         from datetime import UTC, datetime
 
         sync_started_at_iso = datetime.now(UTC).isoformat()
@@ -269,6 +281,22 @@ class WatchStream:
 
         # Now subscribe to the live stream until something breaks.
         await self._stream()
+
+    async def _refresh_protocol_mode(self) -> None:
+        """Re-negotiate on every stream connection and reject mode changes."""
+
+        if self._protocol_selector is None:
+            return
+        selected = await self._protocol_selector()
+        if selected != self._protocol_mode:
+            from z4j_scheduler.storage._protocol import (
+                ProtocolNegotiationError,
+            )
+
+            raise ProtocolNegotiationError(
+                "Brain protocol mode changed across reconnect; restart the "
+                "scheduler to rebuild mode-specific subsystems",
+            )
 
     async def _full_sync(self) -> None:
         """Fetch every schedule from brain and reconcile the cache.
@@ -297,6 +325,10 @@ class WatchStream:
         racing the on-reconnect sync can't issue overlapping
         ``list_schedules`` calls and clobber each other's state.
         """
+        if self._protocol_mode == "current":
+            await self._full_sync_current()
+            return
+
         async with self._sync_lock:
             # Snapshot the cache BEFORE list_schedules so we know
             # which ids were live at sync-start. Any id the live
@@ -307,7 +339,11 @@ class WatchStream:
             async for entry in self._client.list_schedules(self._project_id):
                 entries.append(entry)
             if entries:
-                await self._cache.upsert_many(entries)
+                # Echo-safe apply -- a full-sync re-read must not
+                # clobber the engine's authoritative fire-state on same-cadence
+                # rows (brain is authoritative for the DEFINITION, the engine for
+                # fire-state). New rows and real cadence edits still replace.
+                await self._cache.apply_watch_updates(entries)
             # Sweep deletes. Only consider ids that were present
             # BEFORE the sync started and that brain did NOT
             # return. Concurrently-added ids (from _stream events
@@ -326,8 +362,26 @@ class WatchStream:
             len(entries),
         )
 
+    async def _full_sync_current(self) -> None:
+        """Atomically install one validated current-protocol snapshot."""
+
+        async with self._sync_lock:
+            snapshot = await self._client.list_schedule_snapshot(self._project_id)
+            await self._cache.apply_completed_snapshot(snapshot)
+            self._revision_cursor = max(
+                self._revision_cursor,
+                snapshot.watermark,
+            )
+        logger.info(
+            "z4j.scheduler.watch: current snapshot installed at revision %d",
+            snapshot.watermark,
+        )
+
     async def _stream(self) -> None:
         """Process WatchSchedules events until the stream ends."""
+        if self._protocol_mode == "current":
+            await self._stream_current()
+            return
         # Stream successfully opened (the iterator is live) - flip
         # to healthy so the tick engine resumes firing. We do this
         # BEFORE consuming the first event because brain may have
@@ -346,8 +400,11 @@ class WatchStream:
                 if event.deleted_id is not None:
                     await self._cache.remove(event.deleted_id)
             elif event.schedule is not None:
-                # CREATED + UPDATED both upsert.
-                await self._cache.upsert(event.schedule)
+                # CREATED + UPDATED.: apply echo-safely so a benign
+                # fire-ack echo (same cadence, advanced last_run_at) does not
+                # overwrite the engine's computed next_fire_at/anchor_at and
+                # drift the cadence. A real cadence edit still replaces wholesale.
+                await self._cache.apply_watch_update(event.schedule)
             else:
                 # Defensive - shouldn't happen given the conversion
                 # contract in _convert.event_from_pb.
@@ -355,6 +412,28 @@ class WatchStream:
                     "z4j.scheduler.watch: ignoring malformed event %r",
                     event,
                 )
+
+    async def _stream_current(self) -> None:
+        """Apply V2 events/checkpoints strictly after the snapshot cursor."""
+
+        from z4j_scheduler.storage._watch_v2 import OrderedWatchApplier
+
+        applier = OrderedWatchApplier(
+            cache=self._cache,
+            project_id=self._project_id,
+            after_revision=self._revision_cursor,
+        )
+        self._is_healthy = True
+        async for frame in self._client.watch_schedules_v2(
+            self._project_id,
+            after_revision=applier.cursor,
+        ):
+            if self._stop_event.is_set():
+                break
+            await applier.apply(frame)
+            # A periodic snapshot may have advanced the shared cursor farther
+            # while this stream was live; never move it backwards.
+            self._revision_cursor = max(self._revision_cursor, applier.cursor)
 
     # ------------------------------------------------------------------
     # Backoff

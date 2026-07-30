@@ -26,12 +26,20 @@ import grpc
 from z4j_scheduler.proto import scheduler_pb2 as pb
 from z4j_scheduler.proto import scheduler_pb2_grpc as pb_grpc
 from z4j_scheduler.storage._convert import (
+    capabilities_from_pb,
+    capabilities_to_pb,
     entry_from_pb,
     event_from_pb,
     make_ack_request,
+    make_advance_cursor_request,
     make_fire_request,
+    make_quarantine_request,
+    parse_advance_cursor_response,
     parse_fire_response,
     parse_ping_response,
+    parse_quarantine_response,
+    schedule_state_from_pb,
+    watch_frame_from_pb,
 )
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -41,11 +49,19 @@ if TYPE_CHECKING:  # pragma: no cover
 
     from z4j_scheduler.settings import Settings
     from z4j_scheduler.storage._models import (
+        CursorTransitionResult,
         FireResult,
         PingInfo,
+        ProtocolCapabilities,
+        QuarantineResult,
+        ScannedThrough,
+        ScheduleChange,
         ScheduleEvent,
+        ScheduleSnapshot,
+        ScheduleStateObservation,
     )
     from z4j_scheduler.tick._entry import ScheduleEntry
+    from z4j_scheduler.tick._prepared import PreparedFire
 
 logger = logging.getLogger("z4j.scheduler.brain_client")
 
@@ -56,6 +72,11 @@ _LIST_TIMEOUT_SECONDS = 30.0
 _FIRE_TIMEOUT_SECONDS = 10.0  # the dispatcher applies its own outer retry
 _ACK_TIMEOUT_SECONDS = 5.0
 _PING_TIMEOUT_SECONDS = 3.0
+_NEGOTIATE_TIMEOUT_SECONDS = 5.0
+_SNAPSHOT_TIMEOUT_SECONDS = 30.0
+_STATE_TIMEOUT_SECONDS = 5.0
+_QUARANTINE_TIMEOUT_SECONDS = 5.0
+_CURSOR_TIMEOUT_SECONDS = 10.0
 
 
 def _build_credentials(settings: Settings) -> grpc.ChannelCredentials:
@@ -232,6 +253,9 @@ class BrainClient:
         scheduled_for: datetime,
         fired_at: datetime,
         triggered_by_user_id: str = "",
+        schedule_entry: ScheduleEntry | None = None,
+        prepared_fire: PreparedFire | None = None,
+        scheduler_protocol_epoch: int = 0,
     ) -> FireResult:
         """Tell brain to fire a schedule. Single short-deadline RPC.
 
@@ -245,6 +269,9 @@ class BrainClient:
             scheduled_for=scheduled_for,
             fired_at=fired_at,
             triggered_by_user_id=triggered_by_user_id,
+            schedule_entry=schedule_entry,
+            prepared_fire=prepared_fire,
+            scheduler_protocol_epoch=scheduler_protocol_epoch,
         )
         response = await stub.FireSchedule(
             request,
@@ -283,6 +310,156 @@ class BrainClient:
             timeout=_PING_TIMEOUT_SECONDS,
         )
         return parse_ping_response(response)
+
+    async def negotiate_protocol(
+        self,
+        offered: ProtocolCapabilities,
+    ) -> ProtocolCapabilities:
+        """Ask the authenticated Brain channel to select an exact tuple."""
+
+        stub = self._require_stub()
+        response = await stub.NegotiateSchedulerProtocol(
+            pb.NegotiateSchedulerProtocolRequest(
+                offered=capabilities_to_pb(offered),
+            ),
+            timeout=_NEGOTIATE_TIMEOUT_SECONDS,
+        )
+        return capabilities_from_pb(response.selected)
+
+    async def list_schedule_snapshot(
+        self,
+        project_id: UUID | None,
+        *,
+        page_size: int = 100,
+    ) -> ScheduleSnapshot:
+        """Receive one complete V2 snapshot without exposing partial rows."""
+
+        from z4j_scheduler.storage._snapshot_wire import (
+            SNAPSHOT_FORMAT_VERSION,
+            SnapshotAssembler,
+        )
+
+        stub = self._require_stub()
+        assembler = SnapshotAssembler(expected_project_id=project_id)
+        request = pb.ListScheduleSnapshotRequest(
+            project_id=str(project_id) if project_id is not None else "",
+            page_size=page_size,
+            snapshot_format_version=SNAPSHOT_FORMAT_VERSION,
+        )
+        async for frame in stub.ListScheduleSnapshot(
+            request,
+            timeout=_SNAPSHOT_TIMEOUT_SECONDS,
+        ):
+            assembler.accept(frame)
+        return assembler.finish()
+
+    async def watch_schedules_v2(
+        self,
+        project_id: UUID | None,
+        *,
+        after_revision: int,
+    ) -> AsyncIterator[ScheduleChange | ScannedThrough]:
+        """Stream immutable changes/checkpoints after an ordered revision."""
+
+        from z4j_scheduler.storage._watch_v2 import WATCH_FORMAT_VERSION
+
+        stub = self._require_stub()
+        request = pb.WatchSchedulesV2Request(
+            project_id=str(project_id) if project_id is not None else "",
+            after_revision=after_revision,
+            watch_format_version=WATCH_FORMAT_VERSION,
+        )
+        async for frame in stub.WatchSchedulesV2(request):
+            yield watch_frame_from_pb(frame)
+
+    async def get_schedule_state(
+        self,
+        *,
+        project_id: UUID,
+        schedule_id: UUID,
+        minimum_observed_revision: int,
+    ) -> ScheduleStateObservation:
+        """Read an explicit row/absence observation meeting a revision floor."""
+
+        stub = self._require_stub()
+        response = await stub.GetScheduleState(
+            pb.GetScheduleStateRequest(
+                project_id=str(project_id),
+                schedule_id=str(schedule_id),
+                minimum_observed_revision=minimum_observed_revision,
+            ),
+            timeout=_STATE_TIMEOUT_SECONDS,
+        )
+        return schedule_state_from_pb(
+            response,
+            expected_project_id=project_id,
+            expected_schedule_id=schedule_id,
+            minimum_observed_revision=minimum_observed_revision,
+        )
+
+    async def quarantine_schedule(
+        self,
+        *,
+        project_id: UUID,
+        schedule_id: UUID,
+        observed_control_token: UUID,
+        reason_code: str,
+        detail: str,
+        scheduler_protocol_epoch: int,
+    ) -> QuarantineResult:
+        """Persist a local deterministic quarantine by exact token CAS."""
+
+        stub = self._require_stub()
+        response = await stub.QuarantineSchedule(
+            make_quarantine_request(
+                project_id=project_id,
+                schedule_id=schedule_id,
+                observed_control_token=observed_control_token,
+                reason_code=reason_code,
+                detail=detail,
+                scheduler_protocol_epoch=scheduler_protocol_epoch,
+            ),
+            timeout=_QUARANTINE_TIMEOUT_SECONDS,
+        )
+        return parse_quarantine_response(response)
+
+    async def advance_schedule_cursor(
+        self,
+        *,
+        project_id: UUID,
+        schedule_id: UUID,
+        observed_control_token: UUID,
+        definition_digest: str,
+        expected_schedule_revision: int,
+        expected_last_run_at: datetime | None,
+        expected_next_run_at: datetime | None,
+        skipped_through: datetime,
+        prepared_next_run_at: datetime | None,
+        scheduler_protocol_epoch: int,
+        cadence_semantics_version: int,
+        cadence_runtime_fingerprint: str,
+    ) -> CursorTransitionResult:
+        """Persist one prepared zero-work cursor transition."""
+
+        stub = self._require_stub()
+        response = await stub.AdvanceScheduleCursor(
+            make_advance_cursor_request(
+                project_id=project_id,
+                schedule_id=schedule_id,
+                observed_control_token=observed_control_token,
+                definition_digest=definition_digest,
+                expected_schedule_revision=expected_schedule_revision,
+                expected_last_run_at=expected_last_run_at,
+                expected_next_run_at=expected_next_run_at,
+                skipped_through=skipped_through,
+                prepared_next_run_at=prepared_next_run_at,
+                scheduler_protocol_epoch=scheduler_protocol_epoch,
+                cadence_semantics_version=cadence_semantics_version,
+                cadence_runtime_fingerprint=cadence_runtime_fingerprint,
+            ),
+            timeout=_CURSOR_TIMEOUT_SECONDS,
+        )
+        return parse_advance_cursor_response(response)
 
     # ------------------------------------------------------------------
     # Internal

@@ -469,6 +469,25 @@ class TestFireSchedule:
         assert result.command_id is None
         assert result.error_code is None
 
+    @pytest.mark.asyncio
+    async def test_fire_rejects_unsupported_uuid_version_r8_l2(
+        self,
+        brain_grpc,
+        scheduler_client: BrainClient,
+    ) -> None:
+        # A fire_id whose UUID version is neither v4 (manual Trigger Now)
+        # nor v5 (cadence, derive_fire_id) is rejected up front, so an
+        # out-of-protocol version cannot be silently classified as manual by the
+        # ack path (which reads version != 5 as manual).
+        now = datetime.now(UTC)
+        result = await scheduler_client.fire_schedule(
+            schedule_id=uuid.uuid4(),
+            fire_id=uuid.uuid1(),  # version 1 -- unsupported
+            scheduled_for=now,
+            fired_at=now,
+        )
+        assert result.error_code == "invalid_request"
+
 
 class TestAcknowledgeFireResult:
     @pytest.mark.asyncio
@@ -507,7 +526,12 @@ class TestAcknowledgeFireResult:
         _server, _port, db, _dispatcher = brain_grpc
         project_id = uuid.uuid4()
         schedule_id = uuid.uuid4()
-        fire_id = uuid.uuid4()
+        # The brain distinguishes a CADENCE fire (uuid5, version 5, minted
+        # by derive_fire_id) from a manual "Trigger Now" (uuid4) by the fire_id's
+        # UUID version, and only a cadence ack advances last_run_at + clears
+        # last_fire_id. This test exercises the cadence path, so the seeded fire_id
+        # must be version 5 (a uuid4 here is read as manual and total_runs-only).
+        fire_id = uuid.uuid5(uuid.NAMESPACE_OID, str(uuid.uuid4()))
 
         async with db.session() as session:
             session.add(Project(id=project_id, slug="proj", name="Proj"))
