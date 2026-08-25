@@ -382,6 +382,29 @@ class TestRqJobMapper:
         assert sched.queue == "default"
         assert sched.source == "imported_rq"
 
+    def test_local_timezone_cron_uses_operator_zone(self) -> None:
+        from z4j_scheduler.importers.rq import _job_to_schedule
+
+        job = SimpleNamespace(
+            id="job-local",
+            func_name="myapp.tasks.heartbeat",
+            args=(),
+            kwargs={},
+            origin="default",
+            meta={
+                "cron_string": "0 9 * * *",
+                "use_local_timezone": True,
+            },
+        )
+        sched = _job_to_schedule(
+            job=job,
+            project_slug="p",
+            engine="rq",
+            default_queue=None,
+            default_timezone="America/New_York",
+        )
+        assert sched.timezone == "America/New_York"
+
     def test_interval_meta(self) -> None:
         from z4j_scheduler.importers.rq import _job_to_schedule
 
@@ -422,8 +445,114 @@ class TestRqJobMapper:
             engine="rq",
             default_queue=None,
         )
-        assert sched.kind == "one_shot"
+        assert sched.kind == "clocked"
         assert sched.expression == when.isoformat()
+
+    def test_one_shot_uses_sorted_set_score_as_utc(self) -> None:
+        from z4j_scheduler.importers.rq import _job_to_schedule
+
+        job = SimpleNamespace(
+            id="job-score",
+            func_name="myapp.tasks.bg",
+            args=(),
+            kwargs={},
+            origin=None,
+            meta={},
+        )
+        score_time = datetime(2026, 4, 26, 15, 0)
+        sched = _job_to_schedule(
+            job=job,
+            project_slug="p",
+            engine="rq",
+            default_queue=None,
+            scheduled_time=score_time,
+            scheduled_time_is_utc=True,
+        )
+        assert sched.kind == "clocked"
+        assert sched.expression == "2026-04-26T15:00:00+00:00"
+
+    def test_ambiguous_naive_one_shot_is_rejected(self) -> None:
+        from z4j_scheduler.importers.rq import (
+            _job_to_schedule,
+            _UnsupportedJobError,
+        )
+
+        job = SimpleNamespace(
+            id="job-naive",
+            func_name="myapp.tasks.bg",
+            args=(),
+            kwargs={},
+            origin=None,
+            meta={"scheduled_at": datetime(2026, 11, 1, 1, 30)},
+        )
+        with pytest.raises(_UnsupportedJobError, match="timezone-naive"):
+            _job_to_schedule(
+                job=job,
+                project_slug="p",
+                engine="rq",
+                default_queue=None,
+                default_timezone="America/New_York",
+            )
+
+    def test_reader_requests_sorted_set_times(self, monkeypatch) -> None:
+        import redis
+        import rq_scheduler
+        from z4j_scheduler.importers.rq import read_rq_scheduler
+
+        requested: list[bool] = []
+        job = SimpleNamespace(
+            id="job-score",
+            func_name="myapp.tasks.bg",
+            args=(),
+            kwargs={},
+            origin=None,
+            meta={},
+        )
+
+        class Scheduler:
+            def __init__(self, *, connection):
+                self.connection = connection
+
+            def get_jobs(self, *, with_times=False):
+                requested.append(with_times)
+                yield job, datetime(2026, 4, 26, 15, 0)
+
+        monkeypatch.setattr(redis.Redis, "from_url", lambda _url: object())
+        monkeypatch.setattr(rq_scheduler, "Scheduler", Scheduler)
+        rows = read_rq_scheduler(
+            redis_url="redis://localhost/0",
+            project_slug="p",
+        )
+        assert requested == [True]
+        assert rows[0].expression == "2026-04-26T15:00:00+00:00"
+
+    def test_cli_forwards_timezone_to_rq_importer(self, monkeypatch) -> None:
+        from z4j_scheduler import cli
+        from z4j_scheduler.importers import rq as rq_importer
+
+        captured = {}
+
+        def read(**kwargs):
+            captured.update(kwargs)
+            return []
+
+        monkeypatch.setattr(rq_importer, "read_rq_scheduler", read)
+        cli._do_import(
+            source="rq",
+            project="p",
+            celery_app=None,
+            django_settings=None,
+            redis_url="redis://localhost/0",
+            jobstore_url=None,
+            jobstore_alias="default",
+            crontab=None,
+            task_prefix=None,
+            has_user_column=False,
+            queue=None,
+            timezone="America/New_York",
+            engine=None,
+        )
+        assert captured["default_timezone"] == "America/New_York"
 
     def test_unknown_shape_raises(self) -> None:
         from z4j_scheduler.importers.rq import (
@@ -562,7 +691,7 @@ class TestApsJobMapper:
             engine="apscheduler",
             default_queue=None,
         )
-        assert sched.kind == "one_shot"
+        assert sched.kind == "clocked"
         assert sched.expression == when.isoformat()
 
     def test_combining_trigger_rejected(self) -> None:
@@ -586,3 +715,262 @@ class TestApsJobMapper:
                 engine="apscheduler",
                 default_queue=None,
             )
+
+
+class TestApsCronTrigger3x:
+    """Exercise the mapper against real APScheduler 3.x field objects."""
+
+    def test_default_second_is_losslessly_rendered(self) -> None:
+        cron_module = pytest.importorskip("apscheduler.triggers.cron")
+        from z4j_scheduler.importers.apscheduler import _render_cron_trigger
+
+        trigger = cron_module.CronTrigger(minute=0)
+
+        assert _render_cron_trigger(trigger) == "0 * * * *"
+
+    @pytest.mark.parametrize(
+        "day_of_week",
+        ["mon", "sun", "mon-fri", "mon,wed,fri"],
+    )
+    def test_named_weekdays_match_croniter_semantics(
+        self,
+        day_of_week: str,
+    ) -> None:
+        cron_module = pytest.importorskip("apscheduler.triggers.cron")
+        from z4j_scheduler.importers.apscheduler import _render_cron_trigger
+        from z4j_scheduler.tick.cron import next_fire
+
+        trigger = cron_module.CronTrigger(
+            day_of_week=day_of_week,
+            hour=12,
+            minute=0,
+            second=0,
+            timezone="UTC",
+        )
+        base = datetime(2026, 8, 2, tzinfo=UTC)  # Sunday
+        expression = _render_cron_trigger(trigger)
+
+        assert next_fire(expression, "UTC", base) == trigger.get_next_fire_time(
+            base,
+            base,
+        )
+
+    @pytest.mark.parametrize("day_of_week", ["0", "6", "*/2"])
+    def test_numeric_or_stepped_weekday_fails_closed(
+        self,
+        day_of_week: str,
+    ) -> None:
+        cron_module = pytest.importorskip("apscheduler.triggers.cron")
+        from z4j_scheduler.importers.apscheduler import (
+            _render_cron_trigger,
+            _UnsupportedTriggerError,
+        )
+
+        trigger = cron_module.CronTrigger(
+            day_of_week=day_of_week,
+            hour=12,
+            minute=0,
+            second=0,
+            timezone="UTC",
+        )
+
+        with pytest.raises(_UnsupportedTriggerError, match="numbers Monday as 0"):
+            _render_cron_trigger(trigger)
+
+    def test_numeric_weekday_negative_control_changes_day(self) -> None:
+        cron_module = pytest.importorskip("apscheduler.triggers.cron")
+        from z4j_scheduler.importers.apscheduler import (
+            _render_cron_trigger,
+            _UnsupportedTriggerError,
+        )
+        from z4j_scheduler.tick.cron import next_fire
+
+        trigger = cron_module.CronTrigger(
+            day_of_week="0",
+            hour=12,
+            minute=0,
+            second=0,
+            timezone="UTC",
+        )
+        base = datetime(2026, 8, 2, tzinfo=UTC)  # Sunday
+
+        # The old literal projection means Sunday to croniter and Monday to
+        # APScheduler, so the two next-fire dates differ by a day.
+        assert next_fire("0 12 * * 0", "UTC", base) != (trigger.get_next_fire_time(base, base))
+        with pytest.raises(_UnsupportedTriggerError):
+            _render_cron_trigger(trigger)
+
+    def test_day_and_weekday_conjunction_fails_closed(self) -> None:
+        cron_module = pytest.importorskip("apscheduler.triggers.cron")
+        from z4j_scheduler.importers.apscheduler import (
+            _render_cron_trigger,
+            _UnsupportedTriggerError,
+        )
+        from z4j_scheduler.tick.cron import next_fire
+
+        trigger = cron_module.CronTrigger(
+            day="1",
+            day_of_week="mon",
+            hour=12,
+            minute=0,
+            second=0,
+            timezone="UTC",
+        )
+        base = datetime(2026, 8, 2, tzinfo=UTC)
+
+        # croniter's default OR rule fires on the next Monday. APScheduler's
+        # AND rule waits for a Monday that is also the first of its month.
+        assert next_fire("0 12 1 * mon", "UTC", base) != (trigger.get_next_fire_time(base, base))
+        with pytest.raises(_UnsupportedTriggerError, match="requires both"):
+            _render_cron_trigger(trigger)
+
+    @pytest.mark.parametrize("day", ["last", "3rd fri"])
+    def test_special_day_expression_fails_closed(self, day: str) -> None:
+        cron_module = pytest.importorskip("apscheduler.triggers.cron")
+        from z4j_scheduler.importers.apscheduler import (
+            _render_cron_trigger,
+            _UnsupportedTriggerError,
+        )
+
+        trigger = cron_module.CronTrigger(day=day, hour=12, minute=0, second=0)
+
+        with pytest.raises(_UnsupportedTriggerError, match="day expression"):
+            _render_cron_trigger(trigger)
+
+    @pytest.mark.parametrize(
+        "modifier",
+        [
+            {"start_date": datetime(2026, 8, 5, tzinfo=UTC)},
+            {"end_date": datetime(2026, 8, 5, tzinfo=UTC)},
+            {"jitter": 30},
+        ],
+    )
+    def test_unrepresentable_modifier_fails_closed(
+        self,
+        modifier: dict[str, object],
+    ) -> None:
+        cron_module = pytest.importorskip("apscheduler.triggers.cron")
+        from z4j_scheduler.importers.apscheduler import (
+            _render_cron_trigger,
+            _UnsupportedTriggerError,
+        )
+
+        trigger = cron_module.CronTrigger(minute=0, **modifier)
+
+        with pytest.raises(_UnsupportedTriggerError, match="only modifiers"):
+            _render_cron_trigger(trigger)
+
+    @pytest.mark.parametrize(
+        ("constraint", "expected_detail"),
+        [
+            ({"year": "2026", "minute": 0}, "year='2026'"),
+            ({"week": "1", "minute": 0}, "week='1'"),
+            ({"second": "30", "minute": 0}, "second='30'"),
+            ({"second": "*", "minute": 0}, "second='*'"),
+        ],
+    )
+    def test_dimensions_missing_from_five_field_cron_fail_closed(
+        self,
+        constraint: dict[str, object],
+        expected_detail: str,
+    ) -> None:
+        cron_module = pytest.importorskip("apscheduler.triggers.cron")
+        from z4j_scheduler.importers.apscheduler import (
+            _render_cron_trigger,
+            _UnsupportedTriggerError,
+        )
+
+        trigger = cron_module.CronTrigger(**constraint)
+
+        with pytest.raises(
+            _UnsupportedTriggerError,
+            match="cannot be represented by five-field cron",
+        ) as excinfo:
+            _render_cron_trigger(trigger)
+        assert expected_detail in str(excinfo.value)
+
+    def test_negative_control_old_projection_would_broaden_trigger(self) -> None:
+        cron_module = pytest.importorskip("apscheduler.triggers.cron")
+        from z4j_scheduler.importers.apscheduler import (
+            _render_cron_trigger,
+            _UnsupportedTriggerError,
+        )
+
+        trigger = cron_module.CronTrigger(year="2026", second="30", minute=0)
+
+        def _old_five_field_projection() -> str:
+            values = {
+                field.name: ",".join(str(expr) for expr in field.expressions)
+                for field in trigger.fields
+            }
+            return "{minute} {hour} {day} {month} {day_of_week}".format(**values)
+
+        # Before the fix, both constraints were discarded and this broad
+        # schedule was imported as every hour in every year at second zero.
+        assert _old_five_field_projection() == "0 * * * *"
+        with pytest.raises(_UnsupportedTriggerError):
+            _render_cron_trigger(trigger)
+
+    def test_fresh_importer_loads_persisted_sqlalchemy_jobstore(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        pytest.importorskip("sqlalchemy")
+        aps_jobstore = pytest.importorskip("apscheduler.jobstores.sqlalchemy")
+        aps_scheduler = pytest.importorskip("apscheduler.schedulers.background")
+        aps_date = pytest.importorskip("apscheduler.triggers.date")
+        from datetime import timedelta
+
+        from sqlalchemy.pool import NullPool
+        from z4j_scheduler.importers.apscheduler import read_apscheduler
+
+        db_path = tmp_path / "apscheduler.sqlite"
+        jobstore_url = f"sqlite:///{db_path}"
+
+        writer = aps_scheduler.BackgroundScheduler()
+        writer.add_jobstore(
+            aps_jobstore.SQLAlchemyJobStore(
+                url=jobstore_url,
+                engine_options={"poolclass": NullPool},
+            )
+        )
+        writer_started = False
+        try:
+            writer.start(paused=True)
+            writer_started = True
+            # A future one-shot job remains present for the fresh reader. The
+            # importer starts paused, so enumeration never executes jobs.
+            writer.add_job(
+                "builtins:print",
+                trigger=aps_date.DateTrigger(
+                    run_date=datetime.now(UTC) + timedelta(days=365),
+                ),
+                args=["must not execute during import"],
+                id="persisted-job",
+                misfire_grace_time=60,
+            )
+        finally:
+            if writer_started:
+                writer.shutdown()
+
+        # Negative control for the old importer: a fresh stopped scheduler has
+        # not started its persistent store, so get_jobs() sees no stored rows.
+        stopped_reader = aps_scheduler.BackgroundScheduler()
+        stopped_jobstore = aps_jobstore.SQLAlchemyJobStore(
+            url=jobstore_url,
+            engine_options={"poolclass": NullPool},
+        )
+        stopped_reader.add_jobstore(stopped_jobstore)
+        try:
+            assert stopped_reader.get_jobs(jobstore="default") == []
+        finally:
+            stopped_jobstore.shutdown()
+
+        imported = read_apscheduler(
+            jobstore_url=jobstore_url,
+            project_slug="p",
+        )
+
+        assert [schedule.name for schedule in imported] == ["persisted-job"]
+        assert imported[0].kind == "clocked"
+        assert imported[0].task_name == "builtins:print"

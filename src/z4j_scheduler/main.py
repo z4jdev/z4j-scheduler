@@ -6,7 +6,7 @@ Composes every subsystem into a single asyncio-driven process:
 2. Configures structured logging
 3. Builds + connects the :class:`BrainClient` (gRPC to brain)
 4. Builds the :class:`ScheduleCache`
-5. Builds the leader gate (single-instance default; HA in Phase 3)
+5. Builds the configured leader gate (single-instance or Postgres HA)
 6. Builds the :class:`TickEngine`
 7. Builds the :class:`WatchStream` consumer
 8. Builds the :class:`FireDispatcher`
@@ -195,6 +195,9 @@ class SchedulerApp:
             full_resync_interval_seconds=float(
                 self.settings.reconcile_interval_seconds,
             ),
+            reconnect_backoff_max_seconds=float(
+                self.settings.grpc_reconnect_backoff_max_seconds,
+            ),
             protocol_mode=protocol_mode,
             protocol_selector=lambda: _select_protocol_mode(client),
         )
@@ -218,7 +221,7 @@ class SchedulerApp:
             quarantine_reporter=self._quarantine_reporter,
         )
 
-        # 6.5 TriggerSchedule gRPC server (Phase 2). Off by default.
+        # 6.5 Legacy TriggerSchedule reverse gRPC server. Off by default.
         # Constructed unconditionally so the symmetric stop call in
         # teardown is simple; ``.start()`` short-circuits when
         # disabled. Importing the gRPC runtime is deferred to start()

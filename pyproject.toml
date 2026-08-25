@@ -1,6 +1,6 @@
 [project]
 name = "z4j-scheduler"
-version = "1.8.0"
+version = "1.9.0"
 description = "Engine-agnostic dynamic scheduler for the z4j stack (Apache 2.0)"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -47,34 +47,50 @@ dependencies = [
     # api_key_id) don't fail/downgrade. z4j-scheduler doesn't
     # depend on any 1.2-specific API surface, so the broader
     # range is safe.
-    "z4j-core>=1.8.0,<2",
+    "z4j-core>=1.9.0,<2",
     # Async HTTP server for /health, /ready, /metrics, /info.
     # Same FastAPI as z4j-brain so contributors carry over patterns.
     "fastapi>=0.135",
     "uvicorn[standard]>=0.32",
-    # uvloop is Linux/macOS only; Windows falls back to default
-    # asyncio loop. Per spec §16.2 / §20 / §28 q11.
+    # uvloop is installed only on non-Windows platforms; Windows
+    # falls back to the default asyncio loop.
     "uvloop>=0.21; sys_platform != 'win32'",
     # gRPC server + client (brain <-> scheduler). Async API used
     # throughout. Stubs are committed in src/z4j_scheduler/proto/
     # so the toolchain is build-time only.
     # Floors must match the committed gencode: scheduler_pb2_grpc.py
     # hard-requires grpcio>=1.80.0 and scheduler_pb2.py rejects a protobuf
-    # runtime older than its 6.31.1 gencode, both raised at import time. A
-    # lower floor lets a resolver land a version that crashes the scheduler
-    # on first import of its own stubs.
+    # runtime older than its 6.31.1 gencode. The published protobuf floor is
+    # 6.33.5 because that is the first advisory-fixed runtime; a lower floor
+    # can resolve an unsafe install even though the generated code imports.
     "grpcio>=1.80.0",
-    "protobuf>=6.31.1",
+    "protobuf>=6.33.5",
     # asyncpg directly for advisory locks. No SQLAlchemy at the
     # scheduler level - DB usage is narrow (lock + emergency read).
     "asyncpg>=0.30",
-    # Validation + settings - pinned to match the rest of z4j.
+    # Validation + settings. z4j-core's dependency supplies the effective
+    # Pydantic floor for the coordinated package set.
     "pydantic>=2.9",
     "pydantic-settings>=2.14.2",
-    # Boundary D: cadence is a wire-level persistence contract.  Keep the
-    # complete cadence-affecting dependency closure exact and identical to the
-    # Brain distribution; a floor would let two valid 1.8 installs compute
-    # different successors.
+    # Boundary D: the Brain validates every prepared successor using an
+    # independent implementation.  These exact pins are the complete
+    # cadence-affecting closure and intentionally match z4j.
+    #
+    # tzdata is IANA 2026c. 2026a computes fire times an hour wrong for seven
+    # zones with future effect: Africa/Casablanca and Africa/El_Aaiun from
+    # 2026-09-20, and America/Edmonton, America/Vancouver, America/Yellowknife,
+    # Canada/Mountain and Canada/Pacific from 2026-11-01.
+    #
+    # A change to this closure changes the cadence runtime fingerprint, and the
+    # rollback compatibility carrier must keep computing the same value or the
+    # prepare-runtime-rollback ceremony cannot honestly restamp a cursor. The
+    # carrier therefore carries this same tzdata, so the sealed rollback target
+    # stays byte-equal to this closure. Published 1.8 is untouched: its own
+    # bytes are unchanged and it is never asked to agree with this closure
+    # except through that ceremony.
+    #
+    # Both distributions move together or the closure is not exact, and the
+    # carrier moves with them or the rollback target is not reachable.
     "croniter==6.2.2",
     "python-dateutil==2.9.0.post0",
     "six==1.17.0",
@@ -85,7 +101,7 @@ dependencies = [
     "astral==3.2",
     # Pinned IANA tzdata so deployments are deterministic across
     # base images that may ship stale /usr/share/zoneinfo.
-    "tzdata==2026.1",
+    "tzdata==2026.3",
     # Same logging stack as the rest of z4j - structured JSON in
     # prod, pretty console in dev.
     "structlog>=25.1",
@@ -105,7 +121,7 @@ dependencies = [
 # celery itself, which is heavyweight.
 celery-import = ["celery>=5.6", "django-celery-beat>=2.7"]
 rq-import = ["rq>=2.0", "rq-scheduler>=0.14"]
-apscheduler-import = ["apscheduler>=3.10"]
+apscheduler-import = ["apscheduler[sqlalchemy]>=3.10,<4"]
 
 [project.scripts]
 z4j-scheduler = "z4j_scheduler.cli:main"
@@ -118,7 +134,7 @@ Issues = "https://github.com/z4jdev/z4j-scheduler/issues"
 Source = "https://github.com/z4jdev/z4j-scheduler"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling==1.32.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]

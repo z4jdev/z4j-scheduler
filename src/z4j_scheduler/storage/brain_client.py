@@ -69,7 +69,6 @@ logger = logging.getLogger("z4j.scheduler.brain_client")
 #: long-lived. Other RPCs get fast deadlines so a hung brain does
 #: not block the tick engine indefinitely.
 _LIST_TIMEOUT_SECONDS = 30.0
-_FIRE_TIMEOUT_SECONDS = 10.0  # the dispatcher applies its own outer retry
 _ACK_TIMEOUT_SECONDS = 5.0
 _PING_TIMEOUT_SECONDS = 3.0
 _NEGOTIATE_TIMEOUT_SECONDS = 5.0
@@ -147,8 +146,8 @@ class BrainClient:
 
         if self._settings.insecure_grpc:
             # Insecure-channel path. The Settings model_validator
-            # enforces this is only allowed when environment is not
-            # 'production'. Loud log line so operators see the
+            # enforces this is only allowed when environment is exactly
+            # 'dev'. Loud log line so operators see the
             # security trade-off in their startup output.
             logger.warning(
                 "z4j.scheduler.brain_client: using INSECURE gRPC "
@@ -275,7 +274,7 @@ class BrainClient:
         )
         response = await stub.FireSchedule(
             request,
-            timeout=_FIRE_TIMEOUT_SECONDS,
+            timeout=float(self._settings.fire_timeout_seconds),
         )
         return parse_fire_response(response)
 

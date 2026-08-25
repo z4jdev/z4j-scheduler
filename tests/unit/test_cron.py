@@ -9,6 +9,7 @@ straightforward semantics.
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from typing import ClassVar
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -291,3 +292,182 @@ class TestFiresBetween:
         assert len(slots) == 5
         assert slots[-1] == until
         assert slots[0] == until - timedelta(seconds=4)
+
+
+class TestPackagedZoneinfoIsPlatformIndependent:
+    """Zone lookup is exact membership in the wheel's own manifest.
+
+    This function used to approximate ``ZoneInfo``'s rules by inspecting the
+    key as a string -- reject a leading "/", reject backslashes, reject a
+    drive qualifier, reject "." and ".." segments -- and then trust the
+    filesystem to resolve the rest. Every version of that guard was wrong
+    somewhere, because a filesystem lookup is not a set membership test:
+    Windows is case-insensitive, so ``AMERICA/NEW_YORK`` and
+    ``America./New_York`` LOADED there and did not on Linux. Published 1.8
+    rejected both, because bare ``ZoneInfo`` looks the key up exactly. So a
+    Windows Brain accepted timezones its Linux scheduler could not fire.
+
+    The wheel ships ``tzdata/zones``, an explicit manifest of all 598 names,
+    so membership answers it exactly and identically on every platform, with
+    no filesystem access to get wrong.
+
+    A transient I/O failure on a zone that IS in the manifest must NOT become
+    ``ZoneInfoNotFoundError``: the misfire detector treats an unresolvable
+    zone as UTC, so masking EMFILE that way manufactures a false misfire --
+    an audit row, an automation and a delivery fanout for a schedule running
+    on time. It propagates instead, which is what 1.8 did.
+
+    Both the scheduler and brain copies are asserted, because they are
+    independent implementations of the same Boundary D primitive and are only
+    useful while they agree.
+    """
+
+    # (key, loadable). The false cases are every shape a previous guard got
+    # wrong on at least one platform.
+    CASES: ClassVar[list[tuple[str, bool]]] = [
+        ("America", False),  # a directory
+        ("America/Argentina", False),  # a nested directory
+        ("Etc", False),  # a directory
+        ("UTC/foo", False),  # a FILE used as a directory
+        ("Foo/Bar", False),  # simply absent
+        ("america/New_York", False),  # wrong case: LOADED on Windows
+        ("AMERICA/NEW_YORK", False),  # wrong case: LOADED on Windows
+        ("America./New_York", False),  # trailing dot: LOADED on Windows
+        ("localtime", False),  # exists in a host tzdb, never in the wheel
+        ("J:/UTC", False),  # drive-qualified
+        ("UTC", True),
+        ("US/Pacific", True),  # legacy link
+        ("Etc/GMT+5", True),  # '+' in the name
+        ("America/Argentina/Buenos_Aires", True),  # three segments
+    ]
+
+    @staticmethod
+    def _scheduler_loader():
+        from z4j_scheduler.tick._runtime import (
+            packaged_zoneinfo as scheduler_loader,
+        )
+
+        return scheduler_loader
+
+    @staticmethod
+    def _brain_loader():
+        # z4j-scheduler ships as its own repository and does NOT depend on the
+        # brain, so an unguarded ``from z4j_brain...`` here passes in this
+        # workspace and fails in the standalone polyrepo mirror. The brain half
+        # is real coverage where both are installed, and skipped where only the
+        # scheduler is -- the house convention, matching
+        # tests/integration/test_brain_scheduler_e2e.py.
+        brain = pytest.importorskip(
+            "z4j_brain.domain.schedule_runtime",
+            reason="brain not installed; scheduler-only checkout",
+        )
+        return brain.packaged_zoneinfo
+
+    def _assert_unloadable_keys(self, *, name: str, loader) -> None:
+        from zoneinfo import ZoneInfoNotFoundError
+
+        for key, loadable in self.CASES:
+            if loadable:
+                continue
+            try:
+                loader(key)
+            except ZoneInfoNotFoundError:
+                continue
+            except OSError as exc:  # pragma: no cover - the defect
+                msg = (
+                    f"{name} loader leaked {type(exc).__name__} for {key!r}; "
+                    "tick/cron.py catches ZoneInfoNotFoundError only, so this "
+                    "escapes the tick engine"
+                )
+                raise AssertionError(msg) from exc
+            else:  # pragma: no cover - the defect
+                msg = f"{name} loader unexpectedly loaded {key!r}"
+                raise AssertionError(msg)
+
+    def _assert_valid_zones(self, *, name: str, loader) -> None:
+        # The guard against over-catching: broadening the except must not
+        # start rejecting zones that legitimately resolve.
+        for key, loadable in self.CASES:
+            if not loadable:
+                continue
+            assert loader(key) is not None, f"{name} loader lost {key!r}"
+
+    def test_scheduler_unloadable_keys_raise_zoneinfonotfound_not_oserror(self) -> None:
+        self._assert_unloadable_keys(
+            name="scheduler",
+            loader=self._scheduler_loader(),
+        )
+
+    def test_scheduler_valid_zones_still_load(self) -> None:
+        self._assert_valid_zones(
+            name="scheduler",
+            loader=self._scheduler_loader(),
+        )
+
+    def test_brain_unloadable_keys_raise_zoneinfonotfound_not_oserror(self) -> None:
+        self._assert_unloadable_keys(
+            name="brain",
+            loader=self._brain_loader(),
+        )
+
+    def test_brain_valid_zones_still_load(self) -> None:
+        self._assert_valid_zones(
+            name="brain",
+            loader=self._brain_loader(),
+        )
+
+    def test_both_implementations_agree_on_every_case(self) -> None:
+        from zoneinfo import ZoneInfoNotFoundError
+
+        def outcome(loader, key: str) -> str:
+            try:
+                loader(key)
+            except ZoneInfoNotFoundError:
+                return "not-found"
+            except Exception as exc:  # recording the outcome, not handling it
+                return f"raised:{type(exc).__name__}"
+            return "loaded"
+
+        scheduler_loader = self._scheduler_loader()
+        brain_loader = self._brain_loader()
+        for key, _ in self.CASES:
+            assert outcome(scheduler_loader, key) == outcome(brain_loader, key), (
+                f"the two Boundary D loaders disagree on {key!r}"
+            )
+
+    def test_transient_io_on_a_real_zone_is_not_reported_as_missing(self) -> None:
+        """EMFILE on a valid zone must propagate, not become not-found.
+
+        ``misfire_detector.cron_next_fire`` catches ZoneInfoNotFoundError and
+        substitutes UTC, so a loader that maps every OSError to that type turns
+        a transient file-descriptor exhaustion into a wrong expected fire time
+        -- and the detector then raises a false ``scheduler.misfire_detected``,
+        a ``schedule.misfired`` automation and a delivery fanout for a schedule
+        that is running exactly on time. 1.8 let the I/O error propagate into
+        supervisor backoff, which is the right shape: retry, do not conclude.
+        """
+        from zoneinfo import ZoneInfoNotFoundError
+
+        import z4j_scheduler.tick._runtime as runtime
+
+        class _Exhausted:
+            def joinpath(self, *args: object) -> _Exhausted:
+                return self
+
+            def open(self, *args: object, **kwargs: object) -> None:
+                raise OSError(24, "Too many open files")
+
+        real = runtime.resources.files
+        runtime.resources.files = lambda pkg: real(pkg) if pkg == "tzdata" else _Exhausted()
+        runtime.packaged_zoneinfo.cache_clear()
+        try:
+            with pytest.raises(OSError) as caught:
+                runtime.packaged_zoneinfo("America/New_York")
+            assert not isinstance(caught.value, ZoneInfoNotFoundError), (
+                "a transient I/O error on a zone the wheel DOES offer was "
+                "reported as a missing zone; the misfire detector would "
+                "silently fall back to UTC and flag an on-time schedule"
+            )
+        finally:
+            runtime.resources.files = real
+            runtime.packaged_zoneinfo.cache_clear()

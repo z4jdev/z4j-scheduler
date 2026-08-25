@@ -17,8 +17,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 from tests.benchmarks.bench_celery_beat_compare import (
     bench_memory_per_schedule,
     bench_next_fire_cost,
@@ -173,11 +171,10 @@ class TestPersistedReportShape:
 
     def test_committed_report_parses(self) -> None:
         path = Path(__file__).parent.parent / "benchmarks" / "results" / "celery_beat_compare.json"
-        if not path.exists():
-            pytest.skip(
-                "committed report missing; run "
-                "`python -m tests.benchmarks.bench_celery_beat_compare` first",
-            )
+        assert path.is_file(), (
+            "committed report missing; run "
+            "`python -m tests.benchmarks.bench_celery_beat_compare` first"
+        )
         report = json.loads(path.read_text())
         # Top-level shape that the README + the renderer rely on.
         assert "generated" in report

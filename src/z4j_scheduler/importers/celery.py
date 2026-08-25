@@ -26,7 +26,7 @@ Per-source notes:
   source - the crontab object is the canonical truth.
 - celery's ``timedelta(seconds=N)`` -> ``kind="interval"`` with the
   expression ``"<N>s"``.
-- django-celery-beat's ``ClockedSchedule`` -> ``kind="one_shot"`` with
+- django-celery-beat's ``ClockedSchedule`` -> ``kind="clocked"`` with
   the ISO-8601 timestamp.
 - ``SolarSchedule`` is mapped to ``kind="solar"`` with the
   expression ``"<event>:<lat>:<lon>"``. Pre-1.1 we emitted a
@@ -74,7 +74,7 @@ def read_celery_app(
         default_queue: Queue applied to schedules whose entry has no
             explicit ``queue`` option. ``None`` lets brain fall back
             to the project's default queue.
-        default_timezone: Timezone applied to interval/one_shot
+        default_timezone: Timezone applied to interval/clocked
             schedules. crontab schedules carry their own ``tz``
             field and override this default.
 
@@ -279,7 +279,7 @@ def _periodic_task_to_schedule(
         kind = "interval"
         tz = "UTC"
     elif task.clocked is not None:
-        kind = "one_shot"
+        kind = "clocked"
         expression = task.clocked.clocked_time.isoformat()
         tz = "UTC"
     elif task.solar is not None:

@@ -8,9 +8,9 @@
 //   z4j-scheduler:  src/z4j_scheduler/proto/scheduler_pb2{,_grpc}.py
 //   z4j-brain:      backend/src/z4j_brain/scheduler_grpc/proto/scheduler_pb2{,_grpc}.py
 //
-// Authentication: mTLS. No bearer tokens. The scheduler is treated
-// as a peer service inside the operator's trusted network, not as
-// an untrusted agent. See docs/SCHEDULER.md §22.
+// Production authentication is mTLS; this service has no bearer-token
+// authentication. An explicit development-only setting permits a plaintext
+// channel in the exact `dev` environment. See docs/SCHEDULER.md §22.
 //
 // Versioning: protobuf field numbers are stable. Add new fields by
 // reserving a new number; never reuse a number for a different
@@ -27,13 +27,12 @@ import "google/protobuf/timestamp.proto";
 // SchedulerService is implemented by both sides depending on
 // direction:
 //
-//  - Brain implements: ListSchedules, WatchSchedules, FireSchedule,
-//    AcknowledgeFireResult, Ping. Scheduler is the gRPC client for
-//    these.
+//  - Brain implements every RPC below except TriggerSchedule. Scheduler is
+//    the gRPC client for these brain-side RPCs.
 //
-//  - Scheduler implements: TriggerSchedule (operator-initiated
-//    manual fires originating from the dashboard). Brain is the
-//    gRPC client for this one.
+//  - Scheduler implements the legacy TriggerSchedule reverse RPC. It is off
+//    by default and retained for a Brain predating durable schedule control.
+//    A current Brain dispatches operator manual fires directly.
 //
 // In practice this is two separate gRPC services on different
 // ports; we declare them as one logical service here for clarity.
@@ -44,9 +43,9 @@ service SchedulerService {
     // incrementally.
     rpc ListSchedules(ListSchedulesRequest) returns (stream Schedule);
 
-    // Subscribe to schedule changes. Server-streaming. Brain pushes
-    // events on every create/update/delete so the scheduler updates
-    // its in-memory tick wheel within 100ms.
+    // Subscribe to schedule changes. Server-streaming. PostgreSQL uses
+    // LISTEN/NOTIFY for this legacy stream; SQLite polls at the configured
+    // watch interval. Delivery latency is therefore backend-dependent.
     rpc WatchSchedules(WatchSchedulesRequest) returns (stream ScheduleEvent);
 
     // Scheduler tells brain to fire a schedule. Brain creates a
@@ -55,15 +54,16 @@ service SchedulerService {
     // agent's actual completion comes back via AcknowledgeFireResult.
     rpc FireSchedule(FireScheduleRequest) returns (FireScheduleResponse);
 
-    // Operator-initiated manual fire. Same wire effect as
-    // FireSchedule but tagged differently in the audit log so the
-    // operator-clicked vs schedule-tick distinction is preserved.
-    // Brain calls scheduler (reverse direction).
+    // Legacy operator-initiated manual-fire path from Brain to scheduler.
+    // Current Brain versions dispatch manual fires directly, and the
+    // scheduler-side server is disabled by default. Retained for wire
+    // compatibility with a Brain predating durable schedule control.
     rpc TriggerSchedule(TriggerScheduleRequest) returns (TriggerScheduleResponse);
 
-    // Brain calls back when the agent has acknowledged + executed
-    // the fire. Scheduler updates last_run_at + computes next_run_at
-    // for the schedule.
+    // Scheduler reports its terminal FireSchedule receipt back to Brain.
+    // Current cadence progress is already committed in FireSchedule; this
+    // receipt records history, audit and notifications. The legacy path also
+    // updates the schedule projection.
     rpc AcknowledgeFireResult(AcknowledgeFireResultRequest)
         returns (AcknowledgeFireResultResponse);
 

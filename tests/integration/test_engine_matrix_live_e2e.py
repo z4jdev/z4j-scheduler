@@ -6,27 +6,26 @@ deeper: for each engine where in-process execution is feasible,
 the test makes the engine ACTUALLY EXECUTE the task body (not
 just enqueue) and asserts a sentinel side-effect happened.
 
-Scope: in-process / in-memory brokers only. We do not stand up
-Redis, RabbitMQ, etc. - that's the docker-compose harness's job
-(tracked separately for the production-hardening backlog).
+Scope: in-process / in-memory brokers only. The sibling
+``test_engine_matrix_redis_e2e.py`` owns the requested real-Redis
+lane and fails closed when ``Z4J_REQUIRE_REAL_BROKER_E2E=1``.
 
 Engine coverage matrix
 ======================
 
 | Engine    | In-process execution feasible? | Why / what we test |
 |-----------|--------------------------------|--------------------|
-| celery    | ❌                              | ``send_task`` (the adapter's primitive) ignores ``task_always_eager``. Live execution requires a real broker; covered by docker harness. |
-| rq        | ❌                              | Needs Redis. Dispatch boundary covered by per-adapter test. |
+| celery    | ✅                              | Locally registered task + eager mode runs synchronously; real Redis is covered by the sibling lane. |
+| rq        | ❌                              | Needs Redis; covered by the sibling real-broker lane. |
 | dramatiq  | ✅                              | StubBroker + in-process Worker drains the queue and runs the actor. |
 | huey      | ✅                              | ``MemoryHuey(immediate=True)`` runs tasks synchronously. |
-| arq       | ❌                              | Needs Redis. Dispatch boundary covered. |
-| taskiq    | ⚠️ partial                       | InMemoryBroker enqueues but only executes on ``await sent.wait_result()``; the adapter (correctly) does not block. Dispatch boundary covered. |
+| arq       | ❌                              | Needs Redis; covered by the sibling real-broker lane. |
+| taskiq    | ❌                              | No live execution evidence in this module; dispatch-only coverage is not counted as execution. |
 
-So this file delivers live-execution e2e for **dramatiq + huey**.
-The other 4 engines have their dispatch boundary covered by
-``test_engine_matrix_e2e.py`` + per-adapter ``test_dispatcher_
-integration.py``; live execution against their real brokers is
-the docker-compose harness scope (next item on the backlog).
+So this file delivers live-execution e2e for **celery + dramatiq +
+huey**. RQ and arq live in the sibling real-broker module. Taskiq
+currently has dispatch-only coverage and is stated as a gap rather
+than represented by a permanently skipped placeholder.
 
 What this proves
 ================
@@ -42,9 +41,8 @@ For each engine where in-process execution is feasible:
 What this does NOT prove
 ========================
 
-- Real-broker scheduling against Redis / RabbitMQ. The docker-
-  compose harness in the production-hardening backlog covers
-  that.
+- Real-broker scheduling against Redis / RabbitMQ. The sibling
+  real-broker module covers Redis for celery, RQ, and arq.
 - Cross-process delivery. Everything here runs in one Python
   process.
 - Failure / retry semantics. Per-engine retry tests live in
@@ -337,37 +335,3 @@ async def test_schedule_fire_actually_runs_task(
 
     # The task body actually ran (sentinel mutated).
     assert_executed()
-
-
-# =====================================================================
-# Engines requiring real brokers (Redis) - skipped without containers
-# =====================================================================
-
-
-@pytest.mark.parametrize("engine_name", ["rq", "arq", "taskiq"])
-def test_real_broker_engines_documented_as_docker_compose_scope(
-    engine_name: str,
-) -> None:
-    """celery / rq / arq / taskiq require a real broker (or
-    explicit blocking ``wait_result``) to execute tasks end-to-end.
-
-    Their per-engine ``test_dispatcher_integration.py`` files
-    cover the dispatch boundary with recording fakes; full
-    end-to-end execution against a live Redis broker is the
-    docker-compose harness's scope (see
-    ``docker-compose.scheduler-test.yml`` in the repo root for
-    the scaffold).
-
-    This test is a placeholder so the engine matrix in CI shows
-    explicit "skipped, deferred to docker harness" instead of
-    silently missing coverage.
-    """
-    pytest.skip(
-        f"engine={engine_name}: live-broker execution requires a "
-        f"real broker (celery/rq/arq: Redis or RabbitMQ; taskiq: "
-        f"AsyncResultBackend with blocking wait_result). Dispatch "
-        f"boundary is covered by packages/z4j-{engine_name}/tests/"
-        f"unit/test_dispatcher_integration.py + the matrix at "
-        f"tests/integration/test_engine_matrix_e2e.py. Real-broker "
-        f"execution is the docker-compose harness's scope.",
-    )

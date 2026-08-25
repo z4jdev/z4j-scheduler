@@ -31,6 +31,10 @@ worker actually invoked the function.
 This closes the "Live broker e2e" backlog item from the audit
 report for celery / rq / arq, in addition to the dramatiq +
 huey coverage in ``test_engine_matrix_live_e2e.py``.
+
+Set ``Z4J_REQUIRE_REAL_BROKER_E2E=1`` in a release lane.  In that
+mode a missing ``REDIS_URL`` or missing engine dependency is a
+failure, never a skip or fakeredis fallback.
 """
 
 from __future__ import annotations
@@ -38,6 +42,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import gc
+import importlib
 import json
 import os
 from pathlib import Path
@@ -50,6 +55,12 @@ from z4j_core.transport.frames import CommandFrame, CommandPayload
 from tests.integration.helpers import live_tasks
 
 _REDIS_URL = os.environ.get("REDIS_URL")
+_REQUIRE_REAL_BROKER = os.environ.get("Z4J_REQUIRE_REAL_BROKER_E2E", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 
 # NOTE on resource hygiene: the suite-wide ``filterwarnings = error``
@@ -85,6 +96,27 @@ def _have_fakeredis() -> bool:
         return True
     except ImportError:
         return False
+
+
+def _require_engine_module(name: str) -> None:
+    """Import an engine dependency, failing closed in the requested lane."""
+
+    try:
+        importlib.import_module(name)
+    except ImportError as exc:
+        message = f"real-broker lane requires importable engine dependency {name!r}: {exc}"
+        if _REQUIRE_REAL_BROKER:
+            pytest.fail(message)
+        pytest.skip(message)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _requested_lane_has_real_redis() -> None:
+    if _REQUIRE_REAL_BROKER and not _REDIS_URL:
+        pytest.fail(
+            "Z4J_REQUIRE_REAL_BROKER_E2E is set but REDIS_URL is missing; "
+            "the requested release lane may not fall back to fakeredis or skip",
+        )
 
 
 def _make_redis_connection():
@@ -149,7 +181,7 @@ async def test_rq_live_e2e_through_dispatcher(
 ) -> None:
     """schedule.fire → RQ adapter → real(ish) Redis queue → worker
     drains → task body runs (counter increments)."""
-    pytest.importorskip("rq")
+    _require_engine_module("rq")
     from rq import Queue
     from z4j_rq.engine import RqEngineAdapter
 
@@ -252,7 +284,7 @@ def _drain_rq(queue, conn) -> None:
 async def test_arq_live_e2e_through_dispatcher(buf: BufferStore) -> None:
     """schedule.fire → arq adapter → real(ish) Redis pool → arq
     Worker drains → task body runs."""
-    pytest.importorskip("arq")
+    _require_engine_module("arq")
     if not _REDIS_URL:
         pytest.skip(
             "arq requires a real (not fake) Redis - fakeredis "
@@ -407,7 +439,7 @@ async def test_celery_live_e2e_through_dispatcher(buf: BufferStore) -> None:
     Uses the same shared ``live_tasks`` module so the celery worker
     can import the task by name.
     """
-    pytest.importorskip("celery")
+    _require_engine_module("celery")
     if not _REDIS_URL:
         pytest.skip(
             "celery live e2e requires a real Redis broker. Set "

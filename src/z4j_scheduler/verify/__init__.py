@@ -1,21 +1,16 @@
-"""Verification helpers for the migration cutover.
+"""Verification helpers for schedule predictions.
 
-Two complementary checks operators can run before flipping their
-canonical scheduler from celery-beat (or rq-scheduler / APScheduler /
-cron) to z4j-scheduler:
+The CLI currently exposes one operator check before a scheduler cutover:
 
 - ``import --verify`` (existing, in :mod:`z4j_scheduler.cli`):
   compares the source-of-truth dict against brain's current schedule
   state and prints an INSERT / UPDATE / UNCHANGED / DELETE diff.
   Catches configuration drift at re-import time.
 
-- ``import --verify --duration <window>`` (new, lives here): walks
-  the next ``window`` of time and predicts every fire each side
-  would issue. Reports timing divergence and any fires only one
-  side would emit. Catches importer translation bugs and timezone
-  misconfigurations BEFORE the operator actually swaps the
-  scheduler. This is the §17.1 promise from
-  ``docs/SCHEDULER.md``.
+The lower-level helpers in this package can compare two independently
+constructed prediction lists. The import CLI does not yet have an independent
+source-side oracle, so ``import --verify --duration`` fails closed instead of
+self-comparing one list and reporting a false-safe cutover.
 """
 
 from z4j_scheduler.verify.shadow_comparator import (

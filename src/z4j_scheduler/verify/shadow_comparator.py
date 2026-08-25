@@ -1,20 +1,12 @@
-"""Shadow-mode fire comparator for the migration cutover.
+"""Compare independently constructed schedule-fire predictions.
 
-The §17.1 promise from ``docs/SCHEDULER.md``:
+This module supplies the prediction model and comparison primitive; it does
+not obtain the two independent inputs itself. A caller must derive the source
+and target lists from distinct representations. In particular, predicting
+twice from one importer's normalized output cannot detect importer
+translation drift and must not be presented as cutover proof.
 
-  z4j-scheduler import --from celery --config ... --verify --duration 24h
-
-  "Watches both the original celery-beat AND the new z4j-scheduler
-  for 24 hours. Reports any divergence in fire timing, args, queues,
-  or results."
-
-Strategy. We do not actually run two schedulers in parallel - that
-requires standing up real infrastructure for both sides and
-correlating fires post-hoc, which is fragile + slow. Instead, both
-sides are deterministic given (cron/interval expression, timezone,
-current time): we compute the predicted fire times for each
-schedule on each side and compare the two lists. The interesting
-divergence cases are:
+When a caller has independent inputs, the interesting divergence cases are:
 
 - **Importer translation bugs.** Operator's celery
   ``crontab(minute='*/15', hour='9-17')`` should translate to the
@@ -31,9 +23,8 @@ divergence cases are:
   should carry identical task args. If not, the importer dropped
   data.
 
-Because the comparison is deterministic, the operator can run it
-locally in seconds even for a 7-day window with hundreds of
-schedules - no need to wait for wall-clock time to pass.
+Because the comparison is deterministic, a caller can run it locally in
+seconds even for a 7-day window with hundreds of schedules.
 """
 
 from __future__ import annotations
@@ -138,7 +129,7 @@ def predict_fires(
             out.extend(_predict_cron(sched, window_start, window_end))
         elif sched.kind == "interval":
             out.extend(_predict_interval(sched, window_start, window_end))
-        elif sched.kind == "one_shot":
+        elif sched.kind in ("clocked", "one_shot"):
             out.extend(_predict_one_shot(sched, window_start, window_end))
         elif sched.kind == "solar":
             out.extend(_predict_solar(sched, window_start, window_end))
@@ -286,13 +277,44 @@ def _predict_one_shot(
 
 
 def _resolve_tz(name: str):
-    """Resolve a timezone name to a tzinfo. Falls through to UTC."""
+    """Resolve a timezone name to a tzinfo. Falls through to UTC.
+
+    Resolution goes through :func:`packaged_zoneinfo`, the same
+    release-pinned ``tzdata`` wheel the tick engine reads, NOT through
+    bare ``ZoneInfo`` -- which searches the host's ``/usr/share/zoneinfo``
+    first and only falls back to the wheel.
+
+    The two sources genuinely disagree. The shipped image
+    (``python:3.14-slim-trixie``) carries IANA 2026b while the pinned
+    wheel is 2026a. Measured in that exact pairing, sweeping every
+    available zone at six-hour resolution across 2020-2035, they differ
+    on exactly ONE: ``America/Vancouver``, from 2026-11-01, where Canada
+    drops the autumn fall-back.
+
+    Reading the host tzdb here made this comparator predict fires an hour
+    away from the engine it exists to check, for that zone -- a
+    divergence report caused by the comparator rather than by the import
+    it is auditing. Timezone misconfiguration is one of the four
+    divergence classes named in this module's docstring, so getting it
+    wrong here is a false result on the tool's own headline case.
+
+    A note for whoever re-derives this, because it has been stated
+    wrongly more than once. The answer depends on WHICH PAIRING you
+    measure, and on the pin. Host-against-wheel (this paragraph) is not
+    the same set as wheel-against-wheel: 2026.1 against 2026.3 is seven
+    zones, which is the justification for the tzdata correction this
+    release carries. Re-measure rather than trusting either number.
+
+    The UTC fallback below is unchanged and deliberate: an unparseable
+    zone is reported by the importer's earlier pass, and this function
+    does not double-warn.
+    """
     if not name or name == "UTC":
         return UTC
     try:
-        from zoneinfo import ZoneInfo
+        from z4j_scheduler.tick._runtime import packaged_zoneinfo
 
-        return ZoneInfo(name)
+        return packaged_zoneinfo(name)
     except Exception:
         return UTC
 

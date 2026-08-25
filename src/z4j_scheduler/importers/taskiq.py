@@ -21,7 +21,7 @@ Supported schedule label shapes (matching
 ``taskiq.scheduler.scheduled_task.ScheduledTask``):
 
 - ``{"cron": "0 3 * * *"}`` → ``kind="cron"``
-- ``{"time": "2026-12-31T23:59:59Z"}`` → ``kind="one_shot"``
+- ``{"time": "2026-12-31T23:59:59Z"}`` → ``kind="clocked"``
 - Anything else is logged + skipped (operator can hand-create in
   the dashboard).
 
@@ -180,7 +180,7 @@ def _label_entry_to_schedule(
             project_slug=project_slug,
             name=schedule_name,
             engine=engine,
-            kind="one_shot",
+            kind="clocked",
             expression=when,
             task_name=task_name,
             timezone=default_timezone,

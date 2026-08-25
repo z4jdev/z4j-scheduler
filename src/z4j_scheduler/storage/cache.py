@@ -60,6 +60,36 @@ class LocalQuarantine:
     detail: str
 
 
+@dataclass(frozen=True, slots=True)
+class CurrentStop:
+    """Process-local stop held until Brain state supersedes what refused a fire.
+
+    Two facts, because the control token alone cannot end the stop. A Brain
+    holds a schedule by stamping ``paused_at`` and deliberately keeps the same
+    control token, since a hold does not redefine the schedule. A stop keyed on
+    the token alone therefore survives the release: the resume carries the same
+    token, matches, and re-clamps the row. The schedule stayed dark until the
+    process restarted, which is the one remedy an operator has no reason to
+    reach for.
+
+    ``refused_at_revision`` is the Brain revision the refusal reported as live,
+    and Brain revisions are globally ordered and allocated by every transition
+    including a resume. Once this scheduler holds a row at or past it, it holds
+    the very state that refused the fire, and the stop has done its work: what
+    happens next is decided by that row's own enabled state, which is Brain's
+    to set. A hold still reads as not-enabled on the wire, so releasing the stop
+    does not release the hold.
+
+    A refusal that carries no live revision (Brain answering that the schedule
+    does not exist) leaves this zero, and the stop then ends only when the
+    control generation is superseded or the row is removed. There is no state
+    to wait for, so waiting for none of it would be the wrong default.
+    """
+
+    control_token: UUID
+    refused_at_revision: int
+
+
 class ScheduleProtocolError(RuntimeError):
     """Brain schedule state violated the ordered current protocol."""
 
@@ -85,7 +115,7 @@ class ScheduleCache:
             raise ValueError("max_post_watermark_tombstones must be positive")
         self._entries: dict[UUID, ScheduleEntry] = {}
         self._local_quarantines: dict[UUID, LocalQuarantine] = {}
-        self._current_stop_latches: dict[UUID, UUID] = {}
+        self._current_stop_latches: dict[UUID, CurrentStop] = {}
         self._brain_payloads: dict[UUID, tuple[object, ...]] = {}
         self._id_revisions: dict[UUID, int] = {}
         self._id_projects: dict[UUID, UUID] = {}
@@ -268,13 +298,34 @@ class ScheduleCache:
             return
         incoming.is_enabled = False
 
-    def _apply_current_stop_locked(self, incoming: ScheduleEntry) -> None:
-        """Clamp a terminal/refresh stop until control authority rotates."""
+    @staticmethod
+    def _stop_is_superseded(*, live_revision: int, refused_at_revision: int) -> bool:
+        """Whether Brain state at ``live_revision`` has overtaken a refusal.
 
-        control_token = self._current_stop_latches.get(incoming.id)
-        if control_token is None:
+        Two moments ask this question from opposite sides: one decides whether
+        to install a stop, the other whether to clear one. They have to agree,
+        or a stop can be installed on state that would immediately clear it and
+        then never see a clearing update, so the predicate is written once.
+
+        A refusal carrying no live revision (see :class:`CurrentStop`) is never
+        superseded by a revision, only by a new control generation.
+        """
+
+        return refused_at_revision > 0 and live_revision >= refused_at_revision
+
+    def _apply_current_stop_locked(self, incoming: ScheduleEntry) -> None:
+        """Clamp a terminal/refresh stop until Brain supersedes what refused."""
+
+        stop = self._current_stop_latches.get(incoming.id)
+        if stop is None:
             return
-        if incoming.control_token != control_token:
+        if incoming.control_token != stop.control_token:
+            self._current_stop_latches.pop(incoming.id, None)
+            return
+        if self._stop_is_superseded(
+            live_revision=incoming.schedule_revision,
+            refused_at_revision=stop.refused_at_revision,
+        ):
             self._current_stop_latches.pop(incoming.id, None)
             return
         incoming.is_enabled = False
@@ -328,8 +379,8 @@ class ScheduleCache:
         self,
         schedule_id: UUID,
         *,
-        last_fire_at: datetime | None | _Sentinel = _UNSET,
-        next_fire_at: datetime | None | _Sentinel = _UNSET,
+        last_fire_at: datetime | _Sentinel | None = _UNSET,
+        next_fire_at: datetime | _Sentinel | None = _UNSET,
         is_enabled: bool | None = None,
         expected_definition: ScheduleEntry | None = None,
     ) -> bool:
@@ -494,14 +545,44 @@ class ScheduleCache:
         schedule_id: UUID,
         *,
         expected_control_token: UUID,
+        refused_at_revision: int,
     ) -> bool:
-        """Stop one current generation until an authoritative rotation arrives."""
+        """Stop one current generation until Brain state supersedes the refusal.
+
+        ``refused_at_revision`` is the live revision the refusing Brain
+        reported, and it is required rather than defaulted: a caller with no
+        revision to give is asking for a stop nothing can end, and that has to
+        be a deliberate zero at the call site rather than an omission.
+        See :class:`CurrentStop` for what the stop then waits on.
+
+        Returns False, having stopped nothing, when the Watch stream reached
+        the state that refused the fire (or a later one) before this response
+        got back. The stop exists to wait for exactly that state, so there is
+        nothing left to wait for, and what runs next is the row's own enabled
+        value, which is Brain's to set. Installing a stop here instead would
+        clamp state this scheduler has already caught up to and then wait for
+        an update it has already consumed: a same-revision echo is dropped as
+        a duplicate before any stop is examined, and a disabled row never
+        fires, so Brain is never asked to move it again. The schedule stays
+        dark until the process restarts.
+        """
 
         async with self._lock:
             entry = self._entries.get(schedule_id)
             if entry is None or entry.control_token != expected_control_token:
                 return False
-            self._current_stop_latches[schedule_id] = expected_control_token
+            # Deliberately NOT a token comparison. A hold and its release
+            # carry the same control token by design, so a token that still
+            # matches proves nothing about whether the refusal is stale.
+            if self._stop_is_superseded(
+                live_revision=entry.schedule_revision,
+                refused_at_revision=refused_at_revision,
+            ):
+                return False
+            self._current_stop_latches[schedule_id] = CurrentStop(
+                control_token=expected_control_token,
+                refused_at_revision=max(0, refused_at_revision),
+            )
             entry.is_enabled = False
         self.changed.set()
         return True
@@ -824,4 +905,9 @@ class ScheduleCache:
         return len(self._entries)
 
 
-__all__ = ["LocalQuarantine", "ScheduleCache", "ScheduleProtocolError"]
+__all__ = [
+    "CurrentStop",
+    "LocalQuarantine",
+    "ScheduleCache",
+    "ScheduleProtocolError",
+]

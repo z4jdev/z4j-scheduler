@@ -9,9 +9,8 @@ records. This module owns the pieces that don't vary per source:
 - :func:`render_jsonl` - emit dry-run output as JSON Lines so the
   operator can pipe into ``jq`` or commit alongside the change.
 - :class:`BrainImportClient` - thin HTTP wrapper that POSTs to
-  brain's import endpoint. Implementation tolerates a missing
-  endpoint by writing JSONL to disk for manual upload (so v1 ships
-  even before the brain-side import endpoint lands).
+  brain's import endpoint and reports an actionable error when the
+  connected brain predates that endpoint.
 
 Importer authors only touch source-specific parsing; everything
 post-parse goes through this module to keep the surface narrow.
@@ -27,7 +26,7 @@ from typing import Any, Literal
 
 logger = logging.getLogger("z4j.scheduler.importers")
 
-ImportedKind = Literal["cron", "interval", "one_shot", "solar"]
+ImportedKind = Literal["cron", "interval", "clocked", "solar"]
 ImportedCatchUp = Literal["skip", "fire_one_missed", "fire_all_missed"]
 
 
@@ -39,11 +38,10 @@ class ImportedSchedule:
     z4j-scheduler cares about (``catch_up``, ``source``,
     ``source_hash``).
 
-    ``source_hash`` is computed from ``(name, kind, expression,
-    timezone, task_name, args, kwargs)`` so a re-import of the same
-    source state is a no-op. Importers that re-read after the
-    operator edits the source will produce a different hash and
-    brain treats it as an update.
+    ``source_hash`` covers the execution-affecting imported fields, including
+    engine, cadence, routing, arguments, catch-up policy, and enabled state, so
+    a re-import of the same source state is a no-op. Importers that re-read
+    after the operator edits that state produce a different hash.
 
     ``project_slug`` is required - we deliberately don't infer one
     from the source format because mapping a celery app to a brain
@@ -145,11 +143,9 @@ class BrainImportClient:
     """POST a batch of imported schedules to brain.
 
     Brain's REST API ships an ``/api/v1/projects/{slug}/schedules:import``
-    endpoint that accepts a list of schedule dicts and upserts them.
-    When that endpoint is not yet available (Phase 1 brain) the
-    client falls back to writing JSONL to disk so the operator can
-    upload manually via ``psql`` once they're confident in the
-    output.
+    endpoint that accepts a list of schedule dicts and upserts them. A 404 from
+    an older brain raises ``RuntimeError``; operators can rerun with
+    ``--dry-run`` to capture JSONL after upgrading or for manual inspection.
 
     Construction is cheap; :meth:`upload` opens an HTTPX client per
     call to avoid leaking sockets when the importer is invoked as a

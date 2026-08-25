@@ -27,14 +27,14 @@ if TYPE_CHECKING:  # pragma: no cover
 class SingleInstanceLeaderGate:
     """Always-true leader gate for single-instance deployments.
 
-    Production v1 default. Operators run exactly one scheduler
+    Default mode. Operators run exactly one scheduler
     process per stack and rely on their process supervisor (systemd,
     Docker, k8s) to restart it on failure. Schedule misses during
     the restart window are handled per the schedule's ``catch_up``
     policy.
 
-    HA deployments (Phase 3) swap this for
-    :class:`PgAdvisoryLeaderGate`.
+    HA deployments select a Postgres-backed gate from
+    :mod:`z4j_scheduler.leader.postgres`.
     """
 
     def is_leader(self, project_id: UUID) -> bool:

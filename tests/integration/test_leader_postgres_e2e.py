@@ -1,8 +1,7 @@
 """Integration test: Postgres advisory-lock leader gate with real PG.
 
-Spins up a Postgres container via testcontainers, runs two
-:class:`PostgresAdvisoryLockLeaderGate` instances against it, and
-verifies:
+Runs two :class:`PostgresAdvisoryLockLeaderGate` instances against a shared or
+disposable real PostgreSQL and verifies:
 
 1. Exactly one of the two becomes leader on startup.
 2. Killing the leader (closing its connection) lets the standby
@@ -10,68 +9,62 @@ verifies:
 3. The same namespace key stays stable across processes - both
    instances target the same lock.
 
-Skipped automatically when ``testcontainers`` or ``asyncpg`` is
-not installed, or when Docker is unavailable on the host.
+Uses ``Z4J_TEST_POSTGRES_URL`` when supplied and otherwise starts a disposable
+PostgreSQL through the shared integration fixture.
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
+import os
+import subprocess
+import sys
 import uuid
+from pathlib import Path
 
 import pytest
-
-# Required infra. testcontainers + asyncpg must both be installed,
-# and Docker has to be running for the Postgres container to start.
-pytest.importorskip("testcontainers")
-pytest.importorskip("asyncpg")
-
-from testcontainers.postgres import PostgresContainer
 from z4j_scheduler.leader.postgres import (
     AsyncpgLockBackend,
     PostgresAdvisoryLockLeaderGate,
+    _namespace_to_key,
 )
-
-# =====================================================================
-# Fixtures
-# =====================================================================
-
-
-@pytest.fixture(scope="module")
-def postgres_container():
-    """One Postgres container shared by every test in this module.
-
-    Module-scoped so we don't pay the ~5s container startup per
-    test. Each test uses a unique namespace so locks don't bleed
-    between tests.
-    """
-    try:
-        container = PostgresContainer("postgres:18-alpine")
-        container.start()
-    except Exception as exc:
-        pytest.skip(f"could not start Postgres container: {exc}")
-    yield container
-    with contextlib.suppress(Exception):
-        container.stop()
 
 
 @pytest.fixture
-def asyncpg_dsn(postgres_container) -> str:
-    """Convert the container's URL to an asyncpg-compatible DSN.
-
-    testcontainers returns a SQLAlchemy-style URL
-    (``postgresql+psycopg2://...``); asyncpg needs
-    ``postgresql://...`` without the driver suffix.
-    """
-    raw = postgres_container.get_connection_url()
-    # Strip the SQLAlchemy driver suffix.
-    return raw.replace("postgresql+psycopg2://", "postgresql://")
+def asyncpg_dsn(postgres_url: str) -> str:
+    """Expose the shared fixture's bare asyncpg-compatible URL."""
+    return postgres_url
 
 
 # =====================================================================
 # Tests
 # =====================================================================
+
+
+class TestNamespaceKeyStability:
+    def test_same_namespace_has_same_key_in_separate_processes(self) -> None:
+        namespace = "z4j-scheduler-cross-process-control"
+        script = (
+            "from z4j_scheduler.leader.postgres import _namespace_to_key; "
+            f"print(_namespace_to_key({namespace!r}))"
+        )
+        python_path = os.pathsep.join(entry or str(Path.cwd()) for entry in sys.path)
+        observed: list[int] = []
+        for hash_seed in ("1", "8675309"):
+            env = os.environ.copy()
+            env["PYTHONHASHSEED"] = hash_seed
+            env["PYTHONPATH"] = python_path
+            completed = subprocess.run(
+                [sys.executable, "-c", script],
+                check=True,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            observed.append(int(completed.stdout.strip()))
+
+        expected = _namespace_to_key(namespace)
+        assert observed == [expected, expected]
 
 
 class TestSingleInstance:

@@ -416,7 +416,10 @@ class TestFullSyncDeleteSweep:
 class TestPeriodicResync:
     """The periodic timer fires independent of watch-stream health."""
 
-    async def test_zero_interval_disables_timer(self) -> None:
+    async def test_zero_interval_disables_timer(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         # Operator opt-out path: setting the interval to 0 turns off
         # the periodic loop. Useful for tests and for very-low-RPS
         # deployments where every list call is wasted work.
@@ -427,12 +430,31 @@ class TestPeriodicResync:
             cache=cache,
             full_resync_interval_seconds=0,
         )
+
+        watch_started = asyncio.Event()
+        periodic_started = asyncio.Event()
+
+        async def controlled_watch_loop() -> None:
+            watch_started.set()
+            await watch._stop_event.wait()
+
+        async def forbidden_periodic_loop() -> None:
+            periodic_started.set()
+            await watch._stop_event.wait()
+
+        monkeypatch.setattr(watch, "_watch_loop", controlled_watch_loop)
+        monkeypatch.setattr(watch, "_periodic_resync_loop", forbidden_periodic_loop)
+
         task = asyncio.create_task(watch.run())
-        await asyncio.sleep(0.05)
-        await watch.stop()
-        await asyncio.wait_for(task, timeout=1.0)
-        # No periodic task means the only sync attempts came from
-        # the watch loop's reconnect path.
+        try:
+            await asyncio.wait_for(watch_started.wait(), timeout=1.0)
+            # Let every task created by ``run`` take a scheduling turn.  If the
+            # zero guard regresses, the patched periodic loop becomes observable.
+            await asyncio.sleep(0)
+            assert not periodic_started.is_set()
+        finally:
+            await watch.stop()
+            await asyncio.wait_for(task, timeout=1.0)
 
     async def test_periodic_timer_fires_full_sync(self) -> None:
         # Drive the timer with a very short interval and a list
@@ -547,3 +569,33 @@ class TestStopAndRun:
         assert task.done()
         # Reconnect counter incremented at least once.
         assert watch._reconnect_attempts >= 1
+
+    async def test_reconnect_backoff_honors_configured_cap(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cache = ScheduleCache()
+        client = FakeBrainClient()
+        watch = WatchStream(
+            client=client,  # type: ignore[arg-type]
+            cache=cache,
+            reconnect_backoff_max_seconds=0.25,
+        )
+        watch._reconnect_attempts = 20
+        captured: list[float] = []
+
+        async def _capture_wait(
+            awaitable: object,
+            *,
+            timeout: float,  # noqa: ASYNC109 - asyncio.wait_for test double
+        ) -> None:
+            captured.append(timeout)
+            awaitable.close()  # type: ignore[attr-defined]
+            raise TimeoutError
+
+        monkeypatch.setattr("z4j_scheduler.storage.watch.random.uniform", lambda *_: 0.0)
+        monkeypatch.setattr("z4j_scheduler.storage.watch.asyncio.wait_for", _capture_wait)
+
+        await watch._backoff_or_stop()
+
+        assert captured == [0.25]

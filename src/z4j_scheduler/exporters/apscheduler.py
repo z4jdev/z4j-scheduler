@@ -47,13 +47,21 @@ def _render_one(sched: ExportedSchedule) -> list[str]:
     # startup. Same fix applied to celery + rq exporters.
     args_repr = py_repr(list(sched.args))
     kwargs_repr = py_repr(dict(sched.kwargs))
-    enabled_kw = ", paused=True" if not sched.is_enabled else ""
+    # APScheduler 3.x textual callable references use ``module:callable``.
+    # For z4j's conventional colonless ``module.callable`` form, the final
+    # component is *defined* to be the callable and every preceding component
+    # is the module.  Nested callable paths are necessarily ambiguous without
+    # a separator and must therefore use the explicit ``module:Class.method``
+    # form.  Reject names that cannot name a Python object rather than emitting
+    # a script APScheduler will reject at startup.
+    task_ref = _task_ref(sched.task_name)
+    enabled_kw = ", next_run_time=None" if not sched.is_enabled else ""
 
     if sched.kind == "cron":
         cron_kwargs = _cron_to_kwargs(sched.expression)
         return [
             "    scheduler.add_job(",
-            f"        {json.dumps(sched.task_name)},",
+            f"        {json.dumps(task_ref)},",
             '        "cron",',
             *[f"        {key}={json.dumps(value)}," for key, value in cron_kwargs.items()],
             f"        timezone={json.dumps(sched.timezone)},",
@@ -70,7 +78,7 @@ def _render_one(sched: ExportedSchedule) -> list[str]:
         seconds = _interval_to_seconds(sched.expression)
         return [
             "    scheduler.add_job(",
-            f"        {json.dumps(sched.task_name)},",
+            f"        {json.dumps(task_ref)},",
             '        "interval",',
             f"        seconds={seconds},",
             f"        id={json.dumps(sched.id)},",
@@ -83,7 +91,7 @@ def _render_one(sched: ExportedSchedule) -> list[str]:
     if sched.kind in ("clocked", "one_shot"):
         return [
             "    scheduler.add_job(",
-            f"        {json.dumps(sched.task_name)},",
+            f"        {json.dumps(task_ref)},",
             '        "date",',
             f"        run_date=datetime.fromisoformat({json.dumps(sched.expression)}),",
             f"        id={json.dumps(sched.id)},",
@@ -93,19 +101,64 @@ def _render_one(sched: ExportedSchedule) -> list[str]:
             f"        replace_existing=True{enabled_kw},",
             "    )",
         ]
-    return [f"    # unknown kind {sched.kind!r} for schedule {sched.name!r}"]
+    raise ValueError(
+        "APScheduler export does not support schedule kind "
+        f"{sched.kind!r} for schedule {sched.name!r}"
+    )
+
+
+def _task_ref(task_name: str) -> str:
+    """Return an APScheduler 3.x ``module:callable`` textual reference.
+
+    A colonless reference has exactly one callable component: its final dotted
+    component.  Callers that need a nested callable path must disambiguate it
+    explicitly, for example ``package.module:Class.method``.
+    """
+    if ":" in task_name:
+        if task_name.count(":") != 1:
+            raise ValueError(
+                f"APScheduler task reference has multiple ':' separators: {task_name!r}"
+            )
+        module, callable_path = task_name.split(":", 1)
+    else:
+        module, separator, callable_path = task_name.rpartition(".")
+        if not separator:
+            raise ValueError(
+                "APScheduler export requires a Python task reference such as "
+                "'package.module.callable' or 'package.module:callable'; "
+                f"nested callables require 'package.module:Class.method'; got {task_name!r}"
+            )
+
+    module_parts = module.split(".")
+    callable_parts = callable_path.split(".")
+    if not all(part.isidentifier() for part in [*module_parts, *callable_parts]):
+        raise ValueError(
+            f"APScheduler export requires an importable Python task reference; got {task_name!r}"
+        )
+    return f"{module}:{callable_path}"
 
 
 def _cron_to_kwargs(expression: str) -> dict[str, str]:
     """Map a 5-field cron string to APScheduler keyword args.
 
     APScheduler's ``cron`` trigger uses named fields rather than a
-    crontab string; we split + label.
+    crontab string. The translation is conservative where the parsers differ:
+    croniter uses day-of-month OR day-of-week and Sunday=0, whereas
+    APScheduler requires both fields and uses Monday=0.
     """
     parts = expression.split()
     if len(parts) != 5:
-        return {"minute": "*"}
+        raise ValueError(
+            f"APScheduler export requires a five-field cron expression; got {expression!r}"
+        )
     minute, hour, day, month, dow = parts
+    if day != "*" and dow != "*":
+        raise ValueError(
+            "APScheduler export cannot preserve a cron expression that "
+            "constrains both day-of-month and day-of-week: z4j/croniter "
+            "matches either field but APScheduler requires both"
+        )
+    dow = _aps_day_of_week(dow)
     return {
         "minute": minute,
         "hour": hour,
@@ -113,6 +166,45 @@ def _cron_to_kwargs(expression: str) -> dict[str, str]:
         "month": month,
         "day_of_week": dow,
     }
+
+
+def _aps_day_of_week(value: str) -> str:
+    """Translate lossless croniter weekdays to APScheduler weekday names."""
+    if value == "*":
+        return value
+
+    weekday_names = {"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
+    lowered = value.lower()
+    named_parts = lowered.split(",")
+    if all(
+        1 <= len(part.split("-")) <= 2
+        and all(name in weekday_names for name in part.split("-"))
+        and "/" not in part
+        for part in named_parts
+    ):
+        return lowered
+
+    # Plain numbers and comma-separated numbers have an exact name mapping.
+    # Numeric ranges/steps are refused because shifting their origin can change
+    # membership or wraparound semantics.
+    numeric_to_name = {
+        "0": "sun",
+        "1": "mon",
+        "2": "tue",
+        "3": "wed",
+        "4": "thu",
+        "5": "fri",
+        "6": "sat",
+        "7": "sun",
+    }
+    numeric_parts = value.split(",")
+    if all(part in numeric_to_name for part in numeric_parts):
+        return ",".join(numeric_to_name[part] for part in numeric_parts)
+
+    raise ValueError(
+        "APScheduler export cannot losslessly translate this day-of-week "
+        f"expression: {value!r}; use weekday names or plain numeric values"
+    )
 
 
 __all__ = ["render"]

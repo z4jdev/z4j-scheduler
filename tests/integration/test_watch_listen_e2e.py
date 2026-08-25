@@ -1,11 +1,11 @@
 """End-to-end test for the LISTEN/NOTIFY WatchSchedules path.
 
-Postgres-only. Spins up a brain bound to a testcontainers Postgres,
-runs the alembic migrations (so the trigger function lands), then:
+Postgres-only. Spins up a brain bound to a shared or disposable real
+PostgreSQL, runs the alembic migrations (so the trigger function lands), then:
 
-1. Insert a schedule directly via the brain's own DB connection.
+1. Create a schedule through the brain's guarded repository.
 2. Verify the LISTEN-driven WatchSchedules stream emits a CREATED
-   event within a sub-second window (target: < 200ms).
+   event without relying on a polling refresh.
 3. UPDATE the same schedule -> UPDATED event arrives.
 4. DELETE -> DELETED event arrives.
 
@@ -13,14 +13,13 @@ This proves the trigger fires AND that the asyncpg add_listener
 path round-trips through the dedicated connection inside the
 handler.
 
-Skipped automatically when ``testcontainers`` or ``asyncpg`` is
-not installed.
+Uses ``Z4J_TEST_POSTGRES_URL`` when supplied and otherwise starts a disposable
+PostgreSQL through the shared integration fixture.
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -28,7 +27,6 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("testcontainers")
 pytest.importorskip("asyncpg")
 pytest.importorskip("grpc")
 pytest.importorskip("z4j_brain")
@@ -38,13 +36,12 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 from sqlalchemy.ext.asyncio import create_async_engine
-from testcontainers.postgres import PostgresContainer
 from z4j_brain.domain.audit_service import AuditService
 from z4j_brain.domain.command_dispatcher import CommandDispatcher
-from z4j_brain.persistence.base import Base
 from z4j_brain.persistence.database import DatabaseManager
-from z4j_brain.persistence.enums import ScheduleKind
-from z4j_brain.persistence.models import Project, Schedule
+from z4j_brain.persistence.repositories.schedule_control import (
+    ScheduleControlRepository,
+)
 from z4j_brain.scheduler_grpc.auth import mint_scheduler_cert
 from z4j_brain.scheduler_grpc.server import (
     SchedulerGrpcServer,
@@ -53,6 +50,17 @@ from z4j_brain.settings import Settings as BrainSettings
 from z4j_brain.websocket.registry import LocalRegistry
 from z4j_scheduler.settings import Settings as SchedulerSettings
 from z4j_scheduler.storage.brain_client import BrainClient
+
+from .helpers.brain_seeding import create_reserved_schedule, seed_project
+
+# A deadlock guard for the test process, not a delivery-latency SLA.  The
+# production contract promises push delivery, not a fixed wall-clock bound.
+_HARNESS_DEADLOCK_TIMEOUT_SECONDS = 5.0
+_BRAIN_SECRETS = {
+    "secret": secrets.token_urlsafe(48),
+    "session_secret": secrets.token_urlsafe(48),
+    "audit_chain_secret": secrets.token_urlsafe(48),
+}
 
 # =====================================================================
 # Cert + CA helpers (mirror test_brain_scheduler_e2e.py)
@@ -133,99 +141,71 @@ def _server_cert(ca_cert: bytes, ca_key: bytes) -> tuple[bytes, bytes]:
 
 
 @pytest.fixture(scope="module")
-def postgres_container():
-    try:
-        container = PostgresContainer("postgres:18-alpine")
-        container.start()
-    except Exception as exc:
-        pytest.skip(f"could not start Postgres: {exc}")
-    yield container
-    with contextlib.suppress(Exception):
-        container.stop()
-
-
-@pytest.fixture(scope="module")
-def asyncpg_dsn(postgres_container) -> str:
-    return postgres_container.get_connection_url().replace(
-        "postgresql+psycopg2://",
+def asyncpg_dsn(postgres_url: str) -> str:
+    return postgres_url.replace(
+        "postgresql://",
         "postgresql+asyncpg://",
+        1,
     )
 
 
 @pytest.fixture
-async def brain_engine(asyncpg_dsn: str):
+async def brain_engine(
+    asyncpg_dsn: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
     """Engine + schema + trigger applied via alembic migrations."""
 
+    from alembic import command
+    from alembic.config import Config
+    from z4j_brain.migrations import __file__ as migrations_init
+
+    migration_dir = Path(migrations_init).resolve().parent  # noqa: ASYNC240 - fixture setup
+    alembic_ini = migration_dir.parent / "alembic.ini"
+    secrets_for_brain = _BRAIN_SECRETS
+    monkeypatch.setenv("Z4J_DATABASE_URL", asyncpg_dsn)
+    monkeypatch.setenv("Z4J_SECRET", secrets_for_brain["secret"])
+    monkeypatch.setenv("Z4J_SESSION_SECRET", secrets_for_brain["session_secret"])
+    monkeypatch.setenv(
+        "Z4J_AUDIT_CHAIN_SECRET",
+        secrets_for_brain["audit_chain_secret"],
+    )
+    monkeypatch.setenv("Z4J_ENVIRONMENT", "dev")
+    monkeypatch.setenv("Z4J_REQUIRE_DB_SSL", "false")
+    monkeypatch.setenv("Z4J_HOME", str(tmp_path / "brain-home"))
+
+    config = Config(str(alembic_ini))
+    config.set_main_option("script_location", str(migration_dir))
+    # Avoid Alembic's fileConfig disabling loggers that the rest of the test
+    # process already owns.  All options needed above have been read already.
+    config.config_file_name = None
+    await asyncio.to_thread(command.upgrade, config, "head")
+
     engine = create_async_engine(asyncpg_dsn)
-
-    # Brain's schema relies on a few Postgres extensions that the
-    # initial migration installs. ``Base.metadata.create_all``
-    # doesn't, so we install them inline here. Same set as the
-    # alembic ``_install_extensions`` helper.
-    async with engine.begin() as conn:
-        for ext in ("pgcrypto", "citext", "pg_trgm"):
-            await conn.exec_driver_sql(
-                f"CREATE EXTENSION IF NOT EXISTS {ext}",
-            )
-
-    # Run migrations (we use Base.create_all for speed; the
-    # trigger DDL is applied separately just below because
-    # Base.metadata doesn't capture it).
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-    # Apply the LISTEN trigger DDL directly (the migration is the
-    # source of truth; we replicate it here so the test doesn't
-    # need a full alembic upgrade pass which is slow).
-    async with engine.begin() as conn:
-        await conn.exec_driver_sql(
-            """
-            CREATE OR REPLACE FUNCTION z4j_schedules_notify() RETURNS trigger AS $$
-            DECLARE
-                payload TEXT;
-                row_id UUID;
-                proj_id UUID;
-                op_name TEXT;
-            BEGIN
-                IF TG_OP = 'DELETE' THEN
-                    op_name := 'delete';
-                    row_id := OLD.id;
-                    proj_id := OLD.project_id;
-                ELSIF TG_OP = 'INSERT' THEN
-                    op_name := 'insert';
-                    row_id := NEW.id;
-                    proj_id := NEW.project_id;
-                ELSE
-                    op_name := 'update';
-                    row_id := NEW.id;
-                    proj_id := NEW.project_id;
-                END IF;
-                payload := json_build_object(
-                    'op', op_name,
-                    'id', row_id,
-                    'project_id', proj_id
-                )::TEXT;
-                PERFORM pg_notify('z4j_schedules_changed', payload);
-                RETURN COALESCE(NEW, OLD);
-            END;
-            $$ LANGUAGE plpgsql;
-            """,
-        )
-        await conn.exec_driver_sql(
-            "DROP TRIGGER IF EXISTS z4j_schedules_notify_trigger ON schedules",
-        )
-        await conn.exec_driver_sql(
-            "CREATE TRIGGER z4j_schedules_notify_trigger "
-            "AFTER INSERT OR UPDATE OR DELETE ON schedules "
-            "FOR EACH ROW EXECUTE FUNCTION z4j_schedules_notify()",
-        )
-    yield engine
-    # Cleanup: drop schedules so the next test in the module
-    # starts fresh.
-    async with engine.begin() as conn:
-        await conn.exec_driver_sql("DELETE FROM schedules")
-        await conn.exec_driver_sql("DELETE FROM projects")
-    await engine.dispose()
+    try:
+        # Guard the guard: prove the migration, rather than this fixture, owns
+        # both the function and trigger before exercising LISTEN.
+        async with engine.connect() as conn:
+            installed = (
+                await conn.exec_driver_sql(
+                    "SELECT EXISTS ("
+                    "SELECT 1 FROM pg_trigger "
+                    "WHERE tgname = 'z4j_schedules_notify_trigger' "
+                    "AND NOT tgisinternal"
+                    ")",
+                )
+            ).scalar_one()
+            function_installed = (
+                await conn.exec_driver_sql(
+                    "SELECT to_regprocedure('z4j_schedules_notify()') IS NOT NULL",
+                )
+            ).scalar_one()
+        assert installed is True
+        assert function_installed is True
+        yield engine, secrets_for_brain
+    finally:
+        await engine.dispose()
 
 
 @pytest.fixture
@@ -254,10 +234,12 @@ def cert_bundle(tmp_path: Path) -> dict:
 
 @pytest.fixture
 async def brain_grpc(brain_engine, cert_bundle: dict, asyncpg_dsn: str):
+    engine, migrated_secrets = brain_engine
     brain_settings = BrainSettings(
         database_url=asyncpg_dsn,
-        secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
-        session_secret=secrets.token_urlsafe(48),  # type: ignore[arg-type]
+        secret=migrated_secrets["secret"],  # type: ignore[arg-type]
+        session_secret=migrated_secrets["session_secret"],  # type: ignore[arg-type]
+        audit_chain_secret=migrated_secrets["audit_chain_secret"],  # type: ignore[arg-type]
         environment="dev",
         log_json=False,
         registry_backend="local",
@@ -270,7 +252,7 @@ async def brain_grpc(brain_engine, cert_bundle: dict, asyncpg_dsn: str):
         scheduler_grpc_allowed_cns=[],
     )
 
-    db = DatabaseManager(brain_engine)
+    db = DatabaseManager(engine)
     audit_service = AuditService(brain_settings)
     registry = LocalRegistry(deliver_local=lambda *a, **kw: False)
     command_dispatcher = CommandDispatcher(
@@ -317,18 +299,14 @@ async def scheduler_client(brain_grpc, cert_bundle: dict):
 
 class TestListenPush:
     @pytest.mark.asyncio
-    async def test_create_event_arrives_within_one_second(
+    async def test_create_event_is_pushed_over_listen(
         self,
         brain_grpc,
         scheduler_client: BrainClient,
     ) -> None:
-        """LISTEN-driven path: insert a row, expect CREATED in < 1s."""
+        """A guarded create is pushed without waiting for a polling refresh."""
         _server, _port, db = brain_grpc
-        project_id = uuid.uuid4()
-
-        async with db.session() as session:
-            session.add(Project(id=project_id, slug="proj-listen", name="Proj"))
-            await session.commit()
+        project_id = await seed_project(db, slug=f"proj-listen-{uuid.uuid4().hex[:8]}")
 
         events: list = []
 
@@ -342,30 +320,25 @@ class TestListenPush:
         # Give the LISTEN connection time to subscribe.
         await asyncio.sleep(0.5)
 
-        async with db.session() as session:
-            session.add(
-                Schedule(
-                    project_id=project_id,
-                    engine="celery",
-                    scheduler="z4j-scheduler",
-                    name="listen-add",
-                    task_name="t.t",
-                    kind=ScheduleKind.CRON,
-                    expression="0 * * * *",
-                    timezone="UTC",
-                    args=[],
-                    kwargs={},
-                    is_enabled=True,
-                ),
-            )
-            await session.commit()
+        await create_reserved_schedule(
+            db,
+            project_id=project_id,
+            name="listen-add",
+            task_name="t.t",
+            expression="0 * * * *",
+            planning_at=datetime.now(UTC),
+        )
 
         try:
-            await asyncio.wait_for(consume_task, timeout=3.0)
+            await asyncio.wait_for(
+                consume_task,
+                timeout=_HARNESS_DEADLOCK_TIMEOUT_SECONDS,
+            )
         except TimeoutError:
             consume_task.cancel()
             pytest.fail(
-                f"LISTEN-driven WatchSchedules did not emit CREATED within 3s (events={events})",
+                "LISTEN-driven WatchSchedules did not emit CREATED before the "
+                f"test deadlock guard fired (events={events})",
             )
 
         assert len(events) >= 1
@@ -381,34 +354,25 @@ class TestListenPush:
     ) -> None:
         """Insert + UPDATE + DELETE all flow through LISTEN."""
         _server, _port, db = brain_grpc
-        project_id = uuid.uuid4()
-        schedule_id = uuid.uuid4()
-
-        async with db.session() as session:
-            session.add(Project(id=project_id, slug="proj-listen-2", name="Proj"))
-            session.add(
-                Schedule(
-                    id=schedule_id,
-                    project_id=project_id,
-                    engine="celery",
-                    scheduler="z4j-scheduler",
-                    name="listen-evolve",
-                    task_name="t.t",
-                    kind=ScheduleKind.CRON,
-                    expression="0 * * * *",
-                    timezone="UTC",
-                    args=[],
-                    kwargs={},
-                    is_enabled=True,
-                ),
-            )
-            await session.commit()
+        project_id = await seed_project(db, slug=f"proj-listen-{uuid.uuid4().hex[:8]}")
+        seeded = await create_reserved_schedule(
+            db,
+            project_id=project_id,
+            name="listen-evolve",
+            task_name="t.t",
+            expression="0 * * * *",
+            planning_at=datetime.now(UTC),
+        )
+        schedule_id = seeded.id
 
         events: list = []
+        updated_seen = asyncio.Event()
 
         async def consume() -> None:
             async for event in scheduler_client.watch_schedules(project_id):
                 events.append(event)
+                if event.kind == "updated":
+                    updated_seen.set()
                 if len(events) >= 2:  # UPDATED + DELETED
                     return
 
@@ -416,34 +380,43 @@ class TestListenPush:
         await asyncio.sleep(0.5)
 
         # UPDATE.
-        async with db.session() as session:
-            from sqlalchemy import update as sa_update
-
-            await session.execute(
-                sa_update(Schedule)
-                .where(Schedule.id == schedule_id)
-                .values(expression="*/5 * * * *"),
+        async with db.session(write=True) as session:
+            updated = await ScheduleControlRepository(session).update_current(
+                project_id=project_id,
+                schedule_id=schedule_id,
+                data={"expression": "*/5 * * * *"},
+                planning_at=datetime.now(UTC),
             )
+            assert updated is not None
             await session.commit()
 
-        # Small gap so the UPDATED event arrives before the DELETE.
-        await asyncio.sleep(0.3)
+        # Wait for the pushed update before deleting so the assertion observes
+        # stream order, rather than depending on a sleep duration.
+        await asyncio.wait_for(
+            updated_seen.wait(),
+            timeout=_HARNESS_DEADLOCK_TIMEOUT_SECONDS,
+        )
 
         # DELETE.
-        async with db.session() as session:
-            from sqlalchemy import delete as sa_delete
-
-            await session.execute(
-                sa_delete(Schedule).where(Schedule.id == schedule_id),
+        async with db.session(write=True) as session:
+            deleted = await ScheduleControlRepository(session).delete_current(
+                project_id=project_id,
+                schedule_id=schedule_id,
+                occurred_at=datetime.now(UTC),
             )
+            assert deleted.disposition == "deleted"
             await session.commit()
 
         try:
-            await asyncio.wait_for(consume_task, timeout=5.0)
+            await asyncio.wait_for(
+                consume_task,
+                timeout=_HARNESS_DEADLOCK_TIMEOUT_SECONDS,
+            )
         except TimeoutError:
             consume_task.cancel()
             pytest.fail(
-                f"LISTEN path did not deliver both UPDATED + DELETED within 5s (events={events})",
+                "LISTEN path did not deliver both UPDATED + DELETED before the "
+                f"test deadlock guard fired (events={events})",
             )
 
         kinds = [e.kind for e in events]

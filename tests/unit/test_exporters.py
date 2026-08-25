@@ -146,6 +146,7 @@ class TestApsRender:
     def test_cron_emits_keyword_fields(self) -> None:
         out = apscheduler.render([_schedule("hourly")])
         assert "scheduler.add_job(" in out
+        assert '"myapp.tasks:hourly"' in out
         assert '"cron"' in out
         assert 'minute="0"' in out
         assert 'hour="*"' in out
@@ -156,6 +157,36 @@ class TestApsRender:
         assert '"interval"' in out
         assert "seconds=7200" in out
 
+    @pytest.mark.parametrize(
+        ("cron_value", "aps_value"),
+        [("0", "sun"), ("1", "mon"), ("7", "sun"), ("1,3,5", "mon,wed,fri")],
+    )
+    def test_numeric_weekday_is_translated_to_names(
+        self,
+        cron_value: str,
+        aps_value: str,
+    ) -> None:
+        out = apscheduler.render([_schedule("weekly", expression=f"0 12 * * {cron_value}")])
+
+        assert f'day_of_week="{aps_value}"' in out
+
+    def test_day_and_weekday_or_semantics_fail_closed(self) -> None:
+        with pytest.raises(ValueError, match="matches either"):
+            apscheduler.render([_schedule("ambiguous", expression="0 12 1 * mon")])
+
+    @pytest.mark.parametrize("expression", ["0 12 * *", "0 12 * * * 30"])
+    def test_non_five_field_cron_fails_closed(self, expression: str) -> None:
+        with pytest.raises(ValueError, match="five-field"):
+            apscheduler.render([_schedule("bad-cron", expression=expression)])
+
+    @pytest.mark.parametrize("day_of_week", ["*/2", "0-5"])
+    def test_ambiguous_weekday_expression_fails_closed(
+        self,
+        day_of_week: str,
+    ) -> None:
+        with pytest.raises(ValueError, match="cannot losslessly translate"):
+            apscheduler.render([_schedule("bad-weekday", expression=f"0 12 * * {day_of_week}")])
+
     def test_one_shot_emits_date_trigger(self) -> None:
         out = apscheduler.render(
             [_schedule("once", kind="one_shot", expression="2026-04-30T00:00:00")],
@@ -163,9 +194,87 @@ class TestApsRender:
         assert '"date"' in out
         assert "run_date=datetime.fromisoformat" in out
 
-    def test_disabled_emits_paused(self) -> None:
+    def test_disabled_emits_apscheduler_pause_sentinel(self) -> None:
         out = apscheduler.render([_schedule("off", enabled=False)])
-        assert "paused=True" in out
+        assert "next_run_time=None" in out
+        assert "paused=True" not in out
+
+    @pytest.mark.parametrize("task_name", ["registered-alias", "pkg.task-name"])
+    def test_non_python_task_name_fails_closed(self, task_name: str) -> None:
+        schedule = _schedule("bad")
+        schedule.task_name = task_name
+
+        with pytest.raises(ValueError, match="Python task reference"):
+            apscheduler.render([schedule])
+
+    def test_colonless_task_contract_uses_only_final_component_as_callable(self) -> None:
+        schedule = _schedule("nested")
+        schedule.task_name = "package.module.Class.method"
+
+        out = apscheduler.render([schedule])
+
+        # A colonless name has one callable component by contract.  Operators
+        # needing the nested ``Class.method`` path must supply
+        # ``package.module:Class.method`` explicitly; the exporter does not try
+        # to guess where an arbitrary dotted module path ends.
+        assert '"package.module.Class:method"' in out
+
+        schedule.task_name = "package.module:Class.method"
+        assert '"package.module:Class.method"' in apscheduler.render([schedule])
+
+    def test_unknown_kind_fails_instead_of_silently_omitting_schedule(self) -> None:
+        schedule = _schedule("unsupported", kind="solar", expression="sunrise")
+
+        # Negative control for the old behaviour: its generated function was
+        # valid and executable but called no scheduler method, so a release
+        # export appeared successful while dropping the schedule.
+        old_output = (
+            "def register_schedules(scheduler):\n"
+            "    scheduler.add_job('builtins:print', 'interval', seconds=60)\n"
+            "    # unknown kind 'solar'\n"
+        )
+
+        class RecordingScheduler:
+            def __init__(self) -> None:
+                self.calls: list[object] = []
+
+            def add_job(self, *args: object, **kwargs: object) -> None:
+                self.calls.append((args, kwargs))
+
+        namespace: dict[str, object] = {}
+        exec(compile(old_output, "<old-apscheduler-export>", "exec"), namespace)
+        recorder = RecordingScheduler()
+        namespace["register_schedules"](recorder)  # type: ignore[operator]
+        assert len(recorder.calls) == 1
+        assert all("solar" not in repr(call) for call in recorder.calls)
+
+        with pytest.raises(ValueError, match="does not support schedule kind 'solar'"):
+            apscheduler.render([schedule])
+
+    @pytest.mark.parametrize("enabled", [True, False])
+    def test_generated_job_executes_against_apscheduler_3(
+        self,
+        enabled: bool,
+    ) -> None:
+        scheduler_module = pytest.importorskip("apscheduler.schedulers.background")
+        schedule = _schedule("print", enabled=enabled)
+        schedule.task_name = "builtins.print"
+        rendered = apscheduler.render([schedule])
+        namespace: dict[str, object] = {}
+        exec(compile(rendered, "<z4j-apscheduler-export>", "exec"), namespace)
+
+        scheduler = scheduler_module.BackgroundScheduler()
+        started = False
+        try:
+            namespace["register_schedules"](scheduler)  # type: ignore[operator]
+            scheduler.start(paused=True)
+            started = True
+            job = scheduler.get_job(schedule.id)
+            assert job is not None
+            assert (job.next_run_time is not None) is enabled
+        finally:
+            if started:
+                scheduler.shutdown()
 
     def test_output_is_valid_python_module(self) -> None:
         out = apscheduler.render(
@@ -411,13 +520,9 @@ class TestApsExecRoundTrip:
         # operators can identify and replace the schedule cleanly.
         assert "id=" in out
 
-    def test_disabled_jobs_emit_paused_true(self) -> None:
-        # APScheduler supports a native ``paused=True`` job state, so
-        # disabled rows still register with the scheduler but do not
-        # fire until ``scheduler.resume_job(id)`` is called. Distinct
-        # from the rq exporter which comments the call out (rq has no
-        # native pause). Operators who want a hard "do not load" must
-        # delete the schedule in z4j first.
+    def test_disabled_jobs_emit_next_run_time_none(self) -> None:
+        # APScheduler 3.x represents an initially paused job with
+        # ``next_run_time=None``. ``paused=True`` is not an add_job keyword.
         out = apscheduler.render(
             [
                 _schedule("a"),
@@ -425,7 +530,8 @@ class TestApsExecRoundTrip:
             ]
         )
         assert out.count("scheduler.add_job(") == 2
-        assert "paused=True" in out
+        assert "next_run_time=None" in out
+        assert "paused=True" not in out
 
 
 class TestCronExecRoundTrip:

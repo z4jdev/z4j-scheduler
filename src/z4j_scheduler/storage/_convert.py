@@ -566,8 +566,33 @@ def make_fire_request(
     request.observed_control_token = str(schedule_entry.control_token)
     request.definition_digest = schedule_entry.definition_digest
     request.expected_schedule_revision = schedule_entry.schedule_revision
-    request.cadence_semantics_version = schedule_entry.cadence_semantics_version
-    request.cadence_runtime_fingerprint = schedule_entry.cadence_runtime_fingerprint
+    # Submit what THIS PROCESS computes, not what the row was stamped with.
+    #
+    # The Brain's check is `submitted != <what the Brain computes>`, i.e. "does
+    # the submitter compute cadence the way I do". That is an agreement check
+    # between two processes. Echoing schedule_entry.* -- which arrives from the
+    # Brain's own watch stream and is therefore the ROW's stored value -- turned
+    # it into a staleness check on the row, comparing the Brain against itself
+    # and telling us nothing about the scheduler.
+    #
+    # It also made the closure unbumpable. Nothing re-stamps the column
+    # (create_current and the external writers are its only writers), so any
+    # change to the cadence dependencies -- or to the running Python version,
+    # which is in the fingerprint payload -- left every pre-existing row
+    # carrying the old value, every fire refused as cadence_semantics_mismatch,
+    # and the schedule locally quarantined. Cursor advance refused on the same
+    # test, so they could not even skip forward: a total scheduling stall on
+    # upgrade.
+    #
+    # With this, a scheduler genuinely running different cadence code is still
+    # refused, which is the fail-closed behaviour the check exists for.
+    from z4j_scheduler.tick.cadence import (
+        CADENCE_SEMANTICS_VERSION,
+        cadence_runtime_fingerprint,
+    )
+
+    request.cadence_semantics_version = CADENCE_SEMANTICS_VERSION
+    request.cadence_runtime_fingerprint = cadence_runtime_fingerprint()
     if schedule_entry.last_fire_at is not None:
         request.expected_last_run_at.CopyFrom(
             datetime_to_ts(schedule_entry.last_fire_at),

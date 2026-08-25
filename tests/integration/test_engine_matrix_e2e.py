@@ -47,6 +47,7 @@ end-to-end test evidence at the agent-side dispatch boundary.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -222,7 +223,10 @@ def _build_taskiq() -> _BuilderResult:
     async def matrix_task(*args, **kwargs):
         return None
 
-    adapter = TaskiqEngineAdapter(broker=broker)
+    adapter = TaskiqEngineAdapter(
+        broker=broker,
+        broker_loop=asyncio.get_running_loop(),
+    )
     full_name = next(k for k in broker.get_all_tasks() if k.endswith(":matrix_task"))
 
     async def _setup():

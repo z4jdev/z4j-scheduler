@@ -6,8 +6,13 @@
 #
 # Usage (host shell):
 #
+# Set Z4J_REDIS_7_4_11_ALPINE_INDEX_SHA256 from the reviewed Redis 7.4.11
+# Alpine Docker Hub OCI index registry receipt in the host shell, then:
+#
+#   export Z4J_REDIS_7_4_11_ALPINE_INDEX_SHA256
+#   bash scripts/require-redis-image-authority.sh Z4J_REDIS_7_4_11_ALPINE_INDEX_SHA256
 #   docker compose -f packages/z4j-scheduler/tests/integration/docker-compose.engines.yml up -d
-#   REDIS_URL=redis://localhost:6390 \
+#   Z4J_REQUIRE_REAL_BROKER_E2E=1 REDIS_URL=redis://localhost:6390 \
 #     /j/z4j/.venv/Scripts/python.exe -m pytest \
 #       packages/z4j-scheduler/tests/integration/test_engine_matrix_redis_e2e.py
 #   docker compose -f packages/z4j-scheduler/tests/integration/docker-compose.engines.yml down
@@ -15,10 +20,8 @@
 # Port 6390 is used (not 6379) to avoid colliding with a host
 # Redis the operator may have running.
 #
-# CI integration: the GitHub Actions workflow at
-# ``packages/z4j-scheduler/.github/workflows/engine-matrix-live.yml``
-# starts this compose stack as a service container before pytest
-# (see commit log for the workflow add).
+# A release lane must set ``Z4J_REQUIRE_REAL_BROKER_E2E=1`` so a missing
+# Redis URL or engine dependency is a failure rather than a developer skip.
 #
 # Why no celery / rq / arq worker containers? Each engine adapter's
 # worker side runs as a per-test in-process worker (``SimpleWorker``,
@@ -29,7 +32,7 @@ version: "3.9"
 
 services:
   redis:
-    image: redis:7-alpine
+    image: docker.io/library/redis@sha256:${Z4J_REDIS_7_4_11_ALPINE_INDEX_SHA256:?Set the reviewed Redis 7.4.11 Alpine 64-character lowercase-hex index digest}
     container_name: z4j-engine-test-redis
     ports:
       - "6390:6379"
@@ -45,7 +48,7 @@ services:
   # in-process StubBroker test in test_engine_matrix_live_e2e.py
   # already covers the in-memory case).
   rabbitmq:
-    image: rabbitmq:3.13-management-alpine
+    image: rabbitmq:4.3.4-management-alpine@sha256:44bf7eb50fe1765885659e49ccfdc775f8e531964d979321aee380a071f49f94
     container_name: z4j-engine-test-rabbitmq
     ports:
       - "5680:5672"   # AMQP

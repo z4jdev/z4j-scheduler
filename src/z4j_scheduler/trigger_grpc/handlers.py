@@ -11,6 +11,14 @@ update (preventing the next tick from double-firing), and so the
 operator-trigger flows through the same retry + audit pipeline as
 a tick-driven fire. Single code path = single place to debug.
 
+That reasoning holds only for a Brain that has not activated durable
+schedule control. Once it has, it fires an operator trigger itself,
+the FireSchedule wire carries cadence acceptances only, and a
+slot-less operator fire is not one. The dispatcher settles that from
+the entry this handler hands it and refuses without a wire call, so
+what an operator sees here is a message naming the setting to unset,
+rather than a click that appears to work and does nothing.
+
 The ``user_id`` and ``idempotency_key`` from the request are
 threaded into the audit/log breadcrumbs so the operator who clicked
 is preserved on both sides. The ``idempotency_key`` is also
@@ -105,7 +113,7 @@ class TriggerScheduleServicer(pb_grpc.SchedulerServiceServicer):
             tuple[float, str],
         ] = {}
 
-    async def TriggerSchedule(  # noqa: N802, PLR0911  gRPC-generated name, status dispatch
+    async def TriggerSchedule(  # noqa: N802  gRPC-generated name, status dispatch
         self,
         request: pb.TriggerScheduleRequest,
         context: grpc.aio.ServicerContext,
@@ -131,11 +139,13 @@ class TriggerScheduleServicer(pb_grpc.SchedulerServiceServicer):
                     "has not seen it yet)"
                 ),
             )
-        if not entry.is_enabled:
-            return pb.TriggerScheduleResponse(
-                error_code="schedule_disabled",
-                error_message="schedule is disabled",
-            )
+        # No is_enabled gate here, deliberately. Disabling retires the CADENCE,
+        # and "off the timer, I will run it by hand when I need it" is a
+        # workflow rather than a state waiting to be cleared. A manual trigger
+        # is an operator asking for one run now, on top of whatever the cadence
+        # is or is not doing, so it is not the cadence's decision to make. The
+        # brain refuses the holds that genuinely stop a fire (a pause, a
+        # quarantine) before the request ever reaches this path.
 
         # Leader gate. Standbys reject the trigger so
         # brain can retry against the leader. Single-instance
@@ -193,6 +203,7 @@ class TriggerScheduleServicer(pb_grpc.SchedulerServiceServicer):
 
         result = await self._dispatcher.trigger_now(
             schedule_id=schedule_id,
+            schedule_entry=entry,
             triggered_by_user_id=request.user_id or "",
         )
         if result.success:

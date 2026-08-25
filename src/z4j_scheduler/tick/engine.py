@@ -17,16 +17,16 @@ Design properties this module commits to:
 - **Strict cooperation with the cache.** Mutations to the cache
   fire its ``changed`` event; the engine awaits a race between
   ``stop_event``, ``changed``, and the time-until-next-fire so it
-  responds within ~100ms of any schedule change.
+  wakes when a cache change is delivered. This module makes no fixed
+  end-to-end delivery-latency promise.
 - **Catch-up is honest.** When a schedule's ``next_fire_at`` is in
   the past (after a brain-down outage, or a freshly-added
   schedule), the catch-up policy decides whether to fire 0, 1, or
   N times. The engine never silently swallows a missed fire.
-- **Past one-shots dispatch immediately, then auto-disable.** A
+- **Past one-shots dispatch immediately, then exhaust.** A
   one-shot whose target time has already passed when added to the
   cache fires once at its scheduled time, gets ``last_fire_at`` set,
-  and never fires again - the brain-side handler flips
-  ``is_enabled=False`` after the result acknowledgement.
+  and computes no successor, so it does not fire again.
 """
 
 from __future__ import annotations
@@ -725,7 +725,7 @@ class TickEngine:
         self,
         entry: ScheduleEntry,
         *,
-        as_of_last_fire_at: datetime | None | object = _LAST_FIRE_AT_DEFAULT,
+        as_of_last_fire_at: datetime | object | None = _LAST_FIRE_AT_DEFAULT,
     ) -> datetime | None:
         """Compute next-fire for a single entry. None for completed one-shots.
 
@@ -1214,9 +1214,11 @@ class TickEngine:
                     "legacy_upgrade_required",
                 }:
                     if expected_control_token is not None:
-                        await self._cache.latch_current_stop(
-                            entry.id,
+                        await self._stop_until_brain_supersedes(
+                            entry,
+                            disposition=fire_result.disposition,
                             expected_control_token=expected_control_token,
+                            refused_at_revision=fire_result.live_revision,
                         )
                     return True
                 if fire_result.disposition != "accepted":
@@ -1257,9 +1259,11 @@ class TickEngine:
                     )
                     return False
                 if fire_result.live_control_token != expected_control_token:
-                    await self._cache.latch_current_stop(
-                        entry.id,
+                    await self._stop_until_brain_supersedes(
+                        entry,
+                        disposition="accepted_under_rotated_control",
                         expected_control_token=expected_control_token,
+                        refused_at_revision=fire_result.live_revision,
                     )
                     return True
                 applied = await self._cache.apply_cursor_transition(
@@ -1485,6 +1489,40 @@ class TickEngine:
             code="post_dispatch_state_ambiguous",
             detail=f"{entry.kind}:{entry.expression}",
         )
+
+    async def _stop_until_brain_supersedes(
+        self,
+        entry: ScheduleEntry,
+        *,
+        disposition: str,
+        expected_control_token: UUID,
+        refused_at_revision: int,
+    ) -> bool:
+        """Hold one generation locally and say so where an operator will look.
+
+        A schedule that silently stops ticking is the hardest kind of incident
+        to work: the row reads enabled in the dashboard, the Brain shows no
+        refusal it kept, and the only evidence lives in this process's memory.
+        The log line names both the reason and the Brain revision the stop is
+        waiting to see, so an operator can tell "waiting to resync" apart from
+        "held until someone acts" without attaching a debugger.
+        """
+
+        latched = await self._cache.latch_current_stop(
+            entry.id,
+            expected_control_token=expected_control_token,
+            refused_at_revision=refused_at_revision,
+        )
+        if not latched:
+            return False
+        logger.warning(
+            "z4j.scheduler.tick: stopped schedule_id=%s locally after "
+            "disposition=%s; resumes once Brain state reaches revision %s",
+            entry.id,
+            disposition,
+            refused_at_revision if refused_at_revision > 0 else "(a new control generation)",
+        )
+        return True
 
     async def _record_local_quarantine(
         self,

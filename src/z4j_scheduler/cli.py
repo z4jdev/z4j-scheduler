@@ -604,14 +604,14 @@ def schedules_add(
     kind: str = typer.Option(
         ...,
         "--kind",
-        help="schedule kind: 'cron' / 'interval' / 'one_shot'",
+        help="schedule kind: 'cron' / 'interval' / 'clocked' / 'solar'",
     ),
     expression: str = typer.Option(
         ...,
         "--expression",
         help=(
             "kind-specific expression: 5-field crontab (cron), '<N>{s,m,h,d}' "
-            "(interval), or ISO-8601 timestamp (one_shot)"
+            "(interval), or ISO-8601 timestamp (clocked)"
         ),
     ),
     task_name: str = typer.Option(
@@ -654,6 +654,14 @@ def schedules_add(
     it.
     """
     import json
+
+    schedule_kinds = ("cron", "interval", "clocked", "solar")
+    if kind not in schedule_kinds:
+        typer.echo(
+            f"--kind must be one of {schedule_kinds}; got {kind!r}",
+            err=True,
+        )
+        raise typer.Exit(code=2)
 
     body = {
         "name": name,
@@ -802,7 +810,7 @@ def schedules_edit(  # noqa: PLR0912  flat CLI option dispatch
     expression: str = typer.Option(
         None,
         "--expression",
-        help="new cron / interval / one_shot / solar expression",
+        help="new cron / interval / clocked / solar expression",
     ),
     task_name: str = typer.Option(
         None,
@@ -1174,13 +1182,10 @@ def import_(
         None,
         "--duration",
         help=(
-            "(--verify) shadow-mode time window like '24h' / '7d' / "
-            "'30m'. Predicts every fire each side would emit over "
-            "the window and reports timing / payload divergence. "
-            "Catches importer translation bugs before the operator "
-            "actually swaps the canonical scheduler. Required to "
-            "make --verify produce a fire-by-fire comparison; "
-            "without it --verify only does the import-time diff."
+            "reserved shadow-verification window like '24h' / '7d' / "
+            "'30m'. The importer has no independent source-side firing "
+            "oracle yet, so combining this option with --verify fails "
+            "closed after the static diff instead of certifying a cutover"
         ),
     ),
     brain_url: str = typer.Option(
@@ -1319,7 +1324,8 @@ def import_(
         # ignoring it. Same pattern as `git push --force` not
         # being something we silently swallow.
         typer.echo(
-            "--duration requires --verify; pass both to get the fire-by-fire shadow comparison.",
+            "--duration requires --verify; duration verification is currently unavailable "
+            "and the combined command fails closed.",
             err=True,
         )
         raise typer.Exit(code=2)
@@ -1542,64 +1548,23 @@ def _print_shadow_comparison(
     schedules: list,
     duration: str,
 ) -> None:
-    """Run the shadow-mode predicted-fire comparison and print the report.
+    """Refuse the not-yet-implemented two-sided cutover comparison.
 
-    Compares the operator's source schedules (parsed by the importer
-    in the same run) against themselves under the z4j-scheduler
-    semantics. Today both sides use the same croniter / interval
-    arithmetic, so a mismatch here means the importer dropped or
-    mis-translated data on the way in - exactly the bug class
-    operators want caught BEFORE they cut over.
-
-    The interesting variant is when this is wired against a parallel
-    z4j-scheduler running the imported set: the predicted target
-    fires come from croniter, the predicted source fires come from
-    croniter applied to the operator's RAW celery beat_schedule
-    (before importer translation). That comparison surfaces
-    importer translation bugs.
-
-    For now we wire the same-side check + leave hooks for the dual
-    side once we have an end-to-end celery-beat reference parser
-    (separate from the importer's own parsing).
+    The importer returns only its normalized :class:`ImportedSchedule`
+    values.  It does not retain an independent source-side firing oracle.
+    Comparing predictions derived from those values to themselves can never
+    detect an importer translation error, yet the report renderer labels an
+    equal comparison ``Safe to flip``.  Fail closed until each importer can
+    supply a genuinely independent source prediction.
     """
-    from datetime import UTC, datetime
-
-    from z4j_scheduler.verify import (
-        compare_predicted_fires,
-        parse_duration,
-        predict_fires,
-        render_report,
+    del schedules, duration
+    typer.echo(
+        "--duration verification is unavailable: z4j-scheduler does not yet "
+        "have an independent source-side firing oracle. The static --verify "
+        "diff still ran, but it is not proof that a scheduler cutover is safe.",
+        err=True,
     )
-
-    try:
-        delta = parse_duration(duration)
-    except ValueError as exc:
-        typer.echo(f"--duration parse error: {exc}", err=True)
-        raise typer.Exit(code=2) from exc
-
-    window_start = datetime.now(UTC).replace(microsecond=0)
-    window_end = window_start + delta
-
-    fires = predict_fires(
-        schedules,
-        window_start=window_start,
-        window_end=window_end,
-    )
-    # Self-compare against the same fires (round-trip sanity). The
-    # operator's real value comes from feeding two distinct
-    # importer outputs into ``compare_predicted_fires`` directly;
-    # the CLI default exposes the prediction so the operator can
-    # at least eyeball the count + the first few fires.
-    report = compare_predicted_fires(
-        source=fires,
-        target=fires,
-        window_start=window_start,
-        window_end=window_end,
-        source_label="source",
-        target_label="z4j-scheduler",
-    )
-    typer.echo("")
-    typer.echo(render_report(report))
+    raise typer.Exit(code=2)
 
 
 def _select_renderer(target: str):
@@ -1692,6 +1657,7 @@ def _do_import(
             project_slug=project,
             engine=engine or "rq",
             queue=queue,
+            default_timezone=timezone,
         )
     if src == "apscheduler":
         if not jobstore_url:

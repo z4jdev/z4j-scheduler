@@ -338,7 +338,7 @@ class TestTaskiqImporter:
             del sys.modules["z4j_test_taskiq_oneshot"]
 
         assert len(schedules) == 1
-        assert schedules[0].kind == "one_shot"
+        assert schedules[0].kind == "clocked"
         assert "2026-12-31" in schedules[0].expression
 
 

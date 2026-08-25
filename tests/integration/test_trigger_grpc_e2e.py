@@ -7,7 +7,7 @@ connects with the brain-side TriggerScheduleClient, and verifies:
    and returns a command_id.
 2. An unknown schedule_id returns ``not_in_cache`` cleanly (not a
    gRPC exception).
-3. A disabled schedule is rejected with ``schedule_disabled``.
+3. A disabled schedule still accepts a manual trigger.
 
 The scheduler's FireDispatcher is wired to a fake BrainClient so
 we don't need to bring brain-side gRPC up for this test - that's
@@ -133,9 +133,15 @@ class _FakeBrainClient:
 
     def __init__(self) -> None:
         self.calls: list[dict] = []
+        self.block_fire = False
+        self.fire_started = asyncio.Event()
+        self.release_fire = asyncio.Event()
 
     async def fire_schedule(self, **kwargs):
         self.calls.append(kwargs)
+        self.fire_started.set()
+        if self.block_fire:
+            await self.release_fire.wait()
         return FireResult(
             command_id=uuid.uuid4(),
             error_code=None,
@@ -297,12 +303,20 @@ class TestTriggerNotInCache:
 
 class TestTriggerDisabled:
     @pytest.mark.asyncio
-    async def test_disabled_schedule_returns_clean_error(
+    async def test_a_disabled_schedule_still_triggers(
         self,
         trigger_server,
         trigger_client,
     ) -> None:
-        _server, _port, cache, _fake = trigger_server
+        """Disabling retires the cadence, it does not withdraw the button.
+
+        "Off the timer, I will run it by hand when I need it" is a workflow, and
+        this path is how an operator acts on it. The holds that genuinely stop a
+        fire, a pause and a quarantine, are refused by the brain before the
+        request reaches here, so a refusal at this layer would only ever remove
+        a capability rather than protect anything.
+        """
+        _server, _port, cache, fake = trigger_server
         schedule_id, entry = _seed_entry(cache, enabled=False)
         await cache.upsert(entry)
 
@@ -310,7 +324,10 @@ class TestTriggerDisabled:
             schedule_id=schedule_id,
             user_id=None,
         )
-        assert response.error_code == "schedule_disabled"
+        assert response.command_id
+        assert not response.error_code
+        assert len(fake.calls) == 1
+        assert fake.calls[0]["schedule_id"] == schedule_id
 
 
 class TestServerStop:
@@ -320,15 +337,36 @@ class TestServerStop:
         trigger_server,
         trigger_client,
     ) -> None:
-        # Just verify stop doesn't blow up after a successful call.
-        _server, _port, cache, _fake = trigger_server
+        server, _port, cache, fake = trigger_server
         schedule_id, entry = _seed_entry(cache)
         await cache.upsert(entry)
-        response = await trigger_client.trigger(
-            schedule_id=schedule_id,
-            user_id=None,
+        fake.block_fire = True
+
+        request_task = asyncio.create_task(
+            trigger_client.trigger(
+                schedule_id=schedule_id,
+                user_id=None,
+            ),
         )
-        assert response.command_id
-        # Server is stopped by the fixture teardown - if it crashes
-        # we'll see the failure here.
-        await asyncio.sleep(0.05)
+        stop_task: asyncio.Task | None = None
+        try:
+            await asyncio.wait_for(fake.fire_started.wait(), timeout=5.0)
+            stop_task = asyncio.create_task(server.stop())
+
+            # Give stop() a scheduling turn. It must wait for the live handler,
+            # rather than cancelling the RPC or returning before it drains.
+            await asyncio.sleep(0)
+            assert not stop_task.done()
+
+            fake.release_fire.set()
+            response = await asyncio.wait_for(request_task, timeout=5.0)
+            await asyncio.wait_for(stop_task, timeout=5.0)
+            assert response.command_id
+            assert len(fake.calls) == 1
+        finally:
+            fake.release_fire.set()
+            if not request_task.done():
+                request_task.cancel()
+            await asyncio.gather(request_task, return_exceptions=True)
+            if stop_task is not None and not stop_task.done():
+                await asyncio.wait_for(stop_task, timeout=5.0)

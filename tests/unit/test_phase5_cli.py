@@ -14,9 +14,11 @@ the fast unit-level regressions that catch typer arg-spec drift.
 
 from __future__ import annotations
 
+import argparse
 import sys
 from unittest.mock import patch
 
+import pytest
 from typer.testing import CliRunner
 from z4j_scheduler.cli import app
 
@@ -42,6 +44,53 @@ class TestSchedulesSubcommandsExist:
         # Required options are documented.
         for opt in ("--project", "--name", "--kind", "--expression", "--task-name"):
             assert opt in result.stdout, f"`add` missing required option {opt}"
+
+    def test_schedules_add_uses_brain_clocked_vocabulary(self) -> None:
+        with patch("z4j_scheduler.cli._brain_post", return_value={"id": "schedule-id"}) as post:
+            result = runner.invoke(
+                app,
+                [
+                    "schedules",
+                    "add",
+                    "--project",
+                    "demo",
+                    "--name",
+                    "once",
+                    "--kind",
+                    "clocked",
+                    "--expression",
+                    "2026-08-06T12:00:00Z",
+                    "--task-name",
+                    "tasks.once",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert post.call_args.kwargs["body"]["kind"] == "clocked"
+
+    def test_schedules_add_rejects_internal_one_shot_alias(self) -> None:
+        with patch("z4j_scheduler.cli._brain_post") as post:
+            result = runner.invoke(
+                app,
+                [
+                    "schedules",
+                    "add",
+                    "--project",
+                    "demo",
+                    "--name",
+                    "once",
+                    "--kind",
+                    "one_shot",
+                    "--expression",
+                    "2026-08-06T12:00:00Z",
+                    "--task-name",
+                    "tasks.once",
+                ],
+            )
+
+        assert result.exit_code == 2
+        assert "must be one of" in result.output
+        post.assert_not_called()
 
 
 # =====================================================================
@@ -145,6 +194,31 @@ class TestImportVerifyFlag:
         assert "unchanged=1" in joined
         assert "delete=1" in joined
 
+    def test_duration_verification_fails_closed_without_independent_oracle(self) -> None:
+        """The CLI must never certify a source list by comparing it to itself."""
+        with (
+            patch("z4j_scheduler.cli._do_import", return_value=[]),
+            patch("z4j_scheduler.cli._print_verify_diff"),
+        ):
+            result = runner.invoke(
+                app,
+                [
+                    "import",
+                    "--from",
+                    "celery",
+                    "--project",
+                    "demo",
+                    "--verify",
+                    "--duration",
+                    "24h",
+                ],
+            )
+
+        assert result.exit_code == 2
+        assert "independent source-side firing oracle" in result.output
+        assert "not proof that a scheduler cutover is safe" in result.output
+        assert "Safe to flip" not in result.output
+
 
 # =====================================================================
 # Django management command import shape
@@ -163,17 +237,17 @@ class TestDjangoCommandImportable:
         assert hasattr(z4j_schedules, "Command")
 
     def test_command_has_subcommand_choices(self) -> None:
-        # Sanity: the command wires the four subcommands the spec
-        # promises (sync, list, diff, trigger).
-        import inspect
-
         from z4j_scheduler.django_app.management.commands import (
             z4j_schedules,
         )
 
-        source = inspect.getsource(z4j_schedules)
+        parser = argparse.ArgumentParser()
+        z4j_schedules.Command().add_arguments(parser)
         for cmd in ("sync", "list", "diff", "trigger"):
-            assert f'"{cmd}"' in source, f"missing subcommand {cmd!r}"
+            parsed = parser.parse_args([cmd])
+            assert parsed.subcommand == cmd
+        with pytest.raises(SystemExit):
+            parser.parse_args(["unknown"])
 
     def test_app_config_optionally_imports(self) -> None:
         # The AppConfig falls back to ``object`` when Django is

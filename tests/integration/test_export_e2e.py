@@ -99,15 +99,21 @@ async def admin_seed(brain_settings: BrainSettings, brain_app):
                     is_admin=True,
                     is_active=True,
                 ),
-                Session(
-                    id=session_id,
-                    user_id=user_id,
-                    csrf_token=csrf,
-                    expires_at=datetime.now(UTC) + timedelta(hours=1),
-                    ip_at_issue="127.0.0.1",
-                    user_agent_at_issue="test",
-                ),
             ],
+        )
+        # These models carry scalar foreign-key IDs rather than ORM
+        # relationships, so flush their parents before inserting Session and
+        # Schedule rows that reference them.
+        await s.flush()
+        s.add(
+            Session(
+                id=session_id,
+                user_id=user_id,
+                csrf_token=csrf,
+                expires_at=datetime.now(UTC) + timedelta(hours=1),
+                ip_at_issue="127.0.0.1",
+                user_agent_at_issue="test",
+            ),
         )
         # Seed three schedules: two z4j-scheduler-owned (one cron,
         # one interval) and one celery-beat-owned (which the

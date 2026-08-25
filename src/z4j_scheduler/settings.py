@@ -77,8 +77,8 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # Insecure-gRPC opt-in for local dev / CI / fixture-test scenarios.
     # When True the scheduler's gRPC client uses an insecure channel
-    # (no TLS, no client cert). Refused when ``environment`` is
-    # ``"production"`` to make the security posture explicit. The
+    # (no TLS, no client cert). Refused unless ``environment`` is exactly
+    # ``"dev"`` to make the security posture explicit. The
     # brain side must also be configured for insecure listening
     # via ``Z4J_SCHEDULER_GRPC_INSECURE=true`` for the connection to
     # succeed.
@@ -87,20 +87,20 @@ class Settings(BaseSettings):
         default=False,
         description=(
             "DEV/TEST ONLY: skip mTLS on the gRPC channel to brain. "
-            "Refused in production environments. Use only on trusted "
+            "Allowed only when environment is exactly 'dev'. Use only on trusted "
             "loopback or container networks."
         ),
     )
 
     # ------------------------------------------------------------------
-    # Required for HA - Postgres for advisory lock
+    # Deprecated compatibility field. Leader election uses leader_pg_dsn.
     # ------------------------------------------------------------------
     database_url: str | None = Field(
         default=None,
         description=(
-            "Postgres URL for advisory lock; same DB as brain. "
-            "Required when running multiple instances for HA; "
-            "single-instance deployments may omit (no leader gate)."
+            "Deprecated compatibility field; not read by the leader gate. "
+            "Set leader_pg_dsn (Z4J_SCHEDULER_LEADER_PG_DSN) for Postgres "
+            "leader election."
         ),
     )
 
@@ -109,13 +109,14 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     instance_id: str = Field(
         default_factory=_default_instance_id,
-        description="Unique identifier for this instance (audit log)",
+        description="Unique identifier shown in scheduler logs and /info",
     )
     projects: str = Field(
         default="*",
         description=(
-            "Comma-separated list of project slugs to serve, or '*' "
-            "for all projects this scheduler is enrolled with."
+            "Deprecated compatibility field; the current watch stream does "
+            "not read it and watches every project authorized by the scheduler "
+            "credential."
         ),
     )
 
@@ -143,7 +144,15 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # Tick + leader behavior
     # ------------------------------------------------------------------
-    leader_poll_interval_seconds: int = Field(default=2, ge=1, le=60)
+    leader_poll_interval_seconds: int = Field(
+        default=2,
+        ge=1,
+        le=60,
+        description=(
+            "Deprecated compatibility field; use leader_heartbeat_seconds "
+            "for Postgres acquire/liveness cadence."
+        ),
+    )
     reconcile_interval_seconds: int = Field(default=900, ge=60, le=86_400)
 
     # ------------------------------------------------------------------
@@ -183,11 +192,15 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # TriggerSchedule gRPC server (Phase 2, reverse direction)
     # ------------------------------------------------------------------
-    #: Off by default. Operators opt in once they want the
-    #: dashboard's "fire now" button to flow through the scheduler
-    #: rather than have brain dispatch directly. When disabled the
-    #: scheduler does not bind a server port and brain falls back
-    #: to its own direct-dispatch path on trigger-now.
+    #: Off by default, and it should stay off against a Brain that has
+    #: activated durable schedule control. That Brain fires an operator
+    #: trigger itself, because it is the authority on whether the schedule may
+    #: run and the only side that can see a hold, and the wire this server
+    #: would answer on carries cadence acceptances only. A trigger routed here
+    #: is refused with an error saying so, so enabling it against such a Brain
+    #: converts a working button into a broken one. It remains for a Brain that
+    #: predates that activation and still calls out to the scheduler. When
+    #: disabled the scheduler does not bind a server port.
     trigger_grpc_enabled: bool = False
     trigger_grpc_bind_host: str = "0.0.0.0"  # noqa: S104  - opt-in service
     #: Distinct from the FastAPI port (7800) and from the brain's
@@ -224,7 +237,12 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # Fire dispatch
     # ------------------------------------------------------------------
-    fire_timeout_seconds: int = Field(default=60, ge=1, le=3600)
+    fire_timeout_seconds: int = Field(
+        default=10,
+        ge=1,
+        le=3600,
+        description="Deadline for each FireSchedule gRPC attempt",
+    )
     fire_retry_max: int = Field(default=3, ge=0, le=10)
     fire_retry_backoff_seconds: float = Field(default=1.0, ge=0.0, le=60.0)
 
@@ -232,7 +250,12 @@ class Settings(BaseSettings):
     # gRPC tuning
     # ------------------------------------------------------------------
     grpc_keepalive_seconds: int = Field(default=30, ge=5, le=300)
-    grpc_reconnect_backoff_max_seconds: int = Field(default=30, ge=1, le=300)
+    grpc_reconnect_backoff_max_seconds: int = Field(
+        default=30,
+        ge=1,
+        le=300,
+        description="Maximum watch-stream reconnect backoff",
+    )
 
     # ------------------------------------------------------------------
     # Observability
@@ -248,10 +271,12 @@ class Settings(BaseSettings):
     environment: str = Field(
         default="production",
         description=(
-            "Deployment environment: 'production' (the default) "
-            "refuses insecure_grpc; 'dev', 'test', or any other "
-            "non-production value allows it. Mirrors the brain's "
-            "Z4J_ENVIRONMENT semantics."
+            "Deployment environment. Exactly 'dev' relaxes the security "
+            "gating: it is the only value that permits insecure_grpc or "
+            "skips the metrics-auth fail-fast. Every other value, including "
+            "'test' and 'staging', is held to the production posture. "
+            "Mirrors the brain's Z4J_ENVIRONMENT semantics, which compare "
+            "against the same exact string."
         ),
     )
 
@@ -261,12 +286,37 @@ class Settings(BaseSettings):
     pro_license_key: SecretStr | None = Field(
         default=None,
         description=(
-            "If set, enables z4j-scheduler-pro features (HA via raft, "
-            "SLA monitoring, schedule dependency graphs, multi-tenant "
-            "isolation). Requires the z4j-scheduler-pro package "
-            "installed alongside."
+            "Reserved compatibility field for a possible separate commercial "
+            "package. The open-source scheduler does not read this value and "
+            "setting it enables no feature."
         ),
     )
+
+    @property
+    def is_dev(self) -> bool:
+        """Whether this process runs with development relaxations. Exactly ``dev``.
+
+        The brain settles the same question the same way, and the two have to
+        agree: an operator sets one environment name for a deployment and
+        expects both halves of it to behave alike.
+
+        Both gates below used to compare against the literal ``production``,
+        which inverts the posture for every other label. A scheduler tagged
+        ``staging`` skipped the metrics-auth fail-fast, so a bind on
+        ``0.0.0.0`` with metrics enabled and no token served an unauthenticated
+        ``/metrics`` carrying project labels, schedule names and leadership
+        state. One tagged ``prod`` was allowed to talk plaintext gRPC to the
+        brain. Both refusal messages already told the reader to set ``dev``,
+        so the code and its own error text disagreed.
+        """
+        # Exact, byte for byte, like the brain. Keeping ``.strip().lower()``
+        # here while the field description and the release notes both promised
+        # "the exact string dev" and "mirrors the brain" published a guarantee
+        # the code did not honour: DEV and Dev relaxed the scheduler's metrics
+        # authentication and gRPC transport while the brain refused them. The
+        # tolerance was inherited from the comparisons this replaced, and
+        # carrying it forward silently was the mistake.
+        return self.environment == "dev"
 
     @model_validator(mode="after")
     def _enforce_metrics_auth_in_production(self) -> Settings:
@@ -282,13 +332,23 @@ class Settings(BaseSettings):
         also setting ``Z4J_SCHEDULER_METRICS_AUTH_TOKEN`` exposed
         every schedule label to anyone who could reach port 7800.
 
-        1.6.5 makes this fail-fast at startup. If:
-        - ``environment == "production"`` AND
+        The scheduler fails fast at startup. If:
+        - the environment is anything but ``dev`` AND
         - ``bind_host`` is not a loopback address AND
         - ``metrics_enabled`` is true AND
         - ``metrics_auth_token`` is unset
         then the scheduler refuses to start with a clear error
         naming the four-way condition and the fix options.
+
+        The first condition used to compare the environment against the
+        literal production label, which meant a scheduler tagged ``staging``
+        skipped the check entirely and served that metadata to anyone who
+        could reach the port. It asks :attr:`is_dev` now, so every label
+        except ``dev`` is held to the same standard.
+
+        Written without quoting the old comparison, because the guard in
+        ``test_environment_predicate_is_single`` reads source text and a
+        docstring spelling it out is exactly how someone copies it back.
 
         Operators have three valid configurations to resolve:
 
@@ -301,10 +361,10 @@ class Settings(BaseSettings):
            (``Z4J_SCHEDULER_METRICS_ENABLED=false``) -- the
            ``/metrics`` route is then not mounted at all.
 
-        Non-production environments (dev, test, CI) skip the
-        check so fixtureless setups continue to work.
+        Only the exact environment value ``dev`` skips the check. Labels such
+        as ``test``, ``staging``, or ``DEV`` retain the production posture.
         """
-        if self.environment.strip().lower() != "production":
+        if self.is_dev:
             return self
         if not self.metrics_enabled:
             # Metrics endpoint won't be mounted (see ``api/app.py``);
@@ -317,7 +377,7 @@ class Settings(BaseSettings):
             return self
         if self.metrics_auth_token is None:
             raise ValueError(
-                "z4j-scheduler: refusing to start in production with "
+                "z4j-scheduler: refusing to start with "
                 f"bind_host='{self.bind_host}' (non-loopback) AND "
                 "metrics_enabled=true AND no metrics_auth_token set. "
                 "The /metrics endpoint publishes project labels, "
@@ -331,8 +391,11 @@ class Settings(BaseSettings):
                 "    the scheduler behind a reverse proxy.\n"
                 "  (3) Disable metrics entirely: "
                 "    Z4J_SCHEDULER_METRICS_ENABLED=false.\n"
-                "Dev / test environments skip this check (set "
-                "Z4J_SCHEDULER_ENVIRONMENT=dev).",
+                "Only Z4J_SCHEDULER_ENVIRONMENT=dev skips this check. "
+                "Every other value, staging and test included, is held to "
+                "it: this check used to compare against the production "
+                "label alone, which is how a scheduler tagged staging came "
+                "to serve this endpoint unauthenticated.",
             )
         return self
 
@@ -344,10 +407,11 @@ class Settings(BaseSettings):
 
         - TLS bundle complete (cert + key + ca): production-shaped,
           allowed in any environment.
-        - ``insecure_grpc=True`` + non-production environment:
-          allowed for dev / test / CI / fixture-cert-less workflows.
-        - ``insecure_grpc=True`` + production environment: REFUSED.
-          Insecure transport is never acceptable in production.
+        - ``insecure_grpc=True`` + environment exactly ``dev``: allowed,
+          for a laptop or a fixture-cert-less CI job.
+        - ``insecure_grpc=True`` + any other environment: REFUSED. That
+          includes ``test`` and ``staging``, which this docstring used to say
+          were allowed while the validator refused them.
         - All TLS fields missing AND ``insecure_grpc=False``:
           REFUSED. Pre-1.5 the TLS fields were required-by-Pydantic;
           we now allow None to support the insecure path, but the
@@ -358,14 +422,14 @@ class Settings(BaseSettings):
             self.tls_cert is not None and self.tls_key is not None and self.tls_ca is not None
         )
         if self.insecure_grpc:
-            if self.environment.strip().lower() == "production":
+            if not self.is_dev:
                 raise ValueError(
                     "z4j-scheduler: insecure_grpc=True is refused in "
-                    "production. Either set Z4J_SCHEDULER_INSECURE_GRPC="
+                    "outside environment='dev'. Either set Z4J_SCHEDULER_INSECURE_GRPC="
                     "false and provide a valid TLS bundle "
                     "(Z4J_SCHEDULER_TLS_CERT/KEY/CA), or set "
-                    "Z4J_SCHEDULER_ENVIRONMENT=dev (acknowledging the "
-                    "trade-off) for non-production deployments.",
+                    "Z4J_SCHEDULER_ENVIRONMENT=dev, which is the only value "
+                    "that acknowledges the trade-off.",
                 )
             return self
         if not tls_complete:
@@ -373,8 +437,8 @@ class Settings(BaseSettings):
                 "z4j-scheduler: gRPC channel requires either a complete "
                 "mTLS bundle (Z4J_SCHEDULER_TLS_CERT, "
                 "Z4J_SCHEDULER_TLS_KEY, Z4J_SCHEDULER_TLS_CA all set) "
-                "or insecure_grpc=true (Z4J_SCHEDULER_INSECURE_GRPC=true) "
-                "for non-production environments.",
+                "or insecure_grpc=true (Z4J_SCHEDULER_INSECURE_GRPC=true), "
+                "which requires Z4J_SCHEDULER_ENVIRONMENT=dev.",
             )
         return self
 

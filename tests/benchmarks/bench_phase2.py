@@ -269,7 +269,9 @@ async def _run_all() -> dict:
     try:
         from testcontainers.postgres import PostgresContainer
 
-        container = PostgresContainer("postgres:18-alpine")
+        container = PostgresContainer(
+            "postgres:18.6@sha256:06cad38a5d9f5d24b4d83d86def30795d5e4b757fedbf5281172b576dedcd941"
+        )
         container.start()
     except Exception as exc:
         results["leader"] = {

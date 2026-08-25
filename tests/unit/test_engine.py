@@ -867,6 +867,14 @@ class TestCurrentFireProgress:
         assert entry.schedule_revision == 41
 
     async def test_terminal_disposition_latches_until_control_rotation(self) -> None:
+        """A refusal that names no live revision can only end on a new one.
+
+        There is nothing to wait for: a brain answering that the schedule does
+        not exist has no live row to name, and a peer that answers without one
+        has told this scheduler nothing it can act on. Waiting for the next
+        revision would be waiting for a fact that was never promised, so the
+        stop stays until the control generation is superseded outright.
+        """
         cache = ScheduleCache()
         slot = datetime(2026, 4, 26, 15, 0, tzinfo=UTC)
         entry = self._entry(
@@ -925,6 +933,190 @@ class TestCurrentFireProgress:
         replacement.schedule_revision = 42
         await cache.apply_watch_update(replacement)
         assert replacement.is_enabled is True
+
+    async def test_a_fire_that_raced_a_hold_resumes_when_the_hold_is_released(
+        self,
+    ) -> None:
+        """The release has to be enough. Restarting the process is not a remedy.
+
+        An operator holds a schedule while a fire for the due slot is already in
+        flight. Brain allocates a revision for the hold and answers the fire
+        with a refresh, because the state the fire expected is no longer live.
+        The scheduler stops the schedule locally, which is right: its view is
+        behind and it must not keep firing from it.
+
+        A hold deliberately keeps the same control token, since holding a
+        schedule does not redefine it. So a stop that ends only on a new token
+        cannot end here at all: the release carries the same token, and the
+        schedule stays dark with nothing in the dashboard to explain it. What
+        moves is the revision, and this asserts the release is what brings the
+        schedule back.
+        """
+        cache = ScheduleCache()
+        slot = datetime(2026, 4, 26, 15, 0, tzinfo=UTC)
+        entry = self._entry(
+            catch_up="skip",
+            next_fire_at=slot,
+            last_fire_at=datetime(2026, 4, 26, 14, 55, tzinfo=UTC),
+        )
+        await cache.upsert(entry)
+        # Brain allocates revisions globally, so the hold's is not simply the
+        # next one this schedule saw.
+        held_revision = entry.schedule_revision + 5
+
+        class RacedByHold(RecordingDispatcher):
+            calls = 0
+
+            async def dispatch(self, *, schedule_entry, **_kwargs):
+                self.calls += 1
+                return FireResult(
+                    command_id=None,
+                    error_code="stale_control",
+                    error_message="schedule control state changed",
+                    buffered=False,
+                    disposition="stale_control_refresh",
+                    live_control_token=schedule_entry.control_token,
+                    live_revision=held_revision,
+                    live_last_run_at=schedule_entry.last_fire_at,
+                    live_next_run_at=slot,
+                )
+
+        dispatcher = RacedByHold()
+        engine = TickEngine(
+            cache=cache,
+            leader_gate=AlwaysLeader(),
+            dispatcher=dispatcher,
+            clock=ManualClock(slot),
+            max_sleep_seconds=0.01,
+        )
+
+        await engine._iteration()
+        await engine._iteration()
+        assert dispatcher.calls == 1, "the stop must hold while nothing has changed"
+        assert entry.is_enabled is False
+
+        def _echo(*, revision: int, enabled: bool) -> ScheduleEntry:
+            echo = self._entry(
+                catch_up="skip",
+                next_fire_at=slot,
+                last_fire_at=entry.last_fire_at,
+            )
+            echo.id = entry.id
+            echo.project_id = entry.project_id
+            echo.control_token = entry.control_token
+            echo.schedule_revision = revision
+            echo.is_enabled = enabled
+            return echo
+
+        # An unrelated edit that landed before the hold. It is newer than what
+        # this scheduler had and older than what refused the fire, so it is not
+        # the state the stop is waiting for and must not end it.
+        interim = _echo(revision=held_revision - 2, enabled=True)
+        await cache.apply_watch_update(interim)
+        assert interim.is_enabled is False, (
+            "a stop that ends before the refusing state arrives is not a stop"
+        )
+        await engine._iteration()
+        assert dispatcher.calls == 1
+
+        # Brain projects a hold as not-enabled; there is no separate field.
+        held = _echo(revision=held_revision, enabled=False)
+        await cache.apply_watch_update(held)
+        assert held.is_enabled is False
+        await engine._iteration()
+        assert dispatcher.calls == 1, "a held schedule must not fire"
+
+        released = _echo(revision=held_revision + 1, enabled=True)
+        await cache.apply_watch_update(released)
+        assert released.is_enabled is True, (
+            "the release carries the same control token, so a token-keyed stop "
+            "would clamp it here and the schedule would never tick again"
+        )
+
+        await engine._iteration()
+        assert dispatcher.calls == 2
+
+    async def test_a_stale_view_resumes_on_the_state_that_refused_it(self) -> None:
+        """Nothing is holding this schedule, so nothing further should be needed.
+
+        A refresh means only that this scheduler's view was behind. Once the
+        very revision the Brain named has arrived, the schedule is enabled, the
+        cursor is Brain's own, and there is no remaining reason not to fire.
+        Waiting for a revision beyond it would strand the slot until somebody
+        happened to edit the schedule, which is a missed fire caused entirely
+        by the scheduler's own bookkeeping.
+        """
+        cache = ScheduleCache()
+        slot = datetime(2026, 4, 26, 15, 0, tzinfo=UTC)
+        entry = self._entry(
+            catch_up="skip",
+            next_fire_at=slot,
+            last_fire_at=datetime(2026, 4, 26, 14, 55, tzinfo=UTC),
+        )
+        await cache.upsert(entry)
+        live_revision = entry.schedule_revision + 3
+
+        class StaleThenAccepted(RecordingDispatcher):
+            calls = 0
+
+            async def dispatch(self, *, schedule_entry, prepared_fire, **_kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    return FireResult(
+                        command_id=None,
+                        error_code="stale_control",
+                        error_message="schedule control state changed",
+                        buffered=False,
+                        disposition="stale_control_refresh",
+                        live_control_token=schedule_entry.control_token,
+                        live_revision=live_revision,
+                        live_last_run_at=schedule_entry.last_fire_at,
+                        live_next_run_at=slot,
+                    )
+                accepted = schedule_entry.schedule_revision + 1
+                return FireResult(
+                    command_id=uuid4(),
+                    error_code=None,
+                    error_message=None,
+                    buffered=False,
+                    disposition="accepted",
+                    acceptance_revision=accepted,
+                    accepted_last_run_at=prepared_fire.scheduled_for,
+                    accepted_next_run_at=prepared_fire.next_run_at,
+                    live_control_token=schedule_entry.control_token,
+                    live_revision=accepted,
+                    live_last_run_at=prepared_fire.scheduled_for,
+                    live_next_run_at=prepared_fire.next_run_at,
+                )
+
+        dispatcher = StaleThenAccepted()
+        engine = TickEngine(
+            cache=cache,
+            leader_gate=AlwaysLeader(),
+            dispatcher=dispatcher,
+            clock=ManualClock(slot),
+            max_sleep_seconds=0.01,
+        )
+
+        await engine._iteration()
+        assert dispatcher.calls == 1
+        assert entry.is_enabled is False
+
+        caught_up = self._entry(
+            catch_up="skip",
+            next_fire_at=slot,
+            last_fire_at=entry.last_fire_at,
+        )
+        caught_up.id = entry.id
+        caught_up.project_id = entry.project_id
+        caught_up.control_token = entry.control_token
+        caught_up.schedule_revision = live_revision
+        await cache.apply_watch_update(caught_up)
+        assert caught_up.is_enabled is True
+
+        await engine._iteration()
+        assert dispatcher.calls == 2
+        assert caught_up.last_fire_at == slot
 
     async def test_untyped_success_response_does_not_advance(self) -> None:
         cache = ScheduleCache()

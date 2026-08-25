@@ -4,10 +4,10 @@ Schedule kind ``"one_shot"`` with expression as an ISO-8601 absolute
 timestamp (e.g. ``"2026-04-30T15:00:00Z"`` or
 ``"2026-04-30T15:00:00+00:00"``). Fires exactly once at that time.
 
-After the fire completes, the brain-side ``AcknowledgeFireResult``
-handler flips ``schedules.is_enabled = False`` so the schedule does
-not re-fire. The tick engine treats one-shot schedules identically
-to cron/interval until that flip happens.
+After the current protocol accepts the one slot, it persists that timestamp as
+``last_run_at`` and a null successor as ``next_run_at``. The scheduler then
+treats the definition as exhausted. A later ``AcknowledgeFireResult`` records
+the dispatch receipt; it is not the current cadence transition.
 
 Public API:
 

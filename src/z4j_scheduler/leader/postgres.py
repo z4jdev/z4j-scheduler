@@ -1,7 +1,7 @@
 """Postgres advisory-lock-backed leader election.
 
-Replaces v1's :class:`SingleInstanceLeaderGate` with real
-HA-capable election. Two or more scheduler instances point at the
+Provides an HA-capable alternative to :class:`SingleInstanceLeaderGate`.
+Two or more scheduler instances point at the
 same Postgres database (typically the brain's own DB); each tries
 to ``pg_try_advisory_lock`` a deterministic namespace key. The one
 that gets the lock is leader; the others stand by.
@@ -33,11 +33,20 @@ API
 ---
 
 The gate satisfies the ``is_leader(project_id) -> bool`` Protocol
-that :class:`~z4j_scheduler.tick.engine.TickEngine` consumes. The
-``project_id`` argument is currently ignored - this is the GLOBAL
-leader gate (one leader per scheduler cluster). The per-project
-gate lands in step 4 of Phase 2 and uses one advisory lock per
-project_id.
+that :class:`~z4j_scheduler.tick.engine.TickEngine` consumes.
+
+Two gates live in this module:
+
+- :class:`PostgresLeaderGate` is the GLOBAL gate: one leader per
+  scheduler cluster, and the ``project_id`` argument is ignored.
+  Standbys hold no work until failover.
+- :class:`PerProjectLeaderGate` takes one advisory lock per project,
+  so several instances divide the projects between them rather than
+  parking N-1 of them in a hot standby. ``held_projects()`` reports
+  what this instance currently leads.
+
+Select between them with ``Z4J_SCHEDULER_LEADER_BACKEND``
+(``single`` / ``postgres`` / ``postgres_per_project``).
 
 Lifecycle (``start`` / ``stop``) is async and matches the
 ``BrainClient`` / ``WatchStream`` pattern: the gate holds a

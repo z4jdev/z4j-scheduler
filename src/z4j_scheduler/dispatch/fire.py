@@ -31,6 +31,7 @@ import asyncio
 import logging
 import random
 import time
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import NAMESPACE_DNS, UUID, uuid5
@@ -52,6 +53,17 @@ logger = logging.getLogger("z4j.scheduler.dispatch")
 #: same (schedule_id, scheduled_for_iso) pair always produces the
 #: same fire_id across scheduler restarts and across HA instances.
 _FIRE_ID_NAMESPACE = uuid5(NAMESPACE_DNS, "z4j-scheduler.fire-id.v1")
+
+#: The one answer an operator gets when their trigger cannot ride the
+#: FireSchedule wire, whether the scheduler works that out from the schedule in
+#: front of it or hears it from the Brain. Two spellings of the same refusal
+#: would read as two different problems, and only one of them has a remedy.
+_MANUAL_TRIGGER_REFUSED_CODE = "manual_trigger_not_accepted"
+_MANUAL_TRIGGER_REFUSED_MESSAGE = (
+    "this Brain does not accept operator triggers through the scheduler; "
+    "it fires them itself, so unset scheduler_trigger_url and trigger from "
+    "the Brain"
+)
 
 #: gRPC status codes we treat as transient and retry. Anything else
 #: is treated as permanent and surfaced to the engine immediately.
@@ -93,6 +105,26 @@ def derive_fire_id(schedule_id: UUID, scheduled_for: datetime) -> UUID:
     return uuid5(_FIRE_ID_NAMESPACE, canonical)
 
 
+def _manual_trigger_refused() -> FireResult:
+    """The refusal the scheduler reaches on its own, before any wire call.
+
+    ``disposition`` is deliberately left unset. The dispositions are the
+    Brain's vocabulary for what it did with a fire, and here the Brain was
+    never asked, so claiming one would be putting words in its mouth. Unset
+    also keeps ``FireResult.success`` false, which is the property the trigger
+    handler reports to the operator.
+    """
+
+    from z4j_scheduler.storage._models import FireResult as _FireResult
+
+    return _FireResult(
+        command_id=None,
+        error_code=_MANUAL_TRIGGER_REFUSED_CODE,
+        error_message=_MANUAL_TRIGGER_REFUSED_MESSAGE,
+        buffered=False,
+    )
+
+
 class FireDispatcher:
     """Production :class:`Dispatcher` - calls brain over gRPC.
 
@@ -114,13 +146,19 @@ class FireDispatcher:
         self,
         *,
         schedule_id: UUID,
+        schedule_entry: ScheduleEntry,
         triggered_by_user_id: str = "",
-    ) -> object:
+    ) -> FireResult:
         """Fire a schedule on operator demand. Returns the FireResult.
 
-        Used by the scheduler-side TriggerSchedule gRPC handler when
-        the dashboard's "fire now" button is clicked. Differs from
-        :meth:`dispatch` in two ways:
+        Reached from the scheduler-side TriggerSchedule handler, which a Brain
+        calls only when an operator has wired ``scheduler_trigger_url``. A
+        Brain that has activated durable schedule control does not: it performs
+        an operator trigger itself, because it is the authority on whether the
+        schedule may run and the only side that can see a hold. This path
+        remains for a Brain that still calls.
+
+        Differs from :meth:`dispatch` in two ways:
 
         - ``fire_id`` is a fresh :func:`uuid4` instead of being
           derived from ``scheduled_for`` (operator triggers are not
@@ -135,9 +173,35 @@ class FireDispatcher:
         attributed to the operator who clicked; empty for the cadence
         :meth:`dispatch` path.
 
+        ``schedule_entry`` decides which of those two worlds this is, and it is
+        required for that reason. A schedule under durable control carries a
+        control token, and the wire that governs it accepts cadence
+        acceptances only: a slot-less operator fire is not one, no version of
+        this scheduler can express it, and the Brain would refuse it. Asking
+        anyway spent a round trip to be told something the schedule in hand
+        already said, and left an acknowledgement addressed to a fire the Brain
+        never recorded. So the refusal is decided here, from the same field
+        :meth:`dispatch` reads to choose its protocol.
+
+        :meth:`_manual_fire_refusal_result` stays as the answer for the race
+        this cannot see: a Brain that activates control between the snapshot
+        this entry came from and the operator's click. Both routes end in the
+        same refusal, because they are the same refusal.
+
         Same retry + ack semantics as :meth:`dispatch` so a flaky
         brain doesn't make the operator's click look like a no-op.
         """
+        if schedule_entry.id != schedule_id:
+            raise ValueError("schedule entry does not match schedule_id")
+        if schedule_entry.control_token is not None:
+            m.fires_total.labels(status="trigger_failed").inc()
+            logger.info(
+                "z4j.scheduler.dispatch: refusing operator trigger for "
+                "schedule_id=%s; this Brain fires operator triggers itself",
+                schedule_id,
+            )
+            return _manual_trigger_refused()
+
         from uuid import uuid4 as _uuid4
 
         fire_id = _uuid4()
@@ -152,6 +216,7 @@ class FireDispatcher:
             fired_at=fired_at,
             triggered_by_user_id=triggered_by_user_id,
         )
+        result = self._manual_fire_refusal_result(result)
         elapsed = time.monotonic() - start
         m.fire_latency_seconds.observe(elapsed)
 
@@ -163,15 +228,51 @@ class FireDispatcher:
                 command_id=result.command_id,
                 status="success",
             )
-        else:
-            m.fires_total.labels(status="trigger_failed").inc()
-            await self._best_effort_ack(
-                fire_id=fire_id,
-                command_id=None,
-                status="failed",
-                error=result.error_message or result.error_code or "unknown",
-            )
+            return result
+
+        m.fires_total.labels(status="trigger_failed").inc()
+        if result.error_code == _MANUAL_TRIGGER_REFUSED_CODE:
+            # A Brain that refused this fire for its shape recorded nothing to
+            # acknowledge, and answers an acknowledgement for an unknown fire
+            # with FAILED_PRECONDITION. Sending it anyway put a stack trace in
+            # the log of the operator who is at that moment reading the log to
+            # find out why their click did nothing.
+            return result
+        await self._best_effort_ack(
+            fire_id=fire_id,
+            command_id=None,
+            status="failed",
+            error=result.error_message or result.error_code or "unknown",
+        )
         return result
+
+    @staticmethod
+    def _manual_fire_refusal_result(result: FireResult) -> FireResult:
+        """Say what a refused operator trigger actually means.
+
+        The Brain answers an attributed fire with the legacy-upgrade
+        disposition, whose code reads as "upgrade the scheduler". On a cadence
+        fire that is exactly right. On an operator trigger it is the opposite
+        of the truth: the scheduler is current, and no version of it can put an
+        operator's extra fire on a wire that carries cadence acceptances. An
+        operator handed that code re-deploys a component that was never the
+        problem, so the code and the message are replaced with the one action
+        that resolves it.
+
+        The Brain's disposition is preserved: it is what the Brain actually
+        said, ``success`` is derived from it, and a refusal reported as a fired
+        schedule would be far worse than a confusing code.
+
+        Only this disposition is rewritten. Every other refusal (paused,
+        disabled, quarantined, no agent) already says what it means.
+        """
+        if result.disposition != "legacy_upgrade_required":
+            return result
+        return replace(
+            result,
+            error_code=_MANUAL_TRIGGER_REFUSED_CODE,
+            error_message=_MANUAL_TRIGGER_REFUSED_MESSAGE,
+        )
 
     async def dispatch(  # noqa: PLR0912, PLR0915 - explicit protocol state machine
         self,
@@ -302,10 +403,12 @@ class FireDispatcher:
                 result.command_id,
                 elapsed,
             )
-            # Best-effort ack - brain doesn't actually need this in
-            # the success path (it created the Command), but the
-            # contract is symmetric and the integration tests rely
-            # on it. Failures here are not fatal.
+            # The receipt reports this FireSchedule round trip, not the task's
+            # execution: the agent reports that separately, and the scheduler
+            # never learns it. So it is sent here, at handoff, where the fact
+            # it records is the fact that just happened. A buffered fire has no
+            # command to receipt against and is left unacknowledged until one
+            # exists. Failures here are not fatal.
             if not current_response or result.command_id is not None:
                 await self._best_effort_ack(
                     fire_id=fire_id,
@@ -357,6 +460,17 @@ class FireDispatcher:
 
         from z4j_scheduler.storage._protocol import CURRENT_PROTOCOL_EPOCH
 
+        # Same reasoning as make_fire_request: submit what this process
+        # computes, not the value the Brain streamed for the row. The Brain
+        # compares the submission against its own computation, so echoing the
+        # row made it compare the Brain to itself -- and made any change to the
+        # cadence closure (or the Python version, which is in the fingerprint)
+        # refuse every cursor advance for every pre-existing schedule.
+        from z4j_scheduler.tick.cadence import (
+            CADENCE_SEMANTICS_VERSION,
+            cadence_runtime_fingerprint,
+        )
+
         if entry.control_token is None:
             raise ValueError("durable cursor advance requires a current schedule")
         return await self._client.advance_schedule_cursor(
@@ -370,8 +484,8 @@ class FireDispatcher:
             skipped_through=prepared.scheduled_for,
             prepared_next_run_at=prepared.next_run_at,
             scheduler_protocol_epoch=CURRENT_PROTOCOL_EPOCH,
-            cadence_semantics_version=entry.cadence_semantics_version,
-            cadence_runtime_fingerprint=entry.cadence_runtime_fingerprint,
+            cadence_semantics_version=CADENCE_SEMANTICS_VERSION,
+            cadence_runtime_fingerprint=cadence_runtime_fingerprint(),
         )
 
     # ------------------------------------------------------------------

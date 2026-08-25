@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.9.0 (2026-08-25)
+
+* Raise the protobuf runtime floor to 6.33.5, the first release that
+  closes CVE-2026-0994 while remaining above the committed gencode's
+  6.31.1 import minimum.
+
+**Breaking for non-dev environments that relied on the old gating.** Two
+security checks compared `Z4J_SCHEDULER_ENVIRONMENT` against the literal
+`production`, so every other label took the relaxed branch. A scheduler tagged
+`staging` skipped the metrics-auth fail-fast entirely, serving an
+unauthenticated `/metrics` with project labels, schedule names, leadership
+state and fire status; one tagged `prod` or `test` could talk plaintext gRPC to
+the brain on the schedule-control channel.
+
+Both now relax only for the exact string `dev`, matching the brain and matching
+what their own refusal messages already told operators to set. **If you run with
+`Z4J_SCHEDULER_ENVIRONMENT` set to `test`, `staging` or anything other than
+`dev`, and you rely on `Z4J_SCHEDULER_INSECURE_GRPC=true` or on serving metrics
+without a token, the scheduler will now refuse to start.** Either set
+`Z4J_SCHEDULER_ENVIRONMENT=dev` to acknowledge the trade-off, or supply the mTLS
+bundle and a metrics token. The field description advertised the old contract
+and has been corrected.
+
+* A paused schedule is now genuinely held. The hold folds into the enabled projection the scheduler reads, so a paused schedule stops ticking rather than being refused at fire time and retried under back-off.
+* A delayed stop response no longer disables a newer scheduler state indefinitely.
+* Snapshot cache, tick engine and trigger-gRPC handling updated for the schedule-control changes.
+
 ## 1.8.0 (2026-07-23)
 
 * `fire_one_missed` / catch-up no longer dispatches the entire missed backlog on recovery (a duplicate-side-effects storm); interval catch-up now coalesces the missed window and the `fire_all_missed` drain is bounded and honors stop / disable mid-drain.

@@ -5,7 +5,7 @@ Each importer:
 
 1. Reads source format (celery-beat config, rq-scheduler Redis
    sorted set, APScheduler jobstore, system crontab)
-2. Maps to z4j Schedule shape (cron / interval / one_shot)
+2. Maps to the brain's Schedule vocabulary (cron / interval / clocked / solar)
 3. Writes to brain via the existing schedule REST API
 4. Tags rows with ``source=imported_<tool>`` for audit visibility
 

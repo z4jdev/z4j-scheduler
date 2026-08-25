@@ -7,6 +7,7 @@ per test and asserts on the four endpoints' responses.
 
 from __future__ import annotations
 
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -58,15 +59,15 @@ def _make_client(settings: Settings, *, ready: bool = True) -> TestClient:
 
 class TestHealth:
     def test_health_returns_alive(self, settings: Settings) -> None:
-        client = _make_client(settings)
-        response = client.get("/health")
-        assert response.status_code == 200
-        assert response.json() == {"status": "alive"}
+        with closing(_make_client(settings)) as client:
+            response = client.get("/health")
+            assert response.status_code == 200
+            assert response.json() == {"status": "alive"}
 
     def test_health_works_even_when_not_ready(self, settings: Settings) -> None:
-        client = _make_client(settings, ready=False)
-        # Health is liveness only - returns 200 even when not ready.
-        assert client.get("/health").status_code == 200
+        with closing(_make_client(settings, ready=False)) as client:
+            # Health is liveness only - returns 200 even when not ready.
+            assert client.get("/health").status_code == 200
 
 
 # ---------------------------------------------------------------------------
@@ -76,22 +77,22 @@ class TestHealth:
 
 class TestReady:
     def test_ready_when_all_subsystems_up(self, settings: Settings) -> None:
-        client = _make_client(settings, ready=True)
-        response = client.get("/ready")
-        assert response.status_code == 200
-        assert response.json() == {"status": "ready"}
+        with closing(_make_client(settings, ready=True)) as client:
+            response = client.get("/ready")
+            assert response.status_code == 200
+            assert response.json() == {"status": "ready"}
 
     def test_not_ready_when_brain_disconnected(self, settings: Settings) -> None:
         state = SchedulerState(settings=settings)
         state.cache_initial_sync_complete = True
         state.leader_gate_initialised = True
         # brain_client_connected stays False
-        client = TestClient(create_app(state))
-        response = client.get("/ready")
-        assert response.status_code == 503
-        body = response.json()
-        assert body["status"] == "not_ready"
-        assert "brain_client" in body["missing"]
+        with closing(TestClient(create_app(state))) as client:
+            response = client.get("/ready")
+            assert response.status_code == 503
+            body = response.json()
+            assert body["status"] == "not_ready"
+            assert "brain_client" in body["missing"]
 
     def test_not_ready_lists_every_missing_subsystem(
         self,
@@ -99,15 +100,15 @@ class TestReady:
     ) -> None:
         state = SchedulerState(settings=settings)
         # No subsystems up.
-        client = TestClient(create_app(state))
-        response = client.get("/ready")
-        assert response.status_code == 503
-        body = response.json()
-        assert set(body["missing"]) == {
-            "brain_client",
-            "cache_initial_sync",
-            "leader_gate",
-        }
+        with closing(TestClient(create_app(state))) as client:
+            response = client.get("/ready")
+            assert response.status_code == 503
+            body = response.json()
+            assert set(body["missing"]) == {
+                "brain_client",
+                "cache_initial_sync",
+                "leader_gate",
+            }
 
 
 # ---------------------------------------------------------------------------
@@ -117,26 +118,26 @@ class TestReady:
 
 class TestInfo:
     def test_info_returns_runtime_snapshot(self, settings: Settings) -> None:
-        client = _make_client(settings)
-        response = client.get("/info")
-        assert response.status_code == 200
-        body = response.json()
-        assert body["instance_id"] == "test-instance"
-        assert body["ready"] is True
-        assert body["schedules_loaded"] == 0
-        assert body["uptime_seconds"] >= 0
-        assert "version" in body
-        assert "started_at" in body
+        with closing(_make_client(settings)) as client:
+            response = client.get("/info")
+            assert response.status_code == 200
+            body = response.json()
+            assert body["instance_id"] == "test-instance"
+            assert body["ready"] is True
+            assert body["schedules_loaded"] == 0
+            assert body["uptime_seconds"] >= 0
+            assert "version" in body
+            assert "started_at" in body
 
     def test_info_does_not_leak_secrets(self, settings: Settings) -> None:
         # Even if metrics_auth_token is set (it's not here, but if it
         # were), it must NOT appear in /info.
-        client = _make_client(settings)
-        body = client.get("/info").text
-        # Cert paths shouldn't appear either - they're sensitive
-        # configuration, not status. The string "tls_" should not
-        # appear.
-        assert "tls_" not in body.lower()
+        with closing(_make_client(settings)) as client:
+            body = client.get("/info").text
+            # Cert paths shouldn't appear either - they're sensitive
+            # configuration, not status. The string "tls_" should not
+            # appear.
+            assert "tls_" not in body.lower()
 
     def test_info_does_not_leak_topology(self, settings: Settings) -> None:
         """Audit fix S003 (1.4.0): /info must not expose brain URL.
@@ -149,10 +150,10 @@ class TestInfo:
         depth: redact these fields even when an operator opts back
         into 0.0.0.0 binding via a reverse proxy.
         """
-        client = _make_client(settings)
-        body = client.get("/info").json()
-        assert "brain_grpc_url" not in body, "leaks the upstream brain URL"
-        assert "projects" not in body, "leaks the per-instance project bindings"
+        with closing(_make_client(settings)) as client:
+            body = client.get("/info").json()
+            assert "brain_grpc_url" not in body, "leaks the upstream brain URL"
+            assert "projects" not in body, "leaks the per-instance project bindings"
 
 
 # ---------------------------------------------------------------------------
@@ -165,23 +166,23 @@ class TestMetrics:
         self,
         settings: Settings,
     ) -> None:
-        client = _make_client(settings)
-        response = client.get("/metrics")
-        assert response.status_code == 200
-        # Prometheus exposition has a specific content type.
-        assert "text/plain" in response.headers["content-type"]
-        # And our metric names appear.
-        text = response.text
-        assert "z4j_scheduler_fires_total" in text
-        assert "z4j_scheduler_schedules_loaded" in text
+        with closing(_make_client(settings)) as client:
+            response = client.get("/metrics")
+            assert response.status_code == 200
+            # Prometheus exposition has a specific content type.
+            assert "text/plain" in response.headers["content-type"]
+            # And our metric names appear.
+            text = response.text
+            assert "z4j_scheduler_fires_total" in text
+            assert "z4j_scheduler_schedules_loaded" in text
 
     def test_metrics_no_auth_when_token_unset(
         self,
         settings: Settings,
     ) -> None:
-        client = _make_client(settings)
-        # No Authorization header - 200 OK.
-        assert client.get("/metrics").status_code == 200
+        with closing(_make_client(settings)) as client:
+            # No Authorization header - 200 OK.
+            assert client.get("/metrics").status_code == 200
 
     def test_metrics_requires_bearer_when_token_set(
         self,
@@ -193,24 +194,23 @@ class TestMetrics:
             "supersecret123",
         )
         gated_settings = Settings(_env_file=None)  # type: ignore[call-arg]
-        client = _make_client(gated_settings)
+        with closing(_make_client(gated_settings)) as client:
+            # No header - 401.
+            assert client.get("/metrics").status_code == 401
 
-        # No header - 401.
-        assert client.get("/metrics").status_code == 401
+            # Wrong header - 401.
+            response = client.get(
+                "/metrics",
+                headers={"Authorization": "Bearer wrong"},
+            )
+            assert response.status_code == 401
 
-        # Wrong header - 401.
-        response = client.get(
-            "/metrics",
-            headers={"Authorization": "Bearer wrong"},
-        )
-        assert response.status_code == 401
-
-        # Correct header - 200.
-        response = client.get(
-            "/metrics",
-            headers={"Authorization": "Bearer supersecret123"},
-        )
-        assert response.status_code == 200
+            # Correct header - 200.
+            response = client.get(
+                "/metrics",
+                headers={"Authorization": "Bearer supersecret123"},
+            )
+            assert response.status_code == 200
 
     # ------------------------------------------------------------------
     # 1.6.5 audit: honor the metrics_enabled toggle
@@ -232,13 +232,13 @@ class TestMetrics:
             "test fixture: env var should have parsed as False"
         )
 
-        client = _make_client(disabled_settings)
-        response = client.get("/metrics")
-        assert response.status_code == 404, (
-            "1.6.5 regression: when metrics_enabled=false the "
-            "/metrics route MUST NOT be mounted (404), not 200. "
-            f"Got {response.status_code}: {response.text[:200]}"
-        )
+        with closing(_make_client(disabled_settings)) as client:
+            response = client.get("/metrics")
+            assert response.status_code == 404, (
+                "1.6.5 regression: when metrics_enabled=false the "
+                "/metrics route MUST NOT be mounted (404), not 200. "
+                f"Got {response.status_code}: {response.text[:200]}"
+            )
 
 
 # ---------------------------------------------------------------------------

@@ -14,23 +14,49 @@ CADENCE_SEMANTICS_VERSION = 1
 _DEPENDENCIES = ("croniter", "astral", "tzdata", "python-dateutil", "six")
 
 
+@lru_cache(maxsize=1)
+def _packaged_zone_names() -> frozenset[str]:
+    """Every zone name the pinned ``tzdata`` wheel actually offers.
+
+    The wheel ships an explicit manifest (``tzdata/zones``), so membership is
+    the authoritative test. Everything else -- case, separators, traversal --
+    falls out of it for free.
+    """
+
+    listing = resources.files("tzdata").joinpath("zones").read_text(encoding="utf-8")
+    return frozenset(line.strip() for line in listing.splitlines() if line.strip())
+
+
 @lru_cache(maxsize=256)
 def packaged_zoneinfo(key: str) -> ZoneInfo:
     """Load a zone only from the release-pinned ``tzdata`` wheel."""
 
     clean = key.strip()
-    if (
-        not clean
-        or clean.startswith("/")
-        or any(part in {"", ".", ".."} for part in clean.split("/"))
-    ):
+    if clean not in _packaged_zone_names():
+        # EXACT MEMBERSHIP, not a path-shape guard.
+        #
+        # This used to approximate ZoneInfo's rules by inspecting the string --
+        # reject a leading "/", reject backslashes, reject a drive qualifier,
+        # reject "." and ".." segments -- and then trust the filesystem to
+        # resolve the rest. Every version of that was wrong somewhere, because
+        # the filesystem is not a set membership test:
+        #
+        #   "AMERICA/NEW_YORK"   loads on Windows (case-insensitive), and on
+        #   "america/New_York"   Linux does not. Published 1.8 rejected both,
+        #   "America./New_York"  because bare ZoneInfo looks the key up exactly.
+        #
+        # So a Windows Brain accepted timezones its Linux scheduler could not
+        # fire, creating a schedule that is then disabled on first tick -- the
+        # exact created-but-never-firing failure the API validator exists to
+        # prevent, reintroduced by the validator itself.
+        #
+        # The wheel ships the answer. Membership is case-sensitive, separator-
+        # agnostic, identical on every platform, and needs no filesystem access
+        # at all, so none of those shapes can be reached.
         raise ZoneInfoNotFoundError(key)
     node = resources.files("tzdata.zoneinfo").joinpath(*clean.split("/"))
-    try:
-        with node.open("rb") as stream:
-            return ZoneInfo.from_file(stream, key=clean)
-    except (FileNotFoundError, IsADirectoryError) as exc:
-        raise ZoneInfoNotFoundError(key) from exc
+    with node.open("rb") as stream:
+        return ZoneInfo.from_file(stream, key=clean)
 
 
 @lru_cache(maxsize=1)

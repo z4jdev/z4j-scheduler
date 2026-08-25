@@ -13,12 +13,9 @@ Long-lived async task that:
    a transaction that committed but whose NOTIFY payload was lost
    to a connection blip; brain restarts that orphan a backlog of
    pending events; bugs we haven't found yet). The default cadence
-   is 15 minutes which is well within the worst-case staleness any
-   operator should tolerate.
-5. Tracks the latest ``resume_token`` so brain can pick up from
-   where we left off when the stream protocol supports resume
-   (currently brain emits monotonically-increasing tokens; the
-   actual resume semantics land brain-side in Phase 1 server work)
+   is 15 minutes and is operator-configurable.
+5. Tracks the legacy stream's latest ``resume_token`` across reconnects. The
+   current protocol instead resumes from an exact revision cursor.
 
 Consumer pattern:
 
@@ -75,6 +72,8 @@ class WatchStream:
             watch stream. Defaults to 15 minutes. Set to ``0`` to
             disable (only the on-reconnect sync runs). Negative
             values are coerced to ``0``.
+        reconnect_backoff_max_seconds: Maximum delay between stream reconnect
+            attempts. Defaults to 30 seconds.
     """
 
     def __init__(
@@ -84,6 +83,7 @@ class WatchStream:
         cache: ScheduleCache,
         project_id: UUID | None = None,
         full_resync_interval_seconds: float = (_DEFAULT_FULL_RESYNC_INTERVAL_SECONDS),
+        reconnect_backoff_max_seconds: float = _BACKOFF_MAX,
         protocol_mode: Literal["legacy", "current"] = "legacy",
         protocol_selector: (Callable[[], Awaitable[Literal["legacy", "current"]]] | None) = None,
     ) -> None:
@@ -104,6 +104,10 @@ class WatchStream:
         self._full_resync_interval_seconds = max(
             0.0,
             full_resync_interval_seconds,
+        )
+        self._reconnect_backoff_max_seconds = max(
+            0.1,
+            reconnect_backoff_max_seconds,
         )
         # Expose a ``is_healthy`` flag the tick engine reads on
         # every iteration. If the watch stream drops (network
@@ -439,13 +443,45 @@ class WatchStream:
     # Backoff
     # ------------------------------------------------------------------
 
+    # KNOWN LIMITATION, deliberate for this release.
+    #
+    # ``_reconnect_attempts`` only increments. After a burst of failures the
+    # delay reaches its 30-second ceiling and stays there for the life of the
+    # process, so a later drop costs up to 30 seconds during which the tick
+    # engine will not dispatch and a missed fire is skipped rather than
+    # deferred. That is a real cost and it is the one being accepted.
+    #
+    # Three attempts to clear it were made and all three were worse:
+    #
+    #   Before the ``async for``: the client methods are async generators, so
+    #   the RPC has not started. The brain rejects Watch at a per-certificate
+    #   and a global capacity cap, and that rejection arrives before any frame,
+    #   so the penalty cleared on every cycle and the scheduler re-negotiated
+    #   and re-synced two or three times a second against a brain that was
+    #   reachable and explicitly shedding load. Positive feedback during
+    #   overload, which is worse than a slow reconnect.
+    #
+    #   Inside the loop body: an idle control plane yields no frames, so on a
+    #   healthy brain with nothing to say the penalty never cleared at all,
+    #   which is this limitation plus a misleading amount of machinery.
+    #
+    #   A grace timer armed alongside the stream would distinguish the two, but
+    #   the honest signal is the client telling the caller that the RPC opened,
+    #   and that is a change to the client's contract. It is not being made
+    #   during a release, by somebody who has got the placement wrong three
+    #   times.
+    #
+    # Escalating is what the previous release did, and a scheduler that backs
+    # off from an overloaded brain is the behaviour to keep if only one of the
+    # two can be right.
+
     async def _backoff_or_stop(self) -> None:
         """Exponential backoff with jitter, but wake immediately on stop."""
         # Compute next delay - simple capped doubling with random
         # jitter. Persist between iterations via instance state so a
         # rapid-fire reconnect storm gets progressively longer pauses.
         delay = min(
-            _BACKOFF_MAX,
+            self._reconnect_backoff_max_seconds,
             _BACKOFF_INITIAL * (2 ** min(self._reconnect_attempts, 6)),
         )
         delay *= 1.0 + random.uniform(-_BACKOFF_JITTER, _BACKOFF_JITTER)  # noqa: S311 - jitter, not crypto

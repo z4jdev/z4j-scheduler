@@ -611,6 +611,20 @@ class TestCurrentDispatch:
         assert client.ack_calls == []
 
 
+def _legacy_entry() -> ScheduleEntry:
+    """A schedule from a Brain that has not activated durable control."""
+    return ScheduleEntry(
+        id=uuid4(),
+        project_id=uuid4(),
+        kind="cron",
+        expression="0 * * * *",
+        timezone="UTC",
+        is_enabled=True,
+        catch_up="skip",
+        anchor_at=datetime(2026, 4, 26, tzinfo=UTC),
+    )
+
+
 @pytest.mark.asyncio
 class TestTriggeredByAttribution:
     """A5: trigger_now forwards the operator's user id on the wire;
@@ -620,10 +634,17 @@ class TestTriggeredByAttribution:
         self,
         settings: Settings,
     ) -> None:
+        """The schedule is the legacy shape, the only one that reaches a wire.
+
+        A schedule under durable control is refused before the call, so
+        attributing one on the wire is not something that can be observed.
+        """
         client = FakeBrainClient()
         dispatcher = FireDispatcher(client=client, settings=settings)  # type: ignore[arg-type]
+        entry = _legacy_entry()
         await dispatcher.trigger_now(
-            schedule_id=uuid4(),
+            schedule_id=entry.id,
+            schedule_entry=entry,
             triggered_by_user_id="user-123",
         )
         assert client.fire_calls[0]["triggered_by_user_id"] == "user-123"

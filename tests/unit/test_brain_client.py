@@ -11,10 +11,13 @@ integration test suite. This module covers:
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
+from uuid import uuid4
 
 import pytest
+from z4j_scheduler.proto import scheduler_pb2 as pb
 from z4j_scheduler.settings import Settings
 from z4j_scheduler.storage.brain_client import BrainClient
 
@@ -99,6 +102,37 @@ class TestRpcRequiresConnect:
         client = BrainClient(settings)
         with pytest.raises(RuntimeError, match="connect"):
             await client.ping()
+
+
+class TestConfiguredDeadlines:
+    @pytest.mark.asyncio
+    async def test_fire_uses_configured_timeout(self, settings: Settings) -> None:
+        configured = settings.model_copy(update={"fire_timeout_seconds": 37})
+        client = BrainClient(configured)
+
+        class _Stub:
+            timeout: float | None = None
+
+            async def FireSchedule(  # noqa: N802 - mirrors generated gRPC stub
+                self,
+                request: object,
+                *,
+                timeout: float,  # noqa: ASYNC109 - generated stub API
+            ) -> object:
+                self.timeout = timeout
+                return pb.FireScheduleResponse(buffered=True)
+
+        stub = _Stub()
+        client._stub = stub  # type: ignore[assignment]
+
+        await client.fire_schedule(
+            schedule_id=uuid4(),
+            fire_id=uuid4(),
+            scheduled_for=datetime.now(UTC),
+            fired_at=datetime.now(UTC),
+        )
+
+        assert stub.timeout == 37.0
 
 
 class _AsyncNoop:

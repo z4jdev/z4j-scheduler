@@ -18,7 +18,11 @@ group; the importer raises a clear error if either is missing.
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from z4j_core.redaction import redact_url_password
 
 from z4j_scheduler.importers._core import ImportedSchedule
 
@@ -31,6 +35,7 @@ def read_rq_scheduler(
     project_slug: str,
     engine: str = "rq",
     queue: str | None = None,
+    default_timezone: str = "UTC",
 ) -> list[ImportedSchedule]:
     """Import scheduled jobs from rq-scheduler's Redis sorted set.
 
@@ -42,11 +47,13 @@ def read_rq_scheduler(
             original job didn't pin a queue. ``None`` lets brain
             pick.
 
-    Returns the parsed schedules. rq-scheduler doesn't carry per-job
-    timezones - we assume UTC and let the operator override later.
+    rq-scheduler records whether cron evaluation used the scheduler host's
+    local timezone, but not the local zone's IANA name. ``default_timezone``
+    supplies that name for local-time cron rows. Other cron rows are UTC.
     """
     try:
         from redis import Redis
+        from redis.exceptions import RedisError
         from rq_scheduler import Scheduler
     except ImportError as exc:
         raise RuntimeError(
@@ -63,6 +70,20 @@ def read_rq_scheduler(
     try:
         redis_conn = Redis.from_url(redis_url)
         scheduler = Scheduler(connection=redis_conn)
+        # Materialize here, inside the guard. ``Redis.from_url`` and the
+        # Scheduler constructor perform NO I/O -- redis-py connects lazily -- so
+        # this block used to be unreachable by any connection failure. The first
+        # real I/O was the ``get_jobs()`` iteration below, outside it.
+        #
+        # That is not only why the RESP3 hint never fired. The redaction this
+        # guard exists for did not fire either: a refused connection, a DNS
+        # failure or an auth failure raised straight out of the loop with the
+        # driver's own message, which embeds the URL, password and all. The
+        # exact leak into a pasted traceback that the comment above describes.
+        # One-shot execution times live only in the sorted-set score. Asking
+        # for jobs alone discards that score, and Job has no scheduled_at
+        # attribute in rq-scheduler 0.14.
+        jobs_with_times = list(scheduler.get_jobs(with_times=True))
     except Exception as exc:
         # Only the exception TYPE is surfaced below, so a RESP3 negotiation
         # failure against a pre-6.0 server arrives as a bare "ResponseError"
@@ -78,6 +99,25 @@ def read_rq_scheduler(
                 'negotiates RESP3 - pin the client: pip install "redis<6"'
             )
         )
+        # Pulling the iteration inside this block made the redaction reachable,
+        # which was the point, but it also put every job-decoding failure under
+        # a message that blames the connection. rq raises ValueError from its
+        # own ``restore`` on an unknown job status, and an operator was then
+        # told "could not connect to Redis" about a broker they were plainly
+        # connected to, with the real cause suppressed by ``from None``.
+        #
+        # Classify instead. Anything the driver raises is a connection-class
+        # failure and keeps the redacted, cause-suppressed message, because
+        # those are the ones whose text embeds the URL. Anything else came from
+        # reading the jobs, so it says so and keeps its cause.
+        driver_failure = isinstance(exc, RedisError | OSError)
+        if not driver_failure:
+            # The branch is about which LAYER failed, not about an argument's
+            # type, so RuntimeError is right here despite the isinstance above.
+            raise RuntimeError(
+                f"connected to Redis ({_redact_redis_url(redis_url)}) but could "
+                f"not read the rq-scheduler jobs: {type(exc).__name__}",
+            ) from exc
         raise RuntimeError(
             f"could not connect to Redis ({_redact_redis_url(redis_url)}): {type(exc).__name__}{hint}",
         ) from None  # ``from None`` chops the original exception
@@ -85,13 +125,17 @@ def read_rq_scheduler(
         # leak into the chained traceback.
 
     schedules: list[ImportedSchedule] = []
-    for job in scheduler.get_jobs():
+    _validate_timezone(default_timezone)
+    for job, scheduled_time in jobs_with_times:
         try:
             sched = _job_to_schedule(
                 job=job,
                 project_slug=project_slug,
                 engine=engine,
                 default_queue=queue,
+                default_timezone=default_timezone,
+                scheduled_time=scheduled_time,
+                scheduled_time_is_utc=True,
             )
         except _UnsupportedJobError as exc:
             logger.warning(
@@ -117,30 +161,16 @@ class _UnsupportedJobError(Exception):
 def _redact_redis_url(url: str) -> str:
     """Replace the password in a Redis URL with ``***``.
 
-    Audit fix 6.1 (Apr 2026): operators paste the import command
-    output (including error tracebacks) into CI logs / issue
-    trackers / Slack. The Redis URL is a connection-string
-    primary; if it carries credentials they MUST not appear in
-    error text we surface up the stack.
+    Operators paste import output, tracebacks included, into CI logs, issue
+    trackers and chat. A Redis URL is a connection-string primary and often
+    carries credentials, which must not appear in anything we surface.
 
-    Returns ``"redis://:***@host:port/db"`` when a password is
-    present; passes the URL through unchanged when it isn't (no
-    secrets, no work).
+    Delegates to ``z4j_core``. This was a private copy, and while it was the
+    only one the same URL was being logged verbatim from the rq worker
+    bootstrap in another package, which could not import it. One redactor,
+    one place.
     """
-    from urllib.parse import urlparse, urlunparse
-
-    try:
-        parsed = urlparse(url)
-    except Exception:
-        return "<unparseable redis url>"
-    if not parsed.password:
-        return url
-    netloc = parsed.hostname or ""
-    if parsed.port is not None:
-        netloc = f"{netloc}:{parsed.port}"
-    user = parsed.username or ""
-    netloc_with_creds = f"{user}:***@{netloc}"
-    return urlunparse(parsed._replace(netloc=netloc_with_creds))
+    return redact_url_password(url)
 
 
 def _job_to_schedule(
@@ -149,6 +179,9 @@ def _job_to_schedule(
     project_slug: str,
     engine: str,
     default_queue: str | None,
+    default_timezone: str = "UTC",
+    scheduled_time: datetime | None = None,
+    scheduled_time_is_utc: bool = False,
 ) -> ImportedSchedule:
     """Convert one ``rq.job.Job`` into an :class:`ImportedSchedule`.
 
@@ -160,7 +193,7 @@ def _job_to_schedule(
 
     A job with neither ``cron_string`` nor ``interval`` is a
     one-shot ``enqueue_at`` job; we use the original schedule time
-    as the one_shot expression.
+    as the clocked expression.
     """
     meta = getattr(job, "meta", None) or {}
     func_name = job.func_name  # "module.func" form used by rq
@@ -174,13 +207,14 @@ def _job_to_schedule(
     queue = getattr(job, "origin", None) or default_queue
 
     if cron_string:
+        timezone = default_timezone if meta.get("use_local_timezone") else "UTC"
         return ImportedSchedule(
             project_slug=project_slug,
             name=str(job.id),
             engine=engine,
             kind="cron",
             expression=str(cron_string),
-            timezone="UTC",
+            timezone=timezone,
             task_name=str(func_name),
             queue=queue,
             args=args,
@@ -197,7 +231,7 @@ def _job_to_schedule(
             engine=engine,
             kind="interval",
             expression=f"{int(interval)}s",
-            timezone="UTC",
+            timezone=default_timezone,
             task_name=str(func_name),
             queue=queue,
             args=args,
@@ -208,20 +242,32 @@ def _job_to_schedule(
         )
 
     # One-shot enqueue_at: the scheduled_at attribute is a datetime.
-    schedule_at = getattr(job, "scheduled_at", None) or meta.get("scheduled_at")
+    schedule_at = scheduled_time or getattr(job, "scheduled_at", None) or meta.get("scheduled_at")
     if schedule_at is None:
         raise _UnsupportedJobError(
             "no cron_string, interval, or scheduled_at - job is not a "
             "recognised rq-scheduler shape",
         )
-    expression = schedule_at.isoformat() if hasattr(schedule_at, "isoformat") else str(schedule_at)
+    if isinstance(schedule_at, datetime):
+        if schedule_at.tzinfo is None:
+            if not scheduled_time_is_utc:
+                raise _UnsupportedJobError(
+                    "one-shot time is timezone-naive and its source timezone "
+                    "is unknown; refusing to shift the execution instant"
+                )
+            # rq-scheduler's get_jobs(with_times=True) converts the Redis epoch
+            # score with datetime.utcfromtimestamp, which is naive but UTC.
+            schedule_at = schedule_at.replace(tzinfo=UTC)
+        expression = schedule_at.isoformat()
+    else:
+        expression = str(schedule_at)
     return ImportedSchedule(
         project_slug=project_slug,
         name=str(job.id),
         engine=engine,
-        kind="one_shot",
+        kind="clocked",
         expression=expression,
-        timezone="UTC",
+        timezone=default_timezone,
         task_name=str(func_name),
         queue=queue,
         args=args,
@@ -230,6 +276,13 @@ def _job_to_schedule(
         is_enabled=True,
         source="imported_rq",
     )
+
+
+def _validate_timezone(value: str) -> None:
+    try:
+        ZoneInfo(value)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise ValueError(f"unknown timezone {value!r}") from exc
 
 
 __all__ = ["read_rq_scheduler"]

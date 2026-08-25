@@ -23,6 +23,7 @@ import pytest
 from z4j_scheduler.importers._core import ImportedSchedule
 from z4j_scheduler.verify.shadow_comparator import (
     PredictedFire,
+    _resolve_tz,
     compare_predicted_fires,
     parse_duration,
     predict_fires,
@@ -384,3 +385,47 @@ class TestRenderReport:
         )
         out = render_report(report, max_divergences=5)
         assert "... and 195 more" in out
+
+
+class TestTimezoneSourceMatchesTheEngine:
+    """The comparator must read the same tzdb as the engine it audits.
+
+    ``_resolve_tz`` used bare ``ZoneInfo``, which searches the host's
+    ``/usr/share/zoneinfo`` before the release-pinned ``tzdata`` wheel.
+    The tick engine reads the wheel only, via ``packaged_zoneinfo``. On
+    any host whose system tzdb differs from the pin -- Debian trixie
+    ships IANA 2026b against the 2026a pin, disagreeing on exactly one
+    zone (``America/Vancouver``, from 2026-11-01; measured at six-hour
+    resolution across 2020-2035) -- the comparator predicted fires an hour
+    off the engine there and blamed the import. That set moves whenever
+    the pin moves, so re-measure rather than trusting this number.
+
+    Timezone misconfiguration is one of the four divergence classes this
+    comparator advertises, so a tz-source mismatch is a false result on
+    its headline case.
+    """
+
+    def test_resolves_through_the_pinned_wheel_not_the_host_tzdb(self) -> None:
+        # Identity, not equality: packaged_zoneinfo is lru_cached, so a
+        # resolution that went through the wheel returns the very same
+        # object. A bare ZoneInfo() would return a different instance
+        # built from the host tree, failing this even when the two
+        # tzdbs happen to agree on offsets -- which is the point, since
+        # they agree for most zones and most dates.
+        from z4j_scheduler.tick._runtime import packaged_zoneinfo
+        from z4j_scheduler.verify.shadow_comparator import _resolve_tz
+
+        for zone in ("America/Vancouver", "Africa/Casablanca", "Europe/Berlin"):
+            assert _resolve_tz(zone) is packaged_zoneinfo(zone), (
+                f"{zone} did not resolve through the pinned tzdata wheel; "
+                "the comparator and the tick engine would disagree"
+            )
+
+    def test_unknown_zone_still_falls_back_to_utc(self) -> None:
+        # The fallback is deliberate and documented: the importer's
+        # earlier pass reports an unparseable zone, and this function
+        # does not double-warn. Pinned so the tz-source fix above is
+        # not read as licence to start raising here.
+        assert _resolve_tz("Not/AZone") is UTC
+        assert _resolve_tz("") is UTC
+        assert _resolve_tz("UTC") is UTC
