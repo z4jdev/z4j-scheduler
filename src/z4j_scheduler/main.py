@@ -218,6 +218,7 @@ class SchedulerApp:
             # heartbeat (supported up to 60s) does not make a promoted leader
             # classify the slot it parked as a follower as "missed" and drop it.
             leader_heartbeat_seconds=getattr(self.settings, "leader_heartbeat_seconds", 2.0),
+            on_time_grace_seconds=getattr(self.settings, "on_time_grace_seconds", 5.0),
             quarantine_reporter=self._quarantine_reporter,
         )
 

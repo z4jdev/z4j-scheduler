@@ -2065,7 +2065,7 @@ class TestFollowerNoHotLoopR7:
             "a disable must drop the handoff marker; keeping it fires an "
             "occurrence the operator switched the schedule off across"
         )
-        assert entry.id not in engine._handoff_entitled
+        assert entry.id not in engine._slot_entitled
 
     async def test_derived_grace_never_tightens_the_default_r12(self) -> None:
         # Deriving the promotion grace from the heartbeat must only ever

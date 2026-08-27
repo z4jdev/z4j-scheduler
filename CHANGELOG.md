@@ -1,5 +1,38 @@
 # Changelog
 
+## 1.9.1 (2026-08-26)
+
+* A schedule slot the leader had already seen as due is no longer discarded
+  because of the scheduler's own dispatch latency. The on-time classification
+  was recomputed on every attempt against a moving clock, so a slot judged
+  on-time at the first attempt could exceed the grace by the time a retry ran,
+  and under `catch_up="skip"` the retry then advanced past the slot and recorded
+  it as fired without ever dispatching it. The classification is now frozen once
+  a slot is judged on-time, so a failed dispatch cannot change what the slot is.
+  The freeze expires after fifteen minutes, three times the dispatch backoff
+  cap: holding it is right for the seconds a retry takes and wrong for the hours
+  an outage takes, and without a bound a nightly job whose brain was down
+  overnight would have run the next morning. A slot that genuinely elapsed while
+  the scheduler was not running is unaffected either way: `catch_up` still
+  governs it, and `skip` still discards it.
+* Slots dropped by a `catch_up` policy are no longer silent. Each discarding
+  pass logs a warning naming the schedule and the dropped occurrences, and
+  increments `z4j_scheduler_slots_discarded_total`, so a schedule that has
+  stopped producing work is visible rather than invisible.
+* The on-time grace is configurable as `on_time_grace_seconds` (default 5s).
+  The line between ordinary jitter and a real miss depends on a deployment's own
+  dispatch latency, and the promotion-scoped grace used at failover derives from
+  this value, so it moves with it.
+* An unexpected exception in one tick iteration no longer stops the scheduler.
+  The tick loop runs as a child task of a task group, so an escaping exception
+  tore down the watch stream, the metrics server and the process along with
+  scheduling, for every project. The loop now absorbs the failure, logs it with
+  its traceback, counts it in
+  `z4j_scheduler_engine_iteration_failures_total`, and backs off before the
+  next pass. After ten consecutive failures with no success between them it
+  gives up and surfaces the fault, so a scheduler that can never make progress
+  does not sit there looking healthy.
+
 ## 1.9.0 (2026-08-25)
 
 * Raise the protobuf runtime floor to 6.33.5, the first release that

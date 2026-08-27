@@ -189,6 +189,20 @@ class Settings(BaseSettings):
         le=60.0,
     )
 
+    #: How late a slot may be and still count as an on-time fire rather than a
+    #: missed one. It bounds ordinary scheduling jitter: the tick loop's own
+    #: wake granularity, dispatch latency, and clock skew between the scheduler
+    #: and the brain. A slot later than this is classified missed and the
+    #: schedule's catch_up policy decides its fate, so raising it makes a busy
+    #: or slow deployment less likely to treat its own latency as an outage.
+    #: The promotion-scoped grace applied to a slot inherited at failover is
+    #: derived from this value plus the failover timings, so it moves with it.
+    on_time_grace_seconds: float = Field(
+        default=5.0,
+        ge=0.0,
+        le=300.0,
+    )
+
     # ------------------------------------------------------------------
     # TriggerSchedule gRPC server (Phase 2, reverse direction)
     # ------------------------------------------------------------------

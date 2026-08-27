@@ -56,6 +56,8 @@ if TYPE_CHECKING:
     from z4j_scheduler.tick._entry import ScheduleEntry
     from z4j_scheduler.tick._prepared import PreparedFire
 
+from z4j_scheduler.observability import metrics as m
+
 logger = logging.getLogger("z4j.scheduler.tick")
 
 #: Maximum sleep between wakeups even when the cache is empty - lets
@@ -120,6 +122,33 @@ _schedule_definition_changed = schedule_definition_changed
 #: behind, and catch-up policy is the right behaviour.
 _ON_TIME_GRACE_SECONDS = 5.0
 
+#: How many iterations may fail BACK TO BACK before the loop stops absorbing and
+#: lets the exception out. Absorbing forever would trade a loud crash for a
+#: scheduler that looks alive and never fires, which is the worse of the two.
+#: A single successful iteration resets the count.
+_MAX_CONSECUTIVE_ITERATION_ERRORS = 10
+
+#: Base delay after a failed iteration, doubled per consecutive failure and
+#: capped. Stops a synchronously-raising path from spinning the event loop.
+_ITERATION_ERROR_BACKOFF_BASE = 0.5
+_ITERATION_ERROR_BACKOFF_MAX = 30.0
+
+#: How long an on-time judgement may be held across retries before the slot is
+#: honestly missed again.
+#:
+#: Freezing the judgement is right for the seconds a retry takes and wrong for
+#: the hours an outage takes. A dispatch failure leaves next_fire_at untouched
+#: and the schedule enabled, so nothing else in the engine releases the
+#: entitlement while dispatch keeps failing. Without a ceiling, a 03:00 nightly
+#: job whose brain was down could run at 09:00 under catch_up="skip", which is
+#: precisely the "force on-time regardless of age" that removed for
+#: handoff slots.
+#:
+#: Derived from the dispatch backoff cap so the two cannot drift: three capped
+#: retries is a generous allowance for our own latency, and anything longer is
+#: an outage, which is what catch_up is for.
+_ENTITLEMENT_MAX_AGE_SECONDS = 3 * _MAX_FIRE_BACKOFF_SECONDS
+
 #: PROMOTION-SCOPED grace for a slot THIS instance parked
 #: as a follower and then fires as the just-promoted leader. The extra elapsed
 #: time is our own promotion-detection latency, not a cluster outage, so such a
@@ -146,12 +175,15 @@ _PROMOTION_GRACE_FLOOR_SECONDS = 30.0
 
 
 def _promotion_grace_for(
-    *, leader_heartbeat_seconds: float, follower_recheck_seconds: float
+    *,
+    leader_heartbeat_seconds: float,
+    follower_recheck_seconds: float,
+    base_grace_seconds: float = _ON_TIME_GRACE_SECONDS,
 ) -> float:
     """Worst-case failover latency a follower-parked slot may legitimately age by."""
     return max(
         _PROMOTION_GRACE_FLOOR_SECONDS,
-        _ON_TIME_GRACE_SECONDS + leader_heartbeat_seconds + follower_recheck_seconds,
+        base_grace_seconds + leader_heartbeat_seconds + follower_recheck_seconds,
     )
 
 
@@ -248,8 +280,11 @@ class TickEngine:
         dispatcher: Dispatcher,
         clock: Callable[[], datetime] = _utc_now,
         max_sleep_seconds: float = _MAX_SLEEP_SECONDS,
+        max_consecutive_iteration_errors: int = _MAX_CONSECUTIVE_ITERATION_ERRORS,
+        iteration_error_backoff_seconds: float = _ITERATION_ERROR_BACKOFF_BASE,
         watch_healthy: Callable[[], bool] | None = None,
         leader_heartbeat_seconds: float = 2.0,
+        on_time_grace_seconds: float = _ON_TIME_GRACE_SECONDS,
         quarantine_reporter: QuarantineSink | None = None,
     ) -> None:
         self._cache = cache
@@ -257,11 +292,17 @@ class TickEngine:
         self._dispatcher = dispatcher
         self._clock = clock
         self._max_sleep_seconds = max_sleep_seconds
+        self._max_consecutive_iteration_errors = max_consecutive_iteration_errors
+        self._iteration_error_backoff_seconds = iteration_error_backoff_seconds
         self._quarantine_reporter = quarantine_reporter
         # The promotion-scoped grace is derived from the DEPLOYMENT's
         # configured leader heartbeat, so a slow-heartbeat cluster (the supported
         # maximum is 60s) does not drop a slot this instance parked as a follower.
         self._leader_heartbeat_seconds = leader_heartbeat_seconds
+        #: The base on-time grace. Deployment-configurable because the value
+        #: that separates "jitter" from "missed" depends on the deployment's own
+        #: dispatch latency, not on a constant chosen here.
+        self._on_time_grace_seconds = on_time_grace_seconds
         self._stop_event = asyncio.Event()
         # When the watch stream is down, the cache may hold stale
         # state (e.g. an operator
@@ -360,9 +401,12 @@ class TickEngine:
         # changed the cadence but left next_fire_at untouched, and the marker
         # then made a slot fire on-time that was no longer on the schedule.
         self._follower_handoff: dict[UUID, tuple[datetime, tuple[object, ...]]] = {}
-        #: Slots already judged on-time as a handoff. Frozen so a failed
-        #: dispatch cannot let the slot age out of its grace before the retry.
-        self._handoff_entitled: dict[UUID, datetime] = {}
+        #: Slots already judged on-time. Frozen so a failed dispatch cannot
+        #: let the slot age out of its grace before the retry. Carries the
+        #: cadence alongside the slot for the same reason _follower_handoff does:
+        #: an edit that changes the cadence but leaves next_fire_at alone must
+        #: not inherit an entitlement earned under the OLD cadence.
+        self._slot_entitled: dict[UUID, tuple[datetime, tuple[object, ...], datetime]] = {}
         # While any entry is parked, a promotion must be noticed promptly.
         # The parked entries are excluded from the sleep wake computation (they
         # are past-due but must not force an immediate wake), and a leadership
@@ -396,14 +440,66 @@ class TickEngine:
         5. Loops.
         """
         logger.info("z4j.scheduler.tick: engine starting")
+        consecutive_errors = 0
         try:
             while not self._stop_event.is_set():
-                await self._iteration()
+                try:
+                    await self._iteration()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    # This loop runs as a child of main's asyncio.TaskGroup, and
+                    # a TaskGroup cancels every sibling when one child raises. An
+                    # exception escaping a single iteration therefore did not just
+                    # stop scheduling: it took down the watch stream, the metrics
+                    # server and the process with it, for every project the
+                    # deployment serves. Each path known to raise is guarded where
+                    # it raises (the fire path and the next-fire computation both
+                    # quarantine the offending schedule); this is the backstop for
+                    # the paths that are not.
+                    consecutive_errors += 1
+                    m.engine_iteration_failures_total.inc()
+                    logger.exception(
+                        "z4j.scheduler.tick: iteration raised (%d consecutive); "
+                        "continuing after backoff",
+                        consecutive_errors,
+                    )
+                    if consecutive_errors >= self._max_consecutive_iteration_errors:
+                        # Absorbing forever would leave a scheduler that looks
+                        # healthy and never fires. Past this many back-to-back
+                        # failures nothing is being scheduled anyway, so let the
+                        # fault out where a supervisor can see it.
+                        # critical, not error: the traceback is already on the
+                        # line above, and the scheduler is about to stop
+                        # scheduling entirely.
+                        logger.critical(
+                            "z4j.scheduler.tick: %d consecutive iteration "
+                            "failures; giving up so the fault is visible",
+                            consecutive_errors,
+                        )
+                        raise
+                    await self._pause_after_iteration_error(consecutive_errors)
+                else:
+                    consecutive_errors = 0
         except asyncio.CancelledError:
             logger.info("z4j.scheduler.tick: engine cancelled")
             raise
         finally:
             logger.info("z4j.scheduler.tick: engine stopped")
+
+    async def _pause_after_iteration_error(self, consecutive_errors: int) -> None:
+        """Back off after a failed iteration, waking early on stop.
+
+        A path that raises synchronously would otherwise spin the event loop and
+        starve the watch reconnect, which is the same starvation the unhealthy
+        watch branch guards against.
+        """
+        delay = min(
+            _ITERATION_ERROR_BACKOFF_MAX,
+            self._iteration_error_backoff_seconds * (2 ** min(consecutive_errors - 1, 6)),
+        )
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(self._stop_event.wait(), timeout=delay)
 
     async def stop(self) -> None:
         """Signal the loop to exit on its next iteration.
@@ -584,6 +680,7 @@ class TickEngine:
             or self._compute_quarantined
             or self._follower_parked
             or self._follower_handoff
+            or self._slot_entitled
         ):
             return
         live_by_id = {entry.id: entry for entry in snapshot}
@@ -621,7 +718,8 @@ class TickEngine:
                 or schedule_cadence_identity(live) != cadence
             ):
                 self._follower_handoff.pop(sid, None)
-                self._handoff_entitled.pop(sid, None)
+                self._slot_entitled.pop(sid, None)
+        self._prune_slot_entitlements(live_by_id)
         for sid in [s for s in self._fire_error_counts if s not in live_by_id]:
             self._fire_error_counts.pop(sid, None)
         for sid in [s for s in self._fire_backoff_until if s not in live_by_id]:
@@ -935,12 +1033,14 @@ class TickEngine:
         # still see the handoff status; the marker is consumed only AFTER a
         # successful dispatch (post-loop, below), and reconcile drops it once the
         # slot advances.
+        _cadence = schedule_cadence_identity(entry)
         _handoff = self._follower_handoff.get(entry.id)
         was_follower_handoff = _handoff is not None and _handoff == (
             scheduled_for,
-            schedule_cadence_identity(entry),
+            _cadence,
         )
         advance_anchor = scheduled_for
+        pending_discard: tuple[int, datetime, datetime, float] | None = None
         # Apply a PROMOTION-SCOPED grace to a handoff slot (base grace +
         # the promotion re-check interval), rather than FORCING it on-time
         # regardless of age. A slot within promotion_grace fires on-time; one
@@ -955,21 +1055,38 @@ class TickEngine:
             _promotion_grace_for(
                 leader_heartbeat_seconds=self._leader_heartbeat_seconds,
                 follower_recheck_seconds=self._follower_recheck_seconds,
+                base_grace_seconds=self._on_time_grace_seconds,
             )
             if was_follower_handoff
-            else _ON_TIME_GRACE_SECONDS
+            else self._on_time_grace_seconds
         )
         # FREEZE the entitlement once granted. The classification is
-        # recomputed on every attempt against a moving clock, so a handoff slot
-        # judged on-time at the first attempt could exceed the grace by the
-        # retry a second later -- and under catch_up="skip" the retry then
-        # produced an EMPTY plan, advanced past the slot, and consumed the marker
-        # without ever dispatching it. A dispatch failure must not silently
-        # change what the slot IS. Once entitled, it stays entitled until it
-        # succeeds or the marker is dropped for another reason.
-        entitled = self._handoff_entitled.get(entry.id) == scheduled_for
-        if was_follower_handoff and lateness_seconds <= effective_grace:
-            self._handoff_entitled[entry.id] = scheduled_for
+        # recomputed on every attempt against a moving clock, so a slot judged
+        # on-time at the first attempt could exceed the grace by the retry a
+        # second later -- and under catch_up="skip" the retry then produced an
+        # EMPTY plan, advanced past the slot, and stamped last_fire_at without
+        # ever dispatching it. A dispatch failure must not silently change what
+        # the slot IS. Once entitled, it stays entitled until it succeeds or the
+        # marker is dropped for another reason.
+        #
+        # The grant covers EVERY on-time slot, not only a handoff one. fixed
+        # this shape for the handoff path, but nothing in its reasoning is
+        # specific to a handoff: a steady-state LEADER recomputes lateness on
+        # each attempt against the same moving clock, and its own dispatch
+        # backoff routinely exceeds the 5s base grace. That lost the slot in
+        # silence and recorded it as fired.
+        # The grant carries the time it was made, and expires. See
+        # _ENTITLEMENT_MAX_AGE_SECONDS: without a ceiling the freeze survives an
+        # arbitrarily long outage and fires a slot the policy exists to discard.
+        _prior = self._slot_entitled.get(entry.id)
+        if _prior is not None and (_prior[0], _prior[1]) == (scheduled_for, _cadence):
+            granted_at = _prior[2]
+            entitled = (now - granted_at).total_seconds() <= _ENTITLEMENT_MAX_AGE_SECONDS
+        else:
+            granted_at = now
+            entitled = False
+        if lateness_seconds <= effective_grace:
+            self._slot_entitled[entry.id] = (scheduled_for, _cadence, granted_at)
             entitled = True
         if entry.kind in ("clocked", "one_shot") or entitled or lateness_seconds <= effective_grace:
             plan = [scheduled_for]
@@ -1026,6 +1143,24 @@ class TickEngine:
                 missed_times=missed_times,
                 now=now,
             )
+            # A discard here is the catch_up policy working as configured, but
+            # it used to happen in total silence: no log line, no metric. An
+            # operator whose catch_up="skip" schedule stopped producing work had
+            # nothing to look at.
+            #
+            # Recorded, not reported, at this point. This is the DECISION, and
+            # the decision is recomputed on every retry of a failing cursor
+            # advance, so reporting here counted the same backlog again on each
+            # attempt. It is reported by _report_discarded_slots, from the paths
+            # that have actually advanced past these slots.
+            _discarded = len(missed_times) - len(plan)
+            if _discarded > 0:
+                pending_discard = (
+                    _discarded,
+                    missed_times[0],
+                    missed_times[-1],
+                    lateness_seconds,
+                )
             # Advance past the WHOLE backlog in one pass -- the last missed
             # slot -- regardless of how many the policy chose to fire.
             if missed_times:
@@ -1103,14 +1238,16 @@ class TickEngine:
                 committed_next_run_at=transition.live_next_run_at,
             )
             self._consume_follower_handoff(entry.id, was_follower_handoff)
+            self._report_discarded_slots(entry, pending_discard)
             return True
 
         # A3: hand the dispatcher this project's schedule count (from the
         # cache the engine already owns) so IT can decide whether the
-        # fire-variance histogram carries a per-schedule label -- the
-        # cardinality threshold lives with the metric, and the engine
-        # stays metrics-free. Resolved once per fire, not per missed
-        # moment.
+        # fire-variance histogram carries a per-schedule label -- that
+        # cardinality threshold lives with the metric rather than here. The
+        # engine's own counters are aggregate-only for the same reason: it has
+        # no schedule-count gate to weigh a per-schedule label against.
+        # Resolved once per fire, not per missed moment.
         project_schedule_count = await self._cache.count_for_project(
             entry.project_id,
         )
@@ -1322,6 +1459,7 @@ class TickEngine:
         # dispatched. A failed dispatch returned False above without reaching
         # here, so the marker survives for the retry.
         self._consume_follower_handoff(entry.id, was_follower_handoff)
+        self._report_discarded_slots(entry, pending_discard)
         return True
 
     async def _apply_prepared_advance(
@@ -1358,14 +1496,71 @@ class TickEngine:
             return False
         return True
 
+    def _report_discarded_slots(
+        self,
+        entry: ScheduleEntry,
+        pending: tuple[int, datetime, datetime, float] | None,
+    ) -> None:
+        """Log and count slots the catch_up policy dropped.
+
+        Called only from the paths that have durably advanced past those slots.
+        Reporting at the decision point instead re-counted the whole backlog on
+        every retry of a failing cursor advance, so one stuck schedule inflated
+        the counter without bound.
+        """
+        if pending is None:
+            return
+        discarded, oldest, newest, lateness_seconds = pending
+        m.slots_discarded_total.labels(catch_up=entry.catch_up).inc(discarded)
+        logger.warning(
+            "z4j.scheduler.tick: catch_up=%s dropped %d missed slot(s) for "
+            "schedule_id=%s name=%r without firing (oldest=%s newest=%s, "
+            "%.1fs late); these occurrences will not run",
+            entry.catch_up,
+            discarded,
+            entry.id,
+            entry.name or "",
+            oldest,
+            newest,
+            lateness_seconds,
+        )
+
+    def _prune_slot_entitlements(self, live_by_id: dict[UUID, ScheduleEntry]) -> None:
+        """Drop on-time entitlements that no longer describe a live pending slot.
+
+        An entitlement granted to a LEADER-observed slot has no accompanying
+        ``_follower_handoff`` marker, so the handoff reconciliation never reaches
+        it. Without this it would survive for the process lifetime.
+
+        It is dropped once the schedule is gone or disabled (per a disable is
+        an explicit statement that this occurrence should not run), or once
+        ``next_fire_at`` has moved off the entitled slot. A dispatch FAILURE
+        leaves ``next_fire_at`` untouched, so a moved slot means the fire already
+        landed and the entitlement has served its purpose.
+        """
+        now = self._clock()
+        for sid, (entitled_at, _cadence, granted_at) in list(self._slot_entitled.items()):
+            live = live_by_id.get(sid)
+            if (
+                live is None
+                or not live.is_enabled
+                or live.next_fire_at != entitled_at
+                or (now - granted_at).total_seconds() > _ENTITLEMENT_MAX_AGE_SECONDS
+            ):
+                self._slot_entitled.pop(sid, None)
+
     def _consume_follower_handoff(self, schedule_id: UUID, was_follower_handoff: bool) -> None:
         """Drop the follower-handoff marker AFTER a successful dispatch
         of the slot it covered. Called only on the success paths, never after a
         failed dispatch (which returns early), so a retry of the same slot
-        preserves the handoff status and its promotion-scoped grace."""
+        preserves the handoff status and its promotion-scoped grace.
+
+        The entitlement is dropped unconditionally: it is now granted to every
+        on-time slot, so gating its release on was_follower_handoff would strand
+        a marker per schedule for the process lifetime."""
         if was_follower_handoff:
             self._follower_handoff.pop(schedule_id, None)
-            self._handoff_entitled.pop(schedule_id, None)
+        self._slot_entitled.pop(schedule_id, None)
 
     async def _advance_after_fire(
         self,
@@ -1408,13 +1603,17 @@ class TickEngine:
             # last_fire_at. This is the mechanism the one_shot path already used;
             # it now covers EVERY cadence type (cron / interval / solar / one_shot
             # / clocked) uniformly, so no cadence is ever rewritten by a follower.
-            self._follower_parked[entry.id] = entry.next_fire_at
             # Remember we OBSERVED this exact slot live-due as a follower.
             # If we are later promoted and fire it, the elapsed time is our own
             # promotion-detection latency, not a cluster outage, so it fires
-            # on-time (see _fire_with_catch_up). Only meaningful for a slot with a
-            # concrete next_fire_at.
+            # on-time (see _fire_with_catch_up). Both markers are only meaningful
+            # for a slot with a concrete next_fire_at: parking None recorded a
+            # park that _is_follower_parked then read back as "not parked", and
+            # it contradicted this dict's own datetime annotation. The due filter
+            # and the sleep both skip a next_fire_at=None entry before we get
+            # here, so this guard changes no reachable behaviour.
             if entry.next_fire_at is not None:
+                self._follower_parked[entry.id] = entry.next_fire_at
                 self._follower_handoff[entry.id] = (
                     entry.next_fire_at,
                     schedule_cadence_identity(entry),

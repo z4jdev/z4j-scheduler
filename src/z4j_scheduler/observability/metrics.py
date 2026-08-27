@@ -160,6 +160,33 @@ engine_iterations_total = Counter(
     registry=default_registry,
 )
 
+#: Iterations that ended in an unhandled exception. The loop absorbs these and
+#: continues, so nothing else would show that scheduling is degraded. A sustained
+#: rate here means some path is raising on every pass and fires are being missed.
+engine_iteration_failures_total = Counter(
+    "z4j_scheduler_engine_iteration_failures_total",
+    "Tick-engine iterations that raised an unhandled exception.",
+    registry=default_registry,
+)
+
+#: Slots the catch_up policy deliberately did NOT fire. A discard is correct
+#: behaviour for catch_up="skip" after a real outage, but it was previously
+#: invisible: a schedule could stop producing work and nothing in the metrics or
+#: the log said so. Alert on a non-zero rate here.
+#:
+#: Labelled by POLICY only, deliberately. The per-schedule counters above carry
+#: a schedule_id because the dispatcher decides that, weighing the cardinality
+#: against a live project schedule count. The tick engine has no such gate, so a
+#: schedule_id here would mint an unbounded, never-released series from inside a
+#: component that does not own that decision. The WARNING logged beside each
+#: increment names the schedule, which is what an operator needs to act.
+slots_discarded_total = Counter(
+    "z4j_scheduler_slots_discarded_total",
+    "Missed schedule slots dropped by the catch_up policy without firing.",
+    labelnames=("catch_up",),
+    registry=default_registry,
+)
+
 # ---------------------------------------------------------------------------
 # Per-schedule (Phase 4)
 # ---------------------------------------------------------------------------
