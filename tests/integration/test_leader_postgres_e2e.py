@@ -207,3 +207,39 @@ class TestNamespaceIsolation:
         finally:
             await gate_prod.stop()
             await gate_staging.stop()
+
+
+@pytest.mark.asyncio
+async def test_terminated_database_session_demotes_and_fails_over(asyncpg_dsn):
+    """Terminate the server session externally, without calling gate.stop()."""
+    import asyncpg
+
+    backend = AsyncpgLockBackend(dsn=asyncpg_dsn)
+    namespace = f"test-abrupt-{uuid.uuid4()}"
+    gate_a = PostgresAdvisoryLockLeaderGate(
+        backend=backend, namespace=namespace, heartbeat_seconds=0.1
+    )
+    gate_b = PostgresAdvisoryLockLeaderGate(
+        backend=AsyncpgLockBackend(dsn=asyncpg_dsn), namespace=namespace, heartbeat_seconds=0.1
+    )
+    project = uuid.uuid4()
+    control = await asyncpg.connect(asyncpg_dsn)
+    await gate_a.start()
+    try:
+        await gate_a.wait_for_first_cycle()
+        assert gate_a.is_leader(project)
+        await gate_b.start()
+        await gate_b.wait_for_first_cycle()
+        assert not gate_b.is_leader(project)
+        pid = backend._conn.get_server_pid()
+        assert await control.fetchval("SELECT pg_terminate_backend($1)", pid)
+        # A reconnecting former leader may contend again; a live standby must
+        # acquire the released lock without a cooperative shutdown of A.
+        async with asyncio.timeout(5):
+            while not gate_b.is_leader(project) or gate_a.is_leader(project):  # noqa: ASYNC110 - poll the public gate state
+                await asyncio.sleep(0.02)
+        assert sum(g.is_leader(project) for g in (gate_a, gate_b)) == 1
+    finally:
+        await gate_a.stop()
+        await gate_b.stop()
+        await control.close()

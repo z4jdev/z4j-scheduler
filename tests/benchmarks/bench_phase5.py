@@ -385,6 +385,7 @@ async def bench_sustained_load(
     await cache.upsert_many(entries)
 
     engine = TickEngine(cache=cache, leader_gate=leader, dispatcher=dispatcher)
+    started = time.perf_counter()
     task = asyncio.create_task(engine.run())
     try:
         await asyncio.sleep(duration_seconds)
@@ -416,11 +417,17 @@ async def bench_sustained_load(
         latencies_ms.append(max(0.0, delta))
 
     sorted_lat = sorted(latencies_ms)
+    elapsed = time.perf_counter() - started
+    unique_slots = {(sid, slot) for sid, slot, _ in dispatcher.calls}
     return {
         "schedules": schedule_count,
         "duration_s": duration_seconds,
         "fires": len(dispatcher.calls),
-        "fires_per_sec": round(len(dispatcher.calls) / duration_seconds, 1),
+        "elapsed_s": round(elapsed, 3),
+        "fires_per_sec": round(len(dispatcher.calls) / elapsed, 1),
+        "schedules_with_fires": len({sid for sid, _, _ in dispatcher.calls}),
+        "duplicate_slots": len(dispatcher.calls) - len(unique_slots),
+        "scope": "tick engine with in-memory dispatcher; no Brain, database, network, broker or workers",
         "tick_drift_p50_ms": round(statistics.median(sorted_lat), 2),
         "tick_drift_p99_ms": round(_p99(sorted_lat), 2),
         "tick_drift_max_ms": round(max(sorted_lat), 2),

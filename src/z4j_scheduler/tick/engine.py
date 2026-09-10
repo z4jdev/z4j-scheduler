@@ -481,6 +481,7 @@ class TickEngine:
                     await self._pause_after_iteration_error(consecutive_errors)
                 else:
                     consecutive_errors = 0
+                    m.engine_iterations_total.inc()
         except asyncio.CancelledError:
             logger.info("z4j.scheduler.tick: engine cancelled")
             raise
@@ -630,7 +631,7 @@ class TickEngine:
                                 self._fire_backoff_until.pop(entry.id, None)
                                 self._fire_backoff_def.pop(entry.id, None)
                             else:
-                                # DISPATCH failed (no task sent). Back off so the
+                                # Acceptance was not confirmed. Back off so the
                                 # SAME slot is retried on a widening interval
                                 # without hot-spinning; not a clean fire, so the
                                 # error count is NOT reset (engine:729).
@@ -643,7 +644,20 @@ class TickEngine:
                     for _ in range(min(_MAX_CONCURRENT_FIRES, len(runnable)))
                 ]
                 try:
-                    await asyncio.gather(*workers, return_exceptions=True)
+                    results = await asyncio.gather(*workers, return_exceptions=True)
+                    # Let siblings finish their accepted-prefix bookkeeping
+                    # before surfacing unexpected recovery/cache failures. The
+                    # worker already contains ordinary per-schedule faults;
+                    # discarding these results hid failures of that containment
+                    # itself and bypassed run()'s bounded error supervisor.
+                    for result in results:
+                        if isinstance(result, BaseException) and not isinstance(result, Exception):
+                            # Cancellation is control flow, never a successful
+                            # iteration. The finally block also releases entries
+                            # whose worker exited before taking them off the queue.
+                            raise result
+                    if errors := [result for result in results if isinstance(result, Exception)]:
+                        raise ExceptionGroup("dispatch workers failed", errors)
                 finally:
                     # engine:344 + engine:328: any entry still queued was never
                     # dispatched (a graceful stop drained early, or the gather was
@@ -963,35 +977,18 @@ class TickEngine:
 
         Returns True on a clean outcome (fired + advanced, non-leader recompute,
         nothing-to-fire, aborted, or definition-changed) and False when the
-        DISPATCHER itself failed (no task was sent; caller should back off and
-        retry the same slot, NOT treat it as a clean fire -- engine:729). A
+        DISPATCHER itself failed (acceptance is unknown; caller should back off
+        and retry the same slot, not treat it as a clean fire -- engine:729). A
         raised exception (a broken cadence / post-dispatch computation error) is
         NOT caught here; the caller quarantines the schedule so it cannot
         re-dispatch or hot-spin (engine:820 / P1-8b)."""
-        # Leader gate: only the leader actually dispatches. Non-leader
-        # instances still recompute next_fire_at so they're hot if
-        # they take over.
+        # Entries may have waited in the worker queue while the watch failed
+        # or shutdown began. In particular, a queued catch_up="skip" must not
+        # consume a durable cursor based on a now-unhealthy snapshot.
+        if self._stop_event.is_set() or not self._watch_healthy():
+            return True
+        # Followers park their due slot without consuming it, ready for takeover.
         if not self._leader_gate.is_leader(entry.project_id):
-            # Non-leader
-            # instances must NOT advance ``last_fire_at`` to the
-            # tick they did not actually fire. We DO recompute
-            # ``next_fire_at`` so the standby doesn't spin on the
-            # same overdue entry every iteration. Becoming leader
-            # later preserves the missed backlog for catch_up
-            # (because last_fire_at stayed None / the prior
-            # value).
-            #
-            # For
-            # FRESH schedules (last_fire_at is None) the slot
-            # the standby was about to fire IS lost on
-            # promotion-after-this-tick, because there is no
-            # anchor for catch_up to walk back to (anchor lookup
-            # uses last_fire_at, which is None). This is a
-            # bounded degraded mode (only fresh schedules, only
-            # during a 1-3s failover window) and the alternative
-            # (return without advancing) burns a CPU loop on the
-            # standby until promotion. Documented in
-            # docs/SCHEDULER.md §HA-failover-corner-cases.
             await self._advance_after_fire(entry, last_fire_at=None)
             return True
 
@@ -1297,6 +1294,17 @@ class TickEngine:
             if _schedule_definition_changed(entry, live):
                 definition_changed = True
                 break
+            # The previous RPC (or the cache lock above) yielded to watch and
+            # election tasks. A gate checked only before the batch can go stale
+            # across hundreds of slots. Keep any accepted prefix, but submit no
+            # new slot once this process knows its conditions are no longer met.
+            if (
+                self._stop_event.is_set()
+                or not self._watch_healthy()
+                or not self._leader_gate.is_leader(entry.project_id)
+            ):
+                aborted = True
+                break
             try:
                 prepared_fire = prepared_by_slot[moment]
                 expected_control_token = entry.control_token
@@ -1320,8 +1328,8 @@ class TickEngine:
                     entry.id,
                     moment,
                 )
-                # Do NOT advance -- the task was NOT sent. Signal a dispatch
-                # failure so the caller backs off and retries the SAME slot
+                # A lost response may follow a committed acceptance. Do not
+                # invent progress: back off and retry the SAME slot/identity
                 # (next_fire_at is unchanged), instead of treating this as a
                 # clean fire and hot-spinning on it (engine:729).
                 if last_dispatched is not None and not current_protocol:
@@ -1432,8 +1440,8 @@ class TickEngine:
             # fire). The new cadence governs from the next tick.
             return True
         if aborted:
-            # Partial drain (stop requested, or the schedule was disabled /
-            # removed mid-storm). Advance only past what we ACTUALLY
+            # Partial drain (stop, unhealthy watch, demotion, or the schedule
+            # was disabled/removed mid-storm). Advance only past what we ACTUALLY
             # dispatched so we neither re-fire those slots nor lose the
             # untouched tail: the remainder is re-evaluated on the next tick
             # (if still leader + enabled) or after re-enable. If nothing was
@@ -1640,7 +1648,7 @@ class TickEngine:
         self,
         entry: ScheduleEntry,
     ) -> None:
-        """A DISPATCH failed (no task was sent). Retry the SAME slot after an
+        """A dispatch did not confirm acceptance. Retry the SAME slot after an
         exponential back-off, recorded in a SEPARATE ``_fire_backoff_until``
         deadline -- NOT by overwriting ``next_fire_at``.
 

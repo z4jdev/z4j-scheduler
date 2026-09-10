@@ -114,6 +114,7 @@ class ScheduleCache:
         if max_post_watermark_tombstones <= 0:
             raise ValueError("max_post_watermark_tombstones must be positive")
         self._entries: dict[UUID, ScheduleEntry] = {}
+        self._project_counts: dict[UUID, int] = {}
         self._local_quarantines: dict[UUID, LocalQuarantine] = {}
         self._current_stop_latches: dict[UUID, CurrentStop] = {}
         self._brain_payloads: dict[UUID, tuple[object, ...]] = {}
@@ -144,6 +145,29 @@ class ScheduleCache:
     # Mutation
     # ------------------------------------------------------------------
 
+    def _decrement_project_locked(self, project_id: UUID) -> None:
+        remaining = self._project_counts[project_id] - 1
+        if remaining:
+            self._project_counts[project_id] = remaining
+        else:
+            del self._project_counts[project_id]
+
+    def _store_entry_locked(self, entry: ScheduleEntry) -> None:
+        previous = self._entries.get(entry.id)
+        if previous is None or previous.project_id != entry.project_id:
+            if previous is not None:
+                self._decrement_project_locked(previous.project_id)
+            self._project_counts[entry.project_id] = (
+                self._project_counts.get(entry.project_id, 0) + 1
+            )
+        self._entries[entry.id] = entry
+
+    def _remove_entry_locked(self, schedule_id: UUID) -> ScheduleEntry | None:
+        entry = self._entries.pop(schedule_id, None)
+        if entry is not None:
+            self._decrement_project_locked(entry.project_id)
+        return entry
+
     async def upsert(self, entry: ScheduleEntry) -> None:
         """Insert or replace ``entry`` keyed by its id.
 
@@ -159,7 +183,7 @@ class ScheduleCache:
                 self._id_projects[entry.id] = entry.project_id
             self._apply_local_quarantine_locked(entry)
             self._apply_current_stop_locked(entry)
-            self._entries[entry.id] = entry
+            self._store_entry_locked(entry)
         self.changed.set()
 
     async def upsert_many(self, entries: Iterable[ScheduleEntry]) -> None:
@@ -176,7 +200,7 @@ class ScheduleCache:
                     self._id_projects[entry.id] = entry.project_id
                 self._apply_local_quarantine_locked(entry)
                 self._apply_current_stop_locked(entry)
-                self._entries[entry.id] = entry
+                self._store_entry_locked(entry)
         self.changed.set()
 
     def _apply_watch_update_locked(self, incoming: ScheduleEntry) -> None:
@@ -263,7 +287,7 @@ class ScheduleCache:
             self._id_projects[incoming.id] = incoming.project_id
         self._apply_local_quarantine_locked(incoming)
         self._apply_current_stop_locked(incoming)
-        self._entries[incoming.id] = incoming
+        self._store_entry_locked(incoming)
 
     @staticmethod
     def _validate_protocol_shape(entry: ScheduleEntry) -> None:
@@ -349,7 +373,7 @@ class ScheduleCache:
     async def remove(self, schedule_id: UUID) -> bool:
         """Remove ``schedule_id`` if present. Returns True if removed."""
         async with self._lock:
-            existed = self._entries.pop(schedule_id, None) is not None
+            existed = self._remove_entry_locked(schedule_id) is not None
             self._local_quarantines.pop(schedule_id, None)
             self._current_stop_latches.pop(schedule_id, None)
             self._brain_payloads.pop(schedule_id, None)
@@ -364,6 +388,7 @@ class ScheduleCache:
         async with self._lock:
             had_entries = bool(self._entries)
             self._entries.clear()
+            self._project_counts.clear()
             self._local_quarantines.clear()
             self._current_stop_latches.clear()
             self._brain_payloads.clear()
@@ -617,7 +642,7 @@ class ScheduleCache:
                         "same revision conflicts between upsert and tombstone",
                     )
                 return False
-            self._entries.pop(schedule_id, None)
+            self._remove_entry_locked(schedule_id)
             self._local_quarantines.pop(schedule_id, None)
             self._current_stop_latches.pop(schedule_id, None)
             self._brain_payloads.pop(schedule_id, None)
@@ -657,7 +682,7 @@ class ScheduleCache:
                         "same revision conflicts between row and absence",
                     )
                 return False
-            self._entries.pop(schedule_id, None)
+            self._remove_entry_locked(schedule_id)
             self._local_quarantines.pop(schedule_id, None)
             self._current_stop_latches.pop(schedule_id, None)
             self._brain_payloads.pop(schedule_id, None)
@@ -738,7 +763,7 @@ class ScheduleCache:
                     continue
                 if self._id_revisions.get(schedule_id, 0) > snapshot.watermark:
                     continue
-                self._entries.pop(schedule_id, None)
+                self._remove_entry_locked(schedule_id)
                 self._local_quarantines.pop(schedule_id, None)
                 self._current_stop_latches.pop(schedule_id, None)
                 self._brain_payloads.pop(schedule_id, None)
@@ -827,11 +852,12 @@ class ScheduleCache:
 
         Used by the tick engine to decide whether the fire-variance
         histogram should carry a per-schedule label (bounded cardinality
-        on large tenants). O(n) under the lock; called only on a fire,
-        which is far rarer than a tick.
+        on large tenants). O(1) under the lock: scanning all schedules for
+        every fire made a burst of N due schedules quadratic in cache size.
+        All insert/remove/snapshot paths maintain the same project counts.
         """
         async with self._lock:
-            return sum(1 for e in self._entries.values() if e.project_id == project_id)
+            return self._project_counts.get(project_id, 0)
 
     async def next_due(
         self,

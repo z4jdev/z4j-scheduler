@@ -1,0 +1,80 @@
+{
+  "generated": "2026-09-08T16:17:57.064723+00:00",
+  "python": "3.14.7 (main, Aug 14 2026, 15:35:28) [Clang 22.1.3 ]",
+  "platform": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+  "cpu_count": 24,
+  "scope": "development-host component samples; not isolated production hardware or end-to-end delivery",
+  "load": [
+    {
+      "schedules": 100,
+      "duration_s": 10,
+      "fires": 1100,
+      "elapsed_s": 10.001,
+      "fires_per_sec": 110.0,
+      "schedules_with_fires": 100,
+      "duplicate_slots": 0,
+      "scope": "tick engine with in-memory dispatcher; no Brain, database, network, broker or workers",
+      "tick_drift_p50_ms": 2.04,
+      "tick_drift_p99_ms": 76.22,
+      "tick_drift_max_ms": 76.28
+    },
+    {
+      "schedules": 1000,
+      "duration_s": 10,
+      "fires": 12000,
+      "elapsed_s": 10.007,
+      "fires_per_sec": 1199.2,
+      "schedules_with_fires": 1000,
+      "duplicate_slots": 0,
+      "scope": "tick engine with in-memory dispatcher; no Brain, database, network, broker or workers",
+      "tick_drift_p50_ms": 1656.62,
+      "tick_drift_p99_ms": 1730.96,
+      "tick_drift_max_ms": 1731.61
+    },
+    {
+      "schedules": 10000,
+      "duration_s": 10,
+      "fires": 110000,
+      "elapsed_s": 10.052,
+      "fires_per_sec": 10943.5,
+      "schedules_with_fires": 10000,
+      "duplicate_slots": 0,
+      "scope": "tick engine with in-memory dispatcher; no Brain, database, network, broker or workers",
+      "tick_drift_p50_ms": 363.58,
+      "tick_drift_p99_ms": 1412.07,
+      "tick_drift_max_ms": 1507.12
+    }
+  ],
+  "memory": [
+    {
+      "schedules": 10000,
+      "rss_mb": 80.4,
+      "upsert_seconds": 0.006,
+      "snapshot_samples": 50,
+      "snapshot_p50_us": 46.85,
+      "snapshot_p99_us": 141.51
+    },
+    {
+      "schedules": 100000,
+      "rss_mb": 99.5,
+      "upsert_seconds": 0.059,
+      "snapshot_samples": 10,
+      "snapshot_p50_us": 846.99,
+      "snapshot_p99_us": 2012.14
+    }
+  ],
+  "clean_postgres_failover": [
+    {
+      "failover_ms": 103.6,
+      "succeeded": true
+    },
+    {
+      "failover_ms": 103.4,
+      "succeeded": true
+    },
+    {
+      "failover_ms": 103.1,
+      "succeeded": true
+    }
+  ]
+}

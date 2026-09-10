@@ -59,7 +59,9 @@ class TestBenchTickAtScale:
             assert r["schedules"] == int(n_str)
             assert r["z4j_tick_ms"] >= 0
             # Due-count is non-negative and bounded by schedules.
-            assert 0 <= r["z4j_due_count"] <= r["schedules"]
+            assert r["z4j_due_count"] == r["schedules"]
+            if "celery_due_count" in r:
+                assert r["celery_due_count"] == r["z4j_due_count"]
 
 
 class TestBenchMemoryPerSchedule:
@@ -122,8 +124,8 @@ class TestRenderSummary:
         # Both schedulers represented.
         assert "z4j-scheduler" in out
         assert "celery-beat" in out
-        # The verdict line shows up when celery is enabled.
-        assert "Geomean" in out
+        assert "not production throughput" in out
+        assert "FASTER" not in out and "SLOWER" not in out
 
     def test_renders_skip_message_when_celery_missing(self) -> None:
         report = {
@@ -182,3 +184,19 @@ class TestPersistedReportShape:
         assert "next_fire_cost" in report
         assert "tick_at_scale" in report
         assert "memory_per_schedule" in report
+
+        for row in report["tick_at_scale"]["per_scale"].values():
+            assert row["z4j_due_count"] == row["schedules"]
+            if report["celery_available"]:
+                assert row["celery_due_count"] == row["schedules"]
+
+
+async def test_component_load_reports_real_coverage_and_unique_slots():
+    from tests.benchmarks.bench_phase5 import bench_sustained_load
+
+    result = await bench_sustained_load(schedule_count=10, duration_seconds=1.1)
+    assert result["fires"] >= 10
+    assert result["schedules_with_fires"] == 10
+    assert result["duplicate_slots"] == 0
+    assert result["elapsed_s"] >= 1.1
+    assert "no Brain" in result["scope"]

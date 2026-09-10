@@ -352,20 +352,19 @@ class FireDispatcher:
                 and project_schedule_count < m.FIRE_VARIANCE_SCHEDULE_ID_MAX
             )
             variance = max(0.0, (fired_at - scheduled_for).total_seconds())
-            m.fire_variance_seconds.labels(
+            m.tick_drift_seconds.observe(variance)
+            m.observe_fire_variance(
                 schedule_id=str(schedule_id) if emit_schedule_id else "",
                 engine=engine,
                 project=str(project_id) if project_id is not None else "",
-            ).observe(variance)
+                seconds=variance,
+            )
         except Exception:
             logger.debug("fire variance metric emission failed", exc_info=True)
         # Phase 4: per-schedule latency slice. Same value, additional
         # label dimension. Cardinality bounded by schedule count.
         try:
-            m.per_schedule_fire_latency_seconds.labels(
-                schedule_id=str(schedule_id),
-                schedule_name=schedule_name,
-            ).observe(elapsed)
+            m.observe_schedule_latency(str(schedule_id), schedule_name, elapsed)
         except Exception:
             # Metrics emission must never break a fire path. Swallow
             # silently - missing one data point is preferable to
@@ -387,11 +386,7 @@ class FireDispatcher:
             status_label = "buffered" if result.buffered else "delivered"
             m.fires_total.labels(status=status_label).inc()
             try:
-                m.per_schedule_fires_total.labels(
-                    schedule_id=str(schedule_id),
-                    schedule_name=schedule_name,
-                    status=status_label,
-                ).inc()
+                m.increment_schedule_fires(str(schedule_id), schedule_name, status_label)
             except Exception:
                 logger.debug("per-schedule counter inc failed", exc_info=True)
             logger.info(
@@ -420,11 +415,7 @@ class FireDispatcher:
         else:
             m.fires_total.labels(status="failed").inc()
             try:
-                m.per_schedule_fires_total.labels(
-                    schedule_id=str(schedule_id),
-                    schedule_name=schedule_name,
-                    status="failed",
-                ).inc()
+                m.increment_schedule_fires(str(schedule_id), schedule_name, "failed")
             except Exception:
                 logger.debug("per-schedule counter inc failed", exc_info=True)
             logger.warning(

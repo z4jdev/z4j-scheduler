@@ -18,8 +18,10 @@ Per ``docs/SCHEDULER.md §5.10`` the metrics surface is:
 - :data:`grpc_calls_total` - counter labelled by method + status
 - :data:`watch_stream_reconnects_total` - counter
 
-Labels are bounded - we never label on schedule_id (high cardinality);
-project_id / engine_kind labels are fine because brain caps both.
+Aggregate metrics retain every observation. Schedule detail and labelled
+variance use separate LRU windows of at most 1,000 label groups each, so
+schedule churn cannot grow these collectors indefinitely. Historical
+per-schedule records belong in the brain database.
 
 Histogram buckets are tuned for the latency targets in
 ``docs/SCHEDULER.md §23``:
@@ -30,6 +32,10 @@ Histogram buckets are tuned for the latency targets in
 """
 
 from __future__ import annotations
+
+from collections import OrderedDict
+from contextlib import suppress
+from threading import Lock
 
 from prometheus_client import (
     CollectorRegistry,
@@ -68,7 +74,7 @@ fires_total = Counter(
 
 fire_latency_seconds = Histogram(
     "z4j_scheduler_fire_latency_seconds",
-    "End-to-end fire dispatch latency from FireSchedule call to result.",
+    "FireSchedule RPC duration from call to result, including retries; excludes due-time wait and worker execution.",
     buckets=(
         0.005,
         0.010,
@@ -146,7 +152,7 @@ grpc_calls_total = Counter(
 
 watch_stream_reconnects_total = Counter(
     "z4j_scheduler_watch_stream_reconnects_total",
-    "Reconnects of the WatchSchedules stream after a drop.",
+    "Watch resynchronization/reconnection attempts after the initial attempt.",
     registry=default_registry,
 )
 
@@ -193,13 +199,9 @@ slots_discarded_total = Counter(
 #
 # These slice the global counters above by ``schedule_id`` so the
 # dashboard can render per-schedule fire-rate / latency / failure
-# charts. The cardinality is bounded by the schedule count
-# (typically <10k per cluster) - well within Prometheus comfort.
-#
-# We label by ``schedule_id`` (a UUID, stable across renames) AND
-# ``schedule_name`` (the human label, also stable per identity).
-# Including both lets operators query by either - the trade-off is
-# 2x the label space, which is fine at this cardinality.
+# charts. IDs and names both label a series, so a rename creates a new
+# group. The rolling LRU below bounds groups across renames and deletions,
+# independently of the number of currently loaded schedules.
 
 per_schedule_fires_total = Counter(
     "z4j_scheduler_per_schedule_fires_total",
@@ -227,16 +229,74 @@ per_schedule_fire_latency_seconds = Histogram(
     registry=default_registry,
 )
 
+# Bound process memory when schedules are created, deleted or renamed over a
+# long uptime. The aggregate metrics retain every observation; per-schedule
+# detail is a rolling diagnostic window, not a durable history store.
+MAX_DETAIL_SCHEDULES = 1_000
+_detail_series: OrderedDict[tuple[str, str], None] = OrderedDict()
+_variance_series: OrderedDict[tuple[str, str, str], None] = OrderedDict()
+_detail_lock = Lock()
+
+
+def _remove_series(metric: Counter | Histogram, *labelvalues: str) -> None:
+    # Eviction removes every series a group could own, but most groups own only
+    # some: a schedule usually reports one or two statuses, and a swallowed
+    # emission error can leave a group without a latency series.
+    # prometheus-client releases before 0.22.0 raise KeyError when removing a
+    # label set that was never created. Unhandled, that aborts the eviction and
+    # the observation that triggered it, so series outlive the cap. A series
+    # that does not exist is already removed.
+    with suppress(KeyError):
+        metric.remove(*labelvalues)
+
+
+def _retain_detail(schedule_id: str, schedule_name: str) -> None:
+    key = (schedule_id, schedule_name)
+    _detail_series[key] = None
+    _detail_series.move_to_end(key)
+    while len(_detail_series) > MAX_DETAIL_SCHEDULES:
+        (old_id, old_name), _ = _detail_series.popitem(last=False)
+        _remove_series(per_schedule_fire_latency_seconds, old_id, old_name)
+        for status in ("delivered", "buffered", "failed"):
+            _remove_series(per_schedule_fires_total, old_id, old_name, status)
+
+
+def observe_schedule_latency(schedule_id: str, schedule_name: str, elapsed: float) -> None:
+    with _detail_lock:
+        _retain_detail(schedule_id, schedule_name)
+        per_schedule_fire_latency_seconds.labels(schedule_id, schedule_name).observe(elapsed)
+
+
+def increment_schedule_fires(schedule_id: str, schedule_name: str, status: str) -> None:
+    with _detail_lock:
+        _retain_detail(schedule_id, schedule_name)
+        per_schedule_fires_total.labels(schedule_id, schedule_name, status).inc()
+
+
+def observe_fire_variance(schedule_id: str, engine: str, project: str, seconds: float) -> None:
+    with _detail_lock:
+        key = (schedule_id, engine, project)
+        _variance_series[key] = None
+        _variance_series.move_to_end(key)
+        while len(_variance_series) > MAX_DETAIL_SCHEDULES:
+            previous, _ = _variance_series.popitem(last=False)
+            _remove_series(fire_variance_seconds, *previous)
+        fire_variance_seconds.labels(*key).observe(seconds)
+
 
 __all__ = [
     "FIRE_VARIANCE_SCHEDULE_ID_MAX",
+    "MAX_DETAIL_SCHEDULES",
     "default_registry",
     "engine_iterations_total",
     "fire_latency_seconds",
     "fire_variance_seconds",
     "fires_total",
     "grpc_calls_total",
+    "increment_schedule_fires",
     "is_leader",
+    "observe_fire_variance",
+    "observe_schedule_latency",
     "per_schedule_fire_latency_seconds",
     "per_schedule_fires_total",
     "schedules_loaded",

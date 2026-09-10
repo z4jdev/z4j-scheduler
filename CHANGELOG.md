@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.11.0 (2026-09-10)
+
+* Stop starting new catch-up slots when the watch becomes unhealthy, leadership
+  is lost, or shutdown begins. Preserve already accepted progress and recover
+  the remaining backlog after conditions permit. Queued `skip` schedules do
+  not consume their cursor while watch health is lost or shutdown is underway.
+* Propagate unexpected dispatch-worker recovery failures to the existing tick
+  supervisor, which backs off and exits after repeated failures. Cancellation
+  is preserved and queued in-flight markers are released.
+* Verify committed-response-loss recovery over real mTLS gRPC: retrying or
+  replacing the scheduler client reuses the durable command or buffered fire.
+  These tests cover acceptance, not broker execution or exactly-once effects.
+* Bound PostgreSQL election calls with deadlines and clear local leadership
+  when an operation stalls. Maintain per-project cache counts instead of
+  scanning every schedule on each fire. Bound detailed metric retention and
+  wire live tick drift, iteration and watch reconnection observations.
+* Correct the Celery calendar comparison to use equivalent time windows. Local
+  component benchmarks do not establish production capacity or a general
+  performance ranking against another scheduler.
+
 ## 1.10.0 (2026-08-28)
 
 * Carried with the coordinated fleet release. No behaviour changed.

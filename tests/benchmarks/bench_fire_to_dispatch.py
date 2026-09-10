@@ -1,35 +1,16 @@
-"""Fire-to-dispatch latency benchmark, closes the §23 unmeasured target.
+"""Legacy FireSchedule round-trip probe; not current delivery-capacity evidence.
 
-§23 lists "Fire-to-broker latency p50/p99 < 100 / 250 ms." We
-broke that target into two halves:
+This harness sends tokenless fires and does not validate distinct accepted
+commands. Calls within a second can reuse a deterministic slot identity.
+It also omits real agents, brokers and workers. Do not use its old committed
+numbers to claim current protocol acceptance latency or production throughput.
+See docs/SCHEDULER-RELIABILITY-1.11.md for the required replacement harness.
 
-- **scheduler-controlled half** (this bench): time from
-  ``FireDispatcher.fire(...)`` returning to brain's
-  ``CommandDispatcher`` having inserted the Command row + acked.
-  This is the gRPC + brain-side handler cost, which z4j-scheduler
-  ENTIRELY controls.
-- **agent-controlled half**: time from brain dispatching to the
-  agent's ``engine.submit_task()`` returning. This depends on
-  WebSocket latency, agent-process load, broker response time. We
-  can't bench it without a real broker + worker fixture; operators
-  measure it via the existing ``z4j_scheduler_fire_latency_seconds``
-  Prometheus histogram in production.
+The scheduler fire_latency histogram measures the Brain RPC path, not worker
+execution. Quantiles from unrelated runs/distributions cannot be subtracted to
+infer agent/broker latency; use correlated per-fire timestamps instead.
 
-The full §23 budget covers BOTH halves. This bench reports the
-scheduler-controlled half in isolation so operators can subtract
-from their production observation to estimate the agent-side cost.
-
-Running the bench:
-
-    pip install z4j-brain[scheduler-grpc] cryptography
-    cd packages/z4j-scheduler
-    python -m tests.benchmarks.bench_fire_to_dispatch
-
-Output: a JSON report + a printable summary. JSON path is
-``tests/benchmarks/results/fire_to_dispatch.json`` by default.
-
-Skips gracefully when ``z4j-brain`` or ``cryptography`` is not
-importable (the same gate as the integration tests).
+Running: python -m tests.benchmarks.bench_fire_to_dispatch --out /tmp/legacy.json
 """
 
 from __future__ import annotations
@@ -301,14 +282,13 @@ def _quantile(samples: list[float], q: float) -> float:
 def render_summary(report: dict[str, Any]) -> str:
     lines = [
         "=" * 70,
-        "Fire-to-dispatch latency (scheduler-controlled half of §23)",
+        "Legacy FireSchedule round trip (not production delivery capacity)",
         "=" * 70,
         f"Generated:  {report['generated']}",
         f"Iterations: {report['result']['iterations']}",
         "",
-        "Measures: scheduler.FireDispatcher.fire() round-trip via",
-        "          gRPC -> brain -> Command row inserted -> ack",
-        "          (does NOT include agent + broker time)",
+        "Measures a legacy RPC loop, not distinct current accepted commands.",
+        "Does NOT include real agents, brokers or workers.",
         "",
         f"  p50:  {report['result']['p50_ms']:.2f} ms  (target: <100 ms incl. agent)",
         f"  p90:  {report['result']['p90_ms']:.2f} ms",
@@ -316,9 +296,8 @@ def render_summary(report: dict[str, Any]) -> str:
         f"  max:  {report['result']['max_ms']:.2f} ms",
         f"  mean: {report['result']['mean_ms']:.2f} ms",
         "",
-        "Operators: subtract these numbers from your production",
-        "z4j_scheduler_fire_latency_seconds histogram p50/p99 to",
-        "estimate the agent-side cost of your specific deployment.",
+        "Do not subtract quantiles to infer downstream latency.",
+        "Use correlated timestamps from a full delivery load rig.",
         "=" * 70,
     ]
     return "\n".join(lines) + "\n"

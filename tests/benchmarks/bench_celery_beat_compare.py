@@ -15,10 +15,11 @@ the two schedulers spend their time on identical workloads:
 3. **Per-schedule memory footprint** - how much RSS does each
    side add for a fixed schedule count?
 
-We deliberately do NOT measure broker latency or worker dispatch
-- both stacks share the same downstream agent/celery worker path
-once the fire is decided. The comparison's value is the SCHEDULER
-cost, not the queue cost.
+These are calendar-evaluation and object-allocation microbenchmarks, not
+production scheduler-loop or end-to-end delivery measurements. Neither
+scheduler's heap, watch/cache, database, network, broker or worker path runs
+here. The dispatch architectures differ; these results cannot establish
+which complete scheduler is faster or more reliable.
 
 Running the bench:
 
@@ -125,6 +126,7 @@ def bench_next_fire_cost(iterations: int = 1_000) -> dict[str, Any]:
         # celery-beat path - crontab.remaining_estimate
         if _CELERY_AVAILABLE:
             celery_obj = _make_celery_crontab(expr)
+            celery_obj.nowfun = lambda: now
             celery_times: list[float] = []
             for _ in range(iterations):
                 t0 = time.perf_counter()
@@ -146,24 +148,24 @@ def bench_next_fire_cost(iterations: int = 1_000) -> dict[str, Any]:
 def bench_tick_at_scale() -> dict[str, Any]:
     """Time the "what schedules are due right now?" pass at N schedules.
 
-    Both sides iterate every schedule on every tick, so cost is
-    ``O(N)`` per tick. The benchmark reports per-tick cost in
-    milliseconds at 100 / 1k / 10k schedules so operators can
-    judge scaling.
+    Calendar-evaluation microbenchmark, not either scheduler's production
+    tick loop. Both sides evaluate the same previous slot against a frozen
+    clock; all schedules must be due. Excludes cache/heap lookup, database,
+    leadership, network and task dispatch costs.
     """
     out: dict[str, Any] = {"per_scale": {}}
-    now = datetime.now(UTC)
-    last = now - timedelta(seconds=1)  # "1 second ago"
+    now = datetime.now(UTC).replace(second=0, microsecond=0)
+    last = now - timedelta(minutes=1)
 
     for n in (100, 1_000, 10_000):
         # z4j path: build a list of croniter instances + one
         # full pass to find which ones would fire on this tick.
-        z4j_crons = [croniter("* * * * *", now) for _ in range(n)]
+        z4j_crons = [croniter("* * * * *", last) for _ in range(n)]
         t0 = time.perf_counter()
         z4j_due = 0
         for c in z4j_crons:
             nxt = c.get_next(datetime)
-            if nxt <= now + timedelta(seconds=60):
+            if nxt <= now:
                 z4j_due += 1
         z4j_ms = (time.perf_counter() - t0) * 1000
 
@@ -175,6 +177,8 @@ def bench_tick_at_scale() -> dict[str, Any]:
 
         if _CELERY_AVAILABLE:
             celery_objs = [_make_celery_crontab("* * * * *") for _ in range(n)]
+            for celery_obj in celery_objs:
+                celery_obj.nowfun = lambda: now
             t0 = time.perf_counter()
             celery_due = 0
             for c in celery_objs:
@@ -197,14 +201,16 @@ def bench_tick_at_scale() -> dict[str, Any]:
 def bench_memory_per_schedule() -> dict[str, Any]:
     """Measure RSS growth as we add 10k schedule objects per side.
 
-    Subtracts a baseline RSS reading taken before construction so
-    background process noise doesn't swamp the per-schedule
-    number. The reported ``bytes_per_schedule`` is approximate -
-    Python's allocator pads, the GC moves things - but it gives a
-    defensible order-of-magnitude.
+    Exploratory allocator observation only: both sides run in one process
+    after earlier allocations, and some platforms expose peak RSS. Reused
+    arenas can produce zero growth. These deltas do not compare complete
+    scheduler memory footprints or establish a memory-efficiency ranking.
     """
     n = 10_000
-    out: dict[str, Any] = {"schedules": n}
+    out: dict[str, Any] = {
+        "schedules": n,
+        "scope": "sequential RSS deltas; allocator reuse and peak RSS can distort results",
+    }
 
     # z4j side - just the croniter objects + minimal wrapper.
     gc.collect()
@@ -313,33 +319,13 @@ def render_summary(report: dict[str, Any]) -> str:
         )
     lines.append("")
 
-    # Summary verdict
-    lines.append("--- Summary ---")
-    if report["celery_available"]:
-        # Compute the geometric mean of the z4j/celery ratios across
-        # both metrics. < 1 means z4j is faster on average.
-        ratios = []
-        for r in report["next_fire_cost"]["per_cron"].values():
-            if r.get("celery_us_p50"):
-                ratios.append(r["z4j_us_p50"] / r["celery_us_p50"])
-        for r in report["tick_at_scale"]["per_scale"].values():
-            if r.get("celery_tick_ms"):
-                ratios.append(r["z4j_tick_ms"] / r["celery_tick_ms"])
-        if ratios:
-            geomean = pow(
-                abs(__import__("math").prod(ratios)),
-                1 / len(ratios),
-            )
-            verdict = (
-                f"z4j is {1 / geomean:.2f}x FASTER than celery-beat"
-                if geomean < 1
-                else f"z4j is {geomean:.2f}x SLOWER than celery-beat"
-            )
-            lines.append(f"  Geomean across all timing metrics: {verdict}")
-    else:
-        lines.append(
-            "  Re-run with celery installed to see the comparison.",
-        )
+    lines.append("--- Measurement scope ---")
+    lines.append("  Calendar microbenchmarks; not production throughput or delivery latency.")
+    lines.append("  Both due checks use the same frozen minute and preceding slot.")
+    lines.append("  Next-fire includes croniter construction; Celery reuses a parsed crontab.")
+    lines.append("  RSS deltas share one process and cannot rank complete scheduler memory.")
+    if not report["celery_available"]:
+        lines.append("  Re-run with celery installed to see the comparison.")
     lines.append("=" * 70)
     return "\n".join(lines) + "\n"
 
@@ -370,6 +356,10 @@ def main() -> int:
     report: dict[str, Any] = {
         "generated": datetime.now(UTC).isoformat(),
         "celery_available": _CELERY_AVAILABLE,
+        "scope": "calendar microbenchmarks and object allocations; excludes production loops and delivery",
+        "due_window": "previous minute through frozen current minute, both inclusive due checks",
+        "python": sys.version,
+        "celery_version": __import__("celery").__version__ if _CELERY_AVAILABLE else None,
         "next_fire_cost": bench_next_fire_cost(iterations=args.iterations),
         "tick_at_scale": bench_tick_at_scale(),
         "memory_per_schedule": bench_memory_per_schedule(),

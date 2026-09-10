@@ -37,6 +37,8 @@ from typing import TYPE_CHECKING, Literal
 
 import grpc
 
+from z4j_scheduler.observability import metrics as m
+
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Awaitable, Callable
     from uuid import UUID
@@ -173,7 +175,11 @@ class WatchStream:
 
     async def _watch_loop(self) -> None:
         """Original reconnect-with-backoff watch loop."""
+        first_attempt = True
         while not self._stop_event.is_set():
+            if not first_attempt:
+                m.watch_stream_reconnects_total.inc()
+            first_attempt = False
             try:
                 await self._sync_then_watch()
             except asyncio.CancelledError:

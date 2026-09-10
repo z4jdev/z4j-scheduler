@@ -721,3 +721,61 @@ class TestAllDue:
             before=datetime(2026, 4, 26, 1, tzinfo=UTC),
         )
         assert result == []
+
+
+class TestProjectCounts:
+    async def test_counts_follow_replacement_move_remove_and_clear(self):
+        cache = ScheduleCache()
+        a, b = uuid4(), uuid4()
+        first, second = _entry(project_id=a), _entry(project_id=a)
+        await cache.upsert_many([first, second, first])
+        assert await cache.count_for_project(a) == 2
+        await cache.upsert(_entry(schedule_id=first.id, project_id=b))
+        assert await cache.count_for_project(a) == 1
+        assert await cache.count_for_project(b) == 1
+        await cache.remove(first.id)
+        await cache.remove(first.id)
+        assert await cache.count_for_project(b) == 0
+        await cache.clear()
+        assert await cache.count_for_project(a) == 0
+        assert cache._project_counts == {}
+
+    async def test_counts_follow_ordered_watch_deletion_absence_and_snapshots(self):
+        cache = ScheduleCache()
+        a, b = uuid4(), uuid4()
+        token = uuid4()
+        first = _entry(project_id=a, control_token=token, schedule_revision=1)
+        second = _entry(project_id=b, control_token=token, schedule_revision=2)
+        await cache.apply_watch_updates([first, second])
+        await cache.apply_watch_update(first)
+        assert await cache.count_for_project(a) == 1
+        await cache.apply_tombstone(schedule_id=first.id, project_id=a, revision=3)
+        await cache.apply_watch_update(first)  # stale create cannot resurrect a count
+        assert await cache.count_for_project(a) == 0
+        await cache.apply_observed_absence(schedule_id=second.id, project_id=b, observed_revision=4)
+        assert await cache.count_for_project(b) == 0
+        third = _entry(project_id=a, control_token=token, schedule_revision=5)
+        fourth = _entry(project_id=b, control_token=token, schedule_revision=6)
+        await cache.apply_completed_snapshot(
+            _snapshot(project_id=None, watermark=6, rows=(third, fourth))
+        )
+        assert await cache.count_for_project(a) == await cache.count_for_project(b) == 1
+        await cache.apply_completed_snapshot(_snapshot(project_id=a, watermark=7, rows=()))
+        assert await cache.count_for_project(a) == 0
+        assert await cache.count_for_project(b) == 1
+        await cache.apply_completed_snapshot(_snapshot(project_id=None, watermark=8, rows=()))
+        assert cache._project_counts == {}
+
+    async def test_count_reads_do_not_scan_schedule_entries(self):
+        cache = ScheduleCache()
+        project = uuid4()
+        await cache.upsert_many(_entry(project_id=project) for _ in range(2_000))
+
+        class NoScanDict(dict):
+            def values(self):
+                raise AssertionError("per-fire project count must not scan the cache")
+
+        cache._entries = NoScanDict(cache._entries)
+        for _ in range(100):
+            assert await cache.count_for_project(project) == 2_000
+        assert await cache.count_for_project(uuid4()) == 0

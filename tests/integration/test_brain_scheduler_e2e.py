@@ -1804,6 +1804,124 @@ class TestHoldAndRelease:
 # =====================================================================
 
 
+class TestCommittedResponseLoss:
+    """Drop a real RPC response after commit, then recover the durable slot.
+
+    These faults exercise the production retry loop and an independent client
+    taking over from stale authority. Agent rows select command vs buffered
+    acceptance; no broker or task worker executes in this fixture.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("online_agent", [False, True], ids=["buffered", "command"])
+    @pytest.mark.parametrize("recovery", ["retry", "new-instance"])
+    @pytest.mark.parametrize(
+        "failure_code",
+        [grpc.StatusCode.UNAVAILABLE, grpc.StatusCode.DEADLINE_EXCEEDED],
+    )
+    async def test_committed_slot_survives_lost_response(
+        self,
+        brain_grpc,
+        scheduler_client: BrainClient,
+        scheduler_settings: SchedulerSettings,
+        monkeypatch: pytest.MonkeyPatch,
+        online_agent: bool,
+        recovery: str,
+        failure_code: grpc.StatusCode,
+    ) -> None:
+        from z4j_brain.scheduler_grpc.handlers import SchedulerServiceImpl
+
+        _server, _port, db, _dispatcher = brain_grpc
+        project_id = await seed_project(db)
+        if online_agent:
+            await seed_online_agent(db, project_id=project_id)
+        seeded = await create_reserved_schedule(
+            db,
+            project_id=project_id,
+            name="response-loss",
+            planning_at=datetime.now(UTC) - _PLANNING_BACKDATE,
+        )
+        fire = await prepare_current_fire(
+            scheduler_client,
+            project_id=project_id,
+            schedule_id=seeded.id,
+        )
+        original = SchedulerServiceImpl._fire_current_schedule
+        requests: list[bytes] = []
+        committed_states: list[tuple] = []
+
+        async def lose_first_response(service, *, request, context, **kwargs):
+            requests.append(request.SerializeToString(deterministic=True))
+            response = await original(service, request=request, context=context, **kwargs)
+            # Reading in another session proves acceptance committed before the
+            # injected failure; this is not a fake returning an invented result.
+            committed_states.append(await _cadence_state(db, seeded.id))
+            if len(requests) == 1:
+                assert len(await _fire_rows(db)) == 1
+                assert committed_states[0][0] == fire.slot
+                await context.abort(failure_code, "test: response lost after commit")
+            return response
+
+        monkeypatch.setattr(SchedulerServiceImpl, "_fire_current_schedule", lose_first_response)
+        settings = scheduler_settings.model_copy(
+            update={
+                "fire_retry_max": 1 if recovery == "retry" else 0,
+                "fire_retry_backoff_seconds": 0.0,
+            }
+        )
+
+        async def dispatch(client: BrainClient, config: SchedulerSettings):
+            return await FireDispatcher(client=client, settings=config).dispatch(
+                schedule_id=seeded.id,
+                scheduled_for=fire.slot,
+                prepared_fire=fire.prepared,
+                schedule_entry=fire.entry,
+            )
+
+        if recovery == "retry":
+            result = await dispatch(scheduler_client, settings)
+            assert requests[0] == requests[1], "retry changed the prepared acceptance request"
+        else:
+            with pytest.raises(grpc.aio.AioRpcError) as lost:
+                await dispatch(scheduler_client, settings)
+            assert lost.value.code() == failure_code
+            await scheduler_client.close()
+            # An independent channel starts from the pre-acceptance snapshot,
+            # like a follower that has not received the watch echo at takeover.
+            replacement = BrainClient(settings.model_copy(update={"instance_id": "replacement"}))
+            await replacement.connect()
+            try:
+                result = await dispatch(replacement, settings)
+            finally:
+                await replacement.close()
+
+        assert result is not None and result.disposition == "accepted"
+        assert result.buffered is not online_agent
+        assert result.accepted_last_run_at == fire.slot
+        assert result.accepted_next_run_at == fire.prepared.next_run_at
+        assert len(requests) == 2
+        assert committed_states[0] == committed_states[1]
+        assert await _cadence_state(db, seeded.id) == committed_states[0]
+        assert (await _schedule_row(db, seeded.id)).total_runs == 1
+        fires, commands, pending = (
+            await _fire_rows(db),
+            await _command_rows(db),
+            await _pending_rows(db),
+        )
+        assert len(fires) == 1
+        assert fires[0].fire_id == fire.fire_id
+        assert fires[0].receipt_control_token == seeded.control_token
+        if online_agent:
+            assert len(commands) == 1 and not pending
+            assert result.command_id == commands[0].id == fires[0].command_id
+            assert fires[0].scheduler_ack_status == "success"
+        else:
+            assert len(pending) == 1 and not commands
+            assert result.command_id is None
+            assert pending[0].fire_id == fire.fire_id
+            assert pending[0].receipt_control_token == seeded.control_token
+
+
 class TestEndToEndWiring:
     """Boot, observe, fire, acknowledge - in the order a scheduler does it."""
 

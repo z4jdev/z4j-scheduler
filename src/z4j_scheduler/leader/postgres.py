@@ -215,6 +215,10 @@ class AsyncpgLockBackend:
 # timed out.
 _STOP_CLEANUP_OP_TIMEOUT_SECONDS = 5.0
 
+# A half-open connection must not leave the local leader flag true forever.
+# Each lock operation has its own deadline (not the whole project batch).
+_BACKEND_OP_TIMEOUT_SECONDS = 5.0
+
 
 async def _await_despite_cancel(task: asyncio.Task[None]) -> None:
     """Await ``task`` to completion, deferring caller cancellation.
@@ -402,7 +406,9 @@ class PostgresAdvisoryLockLeaderGate:
             while not self._stop_event.is_set():
                 try:
                     if not self._is_leader:
-                        granted = await self._backend.acquire(self._key)
+                        granted = await asyncio.wait_for(
+                            self._backend.acquire(self._key), timeout=_BACKEND_OP_TIMEOUT_SECONDS
+                        )
                         if granted:
                             self._is_leader = True
                             logger.info(
@@ -414,7 +420,9 @@ class PostgresAdvisoryLockLeaderGate:
                         # silently (network partition, server
                         # restart) this raises and the except branch
                         # demotes us to standby.
-                        await self._backend.health_check()
+                        await asyncio.wait_for(
+                            self._backend.health_check(), timeout=_BACKEND_OP_TIMEOUT_SECONDS
+                        )
                 except Exception:
                     if self._is_leader:
                         logger.warning(
@@ -428,7 +436,9 @@ class PostgresAdvisoryLockLeaderGate:
                     # opens a fresh one (the existing one is in an
                     # unknown state).
                     with contextlib.suppress(Exception):
-                        await self._backend.close()
+                        await asyncio.wait_for(
+                            self._backend.close(), timeout=_BACKEND_OP_TIMEOUT_SECONDS
+                        )
 
                 # Notify first-cycle waiters AFTER state has settled.
                 self._first_cycle.set()
@@ -638,7 +648,9 @@ class PerProjectLeaderGate:
                         if pid in self._held:
                             continue
                         try:
-                            granted = await self._backend.acquire(key)
+                            granted = await asyncio.wait_for(
+                                self._backend.acquire(key), timeout=_BACKEND_OP_TIMEOUT_SECONDS
+                            )
                         except Exception:  # noqa: TRY203  documents bail to outer handler
                             # Connection died mid-acquisition. Bail
                             # out of this cycle; the outer except
@@ -655,8 +667,10 @@ class PerProjectLeaderGate:
                     # Release dropped.
                     for pid in list(self._held):
                         if pid not in desired:
-                            with contextlib.suppress(Exception):
-                                await self._backend.release(self._held[pid])
+                            await asyncio.wait_for(
+                                self._backend.release(self._held[pid]),
+                                timeout=_BACKEND_OP_TIMEOUT_SECONDS,
+                            )
                             del self._held[pid]
                             logger.info(
                                 "z4j.scheduler.leader.postgres: "
@@ -665,7 +679,9 @@ class PerProjectLeaderGate:
                             )
 
                     # Liveness probe.
-                    await self._backend.health_check()
+                    await asyncio.wait_for(
+                        self._backend.health_check(), timeout=_BACKEND_OP_TIMEOUT_SECONDS
+                    )
                 except Exception:
                     if self._held:
                         logger.warning(
@@ -675,7 +691,9 @@ class PerProjectLeaderGate:
                         )
                     self._held.clear()
                     with contextlib.suppress(Exception):
-                        await self._backend.close()
+                        await asyncio.wait_for(
+                            self._backend.close(), timeout=_BACKEND_OP_TIMEOUT_SECONDS
+                        )
 
                 self._first_cycle.set()
 
