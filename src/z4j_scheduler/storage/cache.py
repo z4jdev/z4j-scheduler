@@ -20,7 +20,8 @@ across the read.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+import logging
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from z4j_scheduler.tick._entry import (
@@ -36,6 +37,8 @@ if TYPE_CHECKING:
 
     from z4j_scheduler.storage._models import ScheduleSnapshot
     from z4j_scheduler.tick._entry import ScheduleEntry
+
+logger = logging.getLogger("z4j.scheduler.cache")
 
 
 class _Sentinel:
@@ -84,10 +87,17 @@ class CurrentStop:
     does not exist) leaves this zero, and the stop then ends only when the
     control generation is superseded or the row is removed. There is no state
     to wait for, so waiting for none of it would be the wrong default.
+
+    ``brain_enabled`` is the enabled value the Brain last sent for the row,
+    recorded because the stop clamps the cached row to disabled and would
+    otherwise lose it. :meth:`ScheduleCache.release_current_stop` restores it
+    when a stop ends by local decision rather than by a superseding update,
+    so a schedule the operator paused while it was stopped stays paused.
     """
 
     control_token: UUID
     refused_at_revision: int
+    brain_enabled: bool = True
 
 
 class ScheduleProtocolError(RuntimeError):
@@ -110,7 +120,24 @@ class ScheduleCache:
     :meth:`upsert` / :meth:`remove` to populate state.
     """
 
-    def __init__(self, *, max_post_watermark_tombstones: int = 10_000) -> None:
+    def __init__(
+        self,
+        *,
+        max_post_watermark_tombstones: int = 10_000,
+        on_snapshot_required: Callable[[UUID, int], None] | None = None,
+    ) -> None:
+        """
+        Args:
+            max_post_watermark_tombstones: How many deletes a project may
+                accumulate past its last stable snapshot before its cadence is
+                paused until a covering snapshot lands.
+            on_snapshot_required: Called with ``(project_id, tombstone_count)``
+                the moment a project crosses that threshold, outside the cache
+                lock. The scheduler wires this to an immediate snapshot resync
+                so the pause lasts one round trip instead of the periodic
+                resync interval. ``None`` leaves the pause to the periodic
+                resync alone.
+        """
         if max_post_watermark_tombstones <= 0:
             raise ValueError("max_post_watermark_tombstones must be positive")
         self._entries: dict[UUID, ScheduleEntry] = {}
@@ -124,6 +151,7 @@ class ScheduleCache:
         self._global_watermark = 0
         self._max_post_watermark_tombstones = max_post_watermark_tombstones
         self._snapshot_required_projects: set[UUID] = set()
+        self._on_snapshot_required = on_snapshot_required
         self._lock = asyncio.Lock()
         # Set whenever the cache mutates. The tick engine clears it
         # before sleeping; if a mutation arrives during sleep, the
@@ -352,6 +380,14 @@ class ScheduleCache:
         ):
             self._current_stop_latches.pop(incoming.id, None)
             return
+        # Keep the Brain's own enabled value with the stop before clamping, so
+        # a local release can hand the row back exactly as the Brain last sent
+        # it.
+        if stop.brain_enabled != incoming.is_enabled:
+            self._current_stop_latches[incoming.id] = replace(
+                stop,
+                brain_enabled=incoming.is_enabled,
+            )
         incoming.is_enabled = False
 
     async def apply_watch_update(self, incoming: ScheduleEntry) -> None:
@@ -607,10 +643,93 @@ class ScheduleCache:
             self._current_stop_latches[schedule_id] = CurrentStop(
                 control_token=expected_control_token,
                 refused_at_revision=max(0, refused_at_revision),
+                brain_enabled=entry.is_enabled,
             )
             entry.is_enabled = False
         self.changed.set()
         return True
+
+    async def release_current_stop(
+        self,
+        schedule_id: UUID,
+        *,
+        expected_control_token: UUID,
+    ) -> bool:
+        """End a stop by local decision, restoring the Brain's enabled value.
+
+        The engine calls this when the condition a stop was waiting on has
+        been settled on this side rather than by a Brain update: a cadence
+        contract renegotiated successfully after a mid-flight mismatch. The
+        row goes back to whatever enabled state the Brain last sent, so a
+        schedule paused by an operator while it was stopped stays paused.
+
+        Returns False, having changed nothing, when no stop is held for this
+        control generation: the Watch stream already ended it, the row is
+        gone, or the generation moved on.
+        """
+
+        async with self._lock:
+            stop = self._current_stop_latches.get(schedule_id)
+            entry = self._entries.get(schedule_id)
+            if (
+                stop is None
+                or entry is None
+                or stop.control_token != expected_control_token
+                or entry.control_token != expected_control_token
+            ):
+                return False
+            self._current_stop_latches.pop(schedule_id, None)
+            entry.is_enabled = stop.brain_enabled
+        self.changed.set()
+        return True
+
+    def _pause_for_tombstone_pressure_locked(self, project_id: UUID) -> int | None:
+        """Pause ``project_id`` when its unsnapshotted deletes reach the cap.
+
+        Returns the tombstone count when this call is the one that paused the
+        project, so the caller can report it once the lock is released, and
+        ``None`` when the project was already paused or is below the cap.
+        """
+
+        count = self._post_watermark_tombstone_count_locked(project_id)
+        if count < self._max_post_watermark_tombstones:
+            return None
+        if project_id in self._snapshot_required_projects:
+            return None
+        self._snapshot_required_projects.add(project_id)
+        return count
+
+    def _report_tombstone_pressure(self, paused: list[tuple[UUID, int]]) -> None:
+        """Say where an operator will look that a project stopped ticking, and
+        ask for the snapshot that ends it.
+
+        Called outside the lock. Before this the pause was silent: every
+        schedule in the project simply stopped firing until the periodic
+        resync, which by default is fifteen minutes away. The request hook
+        turns that into one round trip; a failure in it is logged and the
+        periodic resync remains the backstop.
+        """
+
+        for project_id, count in paused:
+            logger.warning(
+                "z4j.scheduler.cache: project_id=%s paused for tombstone pressure "
+                "(%d deletes since its last stable snapshot, cap %d); no schedule "
+                "in it fires until a covering snapshot lands; requesting an "
+                "immediate snapshot resync",
+                project_id,
+                count,
+                self._max_post_watermark_tombstones,
+            )
+            if self._on_snapshot_required is None:
+                continue
+            try:
+                self._on_snapshot_required(project_id, count)
+            except Exception:
+                logger.exception(
+                    "z4j.scheduler.cache: snapshot resync request failed for "
+                    "project_id=%s; the periodic resync will lift the pause",
+                    project_id,
+                )
 
     async def apply_tombstone(
         self,
@@ -648,12 +767,10 @@ class ScheduleCache:
             self._brain_payloads.pop(schedule_id, None)
             self._id_revisions[schedule_id] = revision
             self._id_projects[schedule_id] = project_id
-            if (
-                self._post_watermark_tombstone_count_locked(project_id)
-                >= self._max_post_watermark_tombstones
-            ):
-                self._snapshot_required_projects.add(project_id)
+            paused_count = self._pause_for_tombstone_pressure_locked(project_id)
         self.changed.set()
+        if paused_count is not None:
+            self._report_tombstone_pressure([(project_id, paused_count)])
         return True
 
     async def apply_observed_absence(
@@ -790,14 +907,17 @@ class ScheduleCache:
                 ):
                     self._id_revisions.pop(schedule_id, None)
                     self._id_projects.pop(schedule_id, None)
+            newly_paused: list[tuple[UUID, int]] = []
             if snapshot.project_id is None:
-                projects = set(self._id_projects.values())
-                self._snapshot_required_projects = {
-                    project_id
-                    for project_id in projects
-                    if self._post_watermark_tombstone_count_locked(project_id)
-                    >= self._max_post_watermark_tombstones
-                }
+                previously_paused = self._snapshot_required_projects
+                self._snapshot_required_projects = set()
+                for project_id in set(self._id_projects.values()):
+                    count = self._post_watermark_tombstone_count_locked(project_id)
+                    if count < self._max_post_watermark_tombstones:
+                        continue
+                    self._snapshot_required_projects.add(project_id)
+                    if project_id not in previously_paused:
+                        newly_paused.append((project_id, count))
             elif (
                 self._post_watermark_tombstone_count_locked(
                     snapshot.project_id,
@@ -808,8 +928,12 @@ class ScheduleCache:
                     snapshot.project_id,
                 )
             else:
-                self._snapshot_required_projects.add(snapshot.project_id)
+                paused_count = self._pause_for_tombstone_pressure_locked(snapshot.project_id)
+                if paused_count is not None:
+                    newly_paused.append((snapshot.project_id, paused_count))
         self.changed.set()
+        if newly_paused:
+            self._report_tombstone_pressure(newly_paused)
         return True
 
     async def project_watermark(self, project_id: UUID) -> int:
@@ -890,14 +1014,18 @@ class ScheduleCache:
         if not candidates:
             return None
         if before is not None:
-            candidates = [e for e in candidates if e.next_fire_at <= before]
+            # ``candidates`` already excludes None successors; the guard
+            # only re-states that for the type checker.
+            candidates = [
+                e for e in candidates if e.next_fire_at is not None and e.next_fire_at <= before
+            ]
             if not candidates:
                 return None
         # Tie-breaker: id sort ensures deterministic ordering when
         # multiple schedules are due at the exact same instant.
         return min(
             candidates,
-            key=lambda e: (e.next_fire_at, e.id),  # type: ignore[arg-type, return-value]
+            key=lambda e: (e.next_fire_at, e.id),
         )
 
     async def all_due(
@@ -923,7 +1051,7 @@ class ScheduleCache:
                         and e.next_fire_at <= before
                     )
                 ),
-                key=lambda e: (e.next_fire_at, e.id),  # type: ignore[arg-type, return-value]
+                key=lambda e: (e.next_fire_at, e.id),
             )
 
     def __len__(self) -> int:

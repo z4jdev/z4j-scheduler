@@ -22,7 +22,7 @@ to the brain, which routes it to a connected Celery, RQ, Dramatiq, Huey,
 arq, or TaskIQ agent; engine packages do not need to be installed beside the
 scheduler service.
 
-Full per-adapter matrix at <https://z4j.dev/reference/compatibility/>.
+Full per-adapter matrix at <https://docs.z4j.com/reference/compatibility/>.
 
 ## What makes z4j-scheduler different
 
@@ -54,9 +54,12 @@ that matter day to day:
   slots that age during a handoff are handled by the per-schedule catch-up
   policy.
 - **Migration tooling.** The CLI imports celery-beat (static and
-  django-celery-beat), rq-scheduler, APScheduler SQLAlchemy jobstores, and system
-  crontab. It exports reviewable Celery, RQ, APScheduler, or crontab
-  configuration. Generated output is advisory and must be reviewed and tested
+  django-celery-beat), rq-scheduler, APScheduler SQLAlchemy jobstores, system
+  crontab, Huey periodic tasks, arq cron jobs, and taskiq schedule labels. It
+  exports reviewable Celery, RQ, APScheduler, crontab, Huey, arq, or taskiq
+  configuration; Dramatiq has no native scheduler, so `--from dramatiq` and
+  `--to dramatiq` print migration guidance instead. Generated output is
+  advisory and must be reviewed and tested
   against the target scheduler by the operator. This is not a
   lossless rollback: target formats cannot represent every z4j schedule kind
   or policy, and unsupported rows render as comments for manual handling.
@@ -68,8 +71,8 @@ that matter day to day:
 | Schedule kinds | cron, interval, one-shot, solar (sunrise / sunset / dawn / dusk / noon / midnight at a given lat / lon) |
 | Live editing | dashboard and REST API require no restart; declarative config reconciles when a configured framework startup hook or helper/CLI invokes it |
 | Engine fan-out | Celery, RQ, Dramatiq, Huey, arq, TaskIQ |
-| Importers | celery / django-celery-beat / rq-scheduler / apscheduler / cron |
-| Exporters | celery / rq / apscheduler / cron; generated output is advisory, and target limitations can require manual handling |
+| Importers | celery / django-celery-beat / rq-scheduler / apscheduler / cron / huey / arq / taskiq / dramatiq; the dramatiq value prints guidance only, since Dramatiq has no native scheduler |
+| Exporters | celery / rq / apscheduler / cron / huey / arq / taskiq / dramatiq; generated output is advisory, target limitations can require manual handling, and the dramatiq value renders guidance only |
 | HA leader election | Postgres advisory locks; global or per-project leadership, with warm followers |
 | Audit log | every mutation through z4j is HMAC-chained; the database refuses a schedule change with no matching change-log entry, though a role holding direct write access to those tables can supply both |
 | Catch-up policy | per-schedule: skip, fire one missed, fire all missed |
@@ -121,7 +124,11 @@ z4j-scheduler import \
 ```
 
 The other importer subcommands follow the same shape (`--from rq`,
-`--from apscheduler`, `--from django-celery-beat`, etc.). Add
+`--from apscheduler`, `--from django-celery-beat`, `--from huey --huey-app
+pkg.module:huey`, `--from arq --arq-settings pkg.worker:WorkerSettings`,
+`--from taskiq --taskiq-broker pkg.tkq:broker`); each has its own extra
+(`rq-import`, `apscheduler-import`, `huey-import`, `arq-import`,
+`taskiq-import`). Add
 `--dry-run` to print the parsed schedules as JSONL for review
 instead of writing them to the brain. `--verify` also implies dry-run; a normal
 run with neither flag pushes the imported schedules immediately.
@@ -138,7 +145,8 @@ You probably want it if:
 - You want HA scheduling without standing up a second control
   plane.
 - You're considering a one-time migration from celery-beat /
-  rq-scheduler / APScheduler and want reviewable import and export tooling while
+  rq-scheduler / APScheduler / Huey / arq / taskiq and want reviewable import
+  and export tooling while
   accepting the target format's limitations.
 
 You probably don't need it if:
@@ -152,9 +160,9 @@ You probably don't need it if:
 
 ## Documentation
 
-Full docs at [z4j.dev/scheduler/](https://z4j.dev/scheduler/).
+Full docs at [docs.z4j.com/scheduler/](https://docs.z4j.com/scheduler/).
 The migration guide at
-[z4j.dev/scheduler/migrating-from-celery-beat/](https://z4j.dev/scheduler/migrating-from-celery-beat/)
+[docs.z4j.com/scheduler/migrating-from-celery-beat/](https://docs.z4j.com/scheduler/migrating-from-celery-beat/)
 walks the importer + dashboard verification path step by step.
 
 ## License
@@ -168,7 +176,7 @@ compatibility field; setting it enables no feature.
 ## Links
 
 - Homepage: https://z4j.com
-- Documentation: https://z4j.dev
+- Documentation: https://docs.z4j.com
 - PyPI: https://pypi.org/project/z4j-scheduler/
 - Issues: https://github.com/z4jdev/z4j-scheduler/issues
 - Changelog: [CHANGELOG.md](CHANGELOG.md)

@@ -149,7 +149,7 @@ class TriggerGrpcServer:
             dispatcher=self._dispatcher,
             leader_gate=self._leader_gate,
         )
-        pb_grpc.add_SchedulerServiceServicer_to_server(servicer, server)
+        pb_grpc.add_SchedulerServiceServicer_to_server(servicer, server)  # type: ignore[no-untyped-call]  # generated grpcio-tools code is untyped
 
         bind_addr = (
             f"{self._settings.trigger_grpc_bind_host}:{self._settings.trigger_grpc_bind_port}"
@@ -157,11 +157,25 @@ class TriggerGrpcServer:
         self._bound_port = server.add_secure_port(bind_addr, creds)
         await server.start()
         self._server = server
-        logger.info(
-            "z4j.scheduler.trigger_grpc: serving on %s (mTLS, allow-list=%s)",
-            bind_addr,
-            tuple(self._settings.trigger_grpc_allowed_cns) or "(open CA)",
-        )
+        if allowed_cns:
+            logger.info(
+                "z4j.scheduler.trigger_grpc: serving on %s (mTLS, allow-list=%s)",
+                bind_addr,
+                allowed_cns,
+            )
+        else:
+            # The docs promise a warning for an empty allow-list. The
+            # ``trigger_grpc_open_ca`` warning above fires at the decision;
+            # the serving line used to restate the open state at INFO, so an
+            # operator filtering on WARNING saw the first and then a line
+            # that read as routine.
+            logger.warning(
+                "z4j.scheduler.trigger_grpc: serving on %s (mTLS, open CA: any "
+                "certificate the CA validates is accepted; set "
+                "Z4J_SCHEDULER_TRIGGER_GRPC_ALLOWED_CNS to restrict)",
+                bind_addr,
+                extra={"event": "trigger_grpc_open_ca"},
+            )
 
     async def stop(self) -> None:
         """Stop + drain. Idempotent."""

@@ -13,12 +13,13 @@ gRPC, no real network. Covers:
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
+from z4j_scheduler.observability import metrics as m
 from z4j_scheduler.storage._models import (
     ScannedThrough,
     ScheduleEvent,
@@ -33,16 +34,35 @@ from z4j_scheduler.tick._entry import ScheduleEntry
 pytestmark = pytest.mark.asyncio
 
 
-def _make_entry(*, schedule_id: UUID | None = None) -> ScheduleEntry:
+def _make_entry(
+    *,
+    schedule_id: UUID | None = None,
+    project_id: UUID | None = None,
+    kind: str = "cron",
+) -> ScheduleEntry:
     return ScheduleEntry(
         id=schedule_id or uuid4(),
-        project_id=uuid4(),
-        kind="cron",
-        expression="0 * * * *",
+        project_id=project_id or uuid4(),
+        kind=kind,  # type: ignore[arg-type]
+        expression="0 * * * *" if kind == "cron" else "60",
         timezone="UTC",
         is_enabled=True,
         catch_up="skip",
         anchor_at=datetime(2026, 4, 26, tzinfo=UTC),
+    )
+
+
+def _loaded(project_id: UUID, kind: str) -> float | None:
+    return m.default_registry.get_sample_value(
+        "z4j_scheduler_schedules_loaded",
+        {"project": str(project_id), "kind": kind},
+    )
+
+
+def _healthy(watch: WatchStream) -> float | None:
+    return m.default_registry.get_sample_value(
+        "z4j_scheduler_watch_healthy",
+        {"project": watch.project_label},
     )
 
 
@@ -162,6 +182,154 @@ class TestStreamProcessing:
         assert await cache.get(e.id) is None
 
 
+class TestHealthSignal:
+    """The stream's health drives the gauge, the outage clock and readiness."""
+
+    async def test_stream_open_marks_healthy_and_publishes_the_gauge(self) -> None:
+        project_id = uuid4()
+        watch = WatchStream(
+            client=FakeBrainClient(),  # type: ignore[arg-type]
+            cache=ScheduleCache(),
+            project_id=project_id,
+        )
+        assert watch.project_label == str(project_id)
+        assert watch.is_healthy is False
+        assert watch.unhealthy_for_seconds() is None
+        assert _healthy(watch) == 0.0
+
+        await watch._stream()
+
+        assert watch.is_healthy is True
+        assert watch.unhealthy_for_seconds() is None
+        assert _healthy(watch) == 1.0
+
+    async def test_all_project_scope_publishes_under_the_wildcard(self) -> None:
+        watch = WatchStream(client=FakeBrainClient(), cache=ScheduleCache())  # type: ignore[arg-type]
+        assert watch.project_label == "*"
+        assert _healthy(watch) == 0.0
+
+    async def test_loop_failures_time_one_continuous_outage(self) -> None:
+        now = [100.0]
+        watch = WatchStream(
+            client=FakeBrainClient(),  # type: ignore[arg-type]
+            cache=ScheduleCache(),
+            project_id=uuid4(),
+            full_resync_interval_seconds=0,
+            clock=lambda: now[0],
+        )
+        calls = 0
+
+        async def sync() -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                # A stream that opens, then ends cleanly.
+                await watch._stream()
+            elif calls == 2:
+                raise RuntimeError("injected dropped watch")
+            else:
+                await watch.stop()
+
+        async def backoff() -> None:
+            now[0] += 2.0
+
+        watch._sync_then_watch = sync  # type: ignore[method-assign]
+        watch._backoff_or_stop = backoff  # type: ignore[method-assign]
+        await watch._watch_loop()
+
+        assert calls == 3
+        assert watch.is_healthy is False
+        assert _healthy(watch) == 0.0
+        # The clock started at the first clean end (t=100) and the later
+        # failure did not restart it.
+        assert watch.unhealthy_for_seconds() == now[0] - 100.0
+
+        await watch._stream()
+        assert watch.is_healthy is True
+        assert watch.unhealthy_for_seconds() is None
+        assert _healthy(watch) == 1.0
+
+
+class TestSchedulesLoadedGauge:
+    """``schedules_loaded`` follows the cache per (project, kind)."""
+
+    async def test_full_sync_publishes_counts_per_project_and_kind(self) -> None:
+        project_a, project_b = uuid4(), uuid4()
+        client = FakeBrainClient(
+            list_entries=[
+                _make_entry(project_id=project_a),
+                _make_entry(project_id=project_a),
+                _make_entry(project_id=project_a, kind="interval"),
+                _make_entry(project_id=project_b),
+            ],
+        )
+        watch = WatchStream(client=client, cache=ScheduleCache())  # type: ignore[arg-type]
+
+        await watch._full_sync()
+
+        assert _loaded(project_a, "cron") == 2.0
+        assert _loaded(project_a, "interval") == 1.0
+        assert _loaded(project_b, "cron") == 1.0
+
+    async def test_events_publish_only_when_a_membership_changes_and_never_walk(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        project_a, project_b = uuid4(), uuid4()
+        a_cron = _make_entry(project_id=project_a)
+        b_cron = _make_entry(project_id=project_b)
+        cache = ScheduleCache()
+        watch = WatchStream(
+            client=FakeBrainClient(list_entries=[a_cron, b_cron]),  # type: ignore[arg-type]
+            cache=cache,
+        )
+        await watch._full_sync()
+        publishes = 0
+        walks = 0
+        original_publish = m.set_schedules_loaded
+        original_snapshot = cache.snapshot
+
+        def counting_publish(counts: Mapping[tuple[str, str], int]) -> None:
+            nonlocal publishes
+            publishes += 1
+            original_publish(counts)
+
+        async def counting_snapshot() -> list[ScheduleEntry]:
+            nonlocal walks
+            walks += 1
+            return await original_snapshot()
+
+        monkeypatch.setattr(m, "set_schedules_loaded", counting_publish)
+        monkeypatch.setattr(cache, "snapshot", counting_snapshot)
+
+        # A fire-ack echo keeps project and kind: nothing is published.
+        echo = _make_entry(schedule_id=a_cron.id, project_id=project_a)
+        watch._client.stream_events = [  # type: ignore[attr-defined]
+            ScheduleEvent(kind="updated", schedule=echo, deleted_id=None, resume_token="t1"),
+        ]
+        await watch._stream()
+        assert publishes == 0
+        assert _loaded(project_a, "cron") == 1.0
+
+        # A delete retires the series; a create publishes a new one. Each
+        # moves one count; neither walks the cache.
+        watch._client.stream_events = [  # type: ignore[attr-defined]
+            ScheduleEvent(kind="deleted", schedule=None, deleted_id=b_cron.id, resume_token="t2"),
+            ScheduleEvent(
+                kind="created",
+                schedule=_make_entry(project_id=project_b, kind="interval"),
+                deleted_id=None,
+                resume_token="t3",
+            ),
+        ]
+        await watch._stream()
+        assert publishes == 2
+        assert walks == 0
+        assert _loaded(project_b, "cron") is None
+        assert _loaded(project_b, "interval") == 1.0
+        assert _loaded(project_a, "cron") == 1.0
+
+
 class TestCurrentProtocolSync:
     async def test_reconnect_rejects_legacy_to_current_mode_change(self) -> None:
         async def select_current():
@@ -257,6 +425,8 @@ class TestCurrentProtocolSync:
         assert client.seen_after_revision == 10
         assert watch._revision_cursor == 12
         assert await cache.project_watermark(project_id) == 10
+        assert _loaded(project_id, "cron") == 1.0
+        assert _healthy(watch) == 1.0
 
     async def test_current_empty_snapshot_removes_stale_runnable_row(self) -> None:
         project_id = uuid4()

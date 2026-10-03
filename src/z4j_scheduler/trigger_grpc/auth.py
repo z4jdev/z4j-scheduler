@@ -22,7 +22,7 @@ import grpc
 logger = logging.getLogger("z4j.scheduler.trigger_grpc.auth")
 
 
-class TriggerAllowlistInterceptor(grpc.aio.ServerInterceptor):
+class TriggerAllowlistInterceptor(grpc.aio.ServerInterceptor):  # type: ignore[misc]  # grpc ships no stubs; the base class resolves to Any
     """Reject TriggerSchedule calls whose client cert CN is unknown."""
 
     def __init__(self, *, allowed_cns: tuple[str, ...]) -> None:
@@ -78,7 +78,7 @@ async def _enforce_cn(
     # supported range. Mirrors the brain-side fix from Apr 2026.
     cn_candidates: set[str] = set()
 
-    def _entries(key: str) -> list:
+    def _entries(key: str) -> list[bytes | str]:
         return list(auth_ctx.get(key, [])) + list(
             auth_ctx.get(key.encode(), []),
         )

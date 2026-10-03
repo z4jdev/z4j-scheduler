@@ -7,16 +7,21 @@ endpoint serializes them lazily on scrape. The
 Per ``docs/SCHEDULER.md §5.10`` the metrics surface is:
 
 - :data:`schedules_loaded` - gauge of how many schedules are in the
-  cache, labelled by project and engine and kind
+  cache, labelled by project and kind; the watch stream publishes it
+  from the cache's own contents through :func:`set_schedules_loaded`
 - :data:`fires_total` - counter of dispatched fires, labelled by
   status (delivered / buffered / failed)
 - :data:`fire_latency_seconds` - histogram of fire dispatch
   end-to-end latency
 - :data:`tick_drift_seconds` - histogram of how late each fire was
   vs its scheduled_for (lateness > grace = catch-up applied)
-- :data:`is_leader` - gauge per project (0 / 1)
-- :data:`grpc_calls_total` - counter labelled by method + status
+- :data:`is_leader` - gauge per project (0 / 1); a project that leaves
+  the gate's scope is retired through :func:`forget_leader_series`
+- :data:`grpc_calls_total` - counter labelled by method + status, the
+  status being the gRPC status name (``OK``, ``UNAVAILABLE``, ...)
 - :data:`watch_stream_reconnects_total` - counter
+- :data:`watch_healthy` - gauge per watch scope (0 / 1); the readiness
+  gate and the tick engine's dispatch gate read the same transitions
 
 Aggregate metrics retain every observation. Schedule detail and labelled
 variance use separate LRU windows of at most 1,000 label groups each, so
@@ -34,6 +39,7 @@ Histogram buckets are tuned for the latency targets in
 from __future__ import annotations
 
 from collections import OrderedDict
+from collections.abc import Mapping
 from contextlib import suppress
 from threading import Lock
 
@@ -156,6 +162,13 @@ watch_stream_reconnects_total = Counter(
     registry=default_registry,
 )
 
+watch_healthy = Gauge(
+    "z4j_scheduler_watch_healthy",
+    "1 while the WatchSchedules stream is connected and the cache is live, else 0.",
+    labelnames=("project",),
+    registry=default_registry,
+)
+
 # ---------------------------------------------------------------------------
 # Engine
 # ---------------------------------------------------------------------------
@@ -238,7 +251,7 @@ _variance_series: OrderedDict[tuple[str, str, str], None] = OrderedDict()
 _detail_lock = Lock()
 
 
-def _remove_series(metric: Counter | Histogram, *labelvalues: str) -> None:
+def _remove_series(metric: Counter | Gauge | Histogram, *labelvalues: str) -> None:
     # Eviction removes every series a group could own, but most groups own only
     # some: a schedule usually reports one or two statuses, and a swallowed
     # emission error can leave a group without a latency series.
@@ -284,6 +297,39 @@ def observe_fire_variance(schedule_id: str, engine: str, project: str, seconds: 
         fire_variance_seconds.labels(*key).observe(seconds)
 
 
+# ``schedules_loaded`` series published so far, so a (project, kind) pair that
+# leaves the cache is retired rather than left behind at its last value.
+_loaded_series: set[tuple[str, str]] = set()
+
+
+def set_schedules_loaded(counts: Mapping[tuple[str, str], int]) -> None:
+    """Publish the cache's schedule counts keyed by ``(project, kind)``.
+
+    The watch stream calls this from the cache's own contents after every
+    full sync and after any event that changes a count. Pairs published
+    earlier and absent now are removed, so a project that leaves scope stops
+    reporting instead of freezing at its last value.
+    """
+    with _detail_lock:
+        for key in list(_loaded_series):
+            if key not in counts:
+                _remove_series(schedules_loaded, *key)
+                _loaded_series.discard(key)
+        for key, count in counts.items():
+            schedules_loaded.labels(*key).set(count)
+            _loaded_series.add(key)
+
+
+def forget_leader_series(project: str) -> None:
+    """Drop the ``is_leader`` series of a project this instance no longer scopes.
+
+    The gauge is sampled from ``is_leader`` checks; once a project leaves the
+    gate's scope nothing samples it again, so without this the last value
+    would stand forever.
+    """
+    _remove_series(is_leader, project)
+
+
 __all__ = [
     "FIRE_VARIANCE_SCHEDULE_ID_MAX",
     "MAX_DETAIL_SCHEDULES",
@@ -292,6 +338,7 @@ __all__ = [
     "fire_latency_seconds",
     "fire_variance_seconds",
     "fires_total",
+    "forget_leader_series",
     "grpc_calls_total",
     "increment_schedule_fires",
     "is_leader",
@@ -300,6 +347,8 @@ __all__ = [
     "per_schedule_fire_latency_seconds",
     "per_schedule_fires_total",
     "schedules_loaded",
+    "set_schedules_loaded",
     "tick_drift_seconds",
+    "watch_healthy",
     "watch_stream_reconnects_total",
 ]

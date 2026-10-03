@@ -50,6 +50,7 @@ async def info(request: Request) -> dict[str, Any]:
             "brain_client_connected": state.brain_client_connected,
             "cache_initial_sync_complete": state.cache_initial_sync_complete,
             "leader_gate_initialised": state.leader_gate_initialised,
+            "watch_stream_healthy": state.watch_healthy,
         },
         "schedules_loaded": schedule_count,
     }

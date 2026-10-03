@@ -6,14 +6,17 @@
   supervisors.
 - ``GET /ready`` - readiness. 200 only if every subsystem is up
   (gRPC client connected, schedule cache populated, leader gate
-  initialised). Returns 503 with a JSON body naming the missing
-  subsystem when not ready. Suitable for k8s readiness probes and
-  load-balancer health checks.
+  initialised) and the watch stream has not been unhealthy for
+  longer than ``on_time_grace_seconds``. Returns 503 with a JSON
+  body naming the missing subsystem when not ready; a sustained
+  watch outage is named ``watch_unhealthy`` with its duration, and
+  the endpoint returns 200 again once the stream reconnects.
+  Suitable for k8s readiness probes and load-balancer health checks.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Request, status
 from fastapi.responses import JSONResponse
@@ -47,8 +50,14 @@ async def ready(request: Request) -> JSONResponse:
         missing.append("cache_initial_sync")
     if not state.leader_gate_initialised:
         missing.append("leader_gate")
+    body: dict[str, Any] = {"status": "not_ready", "missing": missing}
+    if state.watch_unhealthy_past_grace():
+        missing.append("watch_unhealthy")
+        seconds = state.watch_unhealthy_seconds()
+        if seconds is not None:
+            body["watch_unhealthy_seconds"] = round(seconds, 2)
     return JSONResponse(
-        {"status": "not_ready", "missing": missing},
+        body,
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
     )
 

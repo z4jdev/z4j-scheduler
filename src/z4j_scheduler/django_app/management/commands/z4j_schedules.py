@@ -32,8 +32,8 @@ from typing import Any
 try:
     from django.core.management.base import BaseCommand, CommandError
 except ImportError:  # pragma: no cover - module skipped outside Django
-    BaseCommand = object  # type: ignore[misc,assignment]
-    CommandError = RuntimeError  # type: ignore[misc,assignment]
+    BaseCommand = object
+    CommandError = RuntimeError
 
 
 class Command(BaseCommand):  # type: ignore[misc]
@@ -264,7 +264,7 @@ class Command(BaseCommand):  # type: ignore[misc]
         self,
         cfg: dict[str, Any],
         path: str,
-        body: dict,
+        body: dict[str, Any],
     ) -> Any:
         import httpx
 

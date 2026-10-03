@@ -27,7 +27,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from z4j_scheduler.importers._core import ImportedSchedule
+from z4j_scheduler.importers._core import ImportedKind, ImportedSchedule
 
 logger = logging.getLogger("z4j.scheduler.importers.apscheduler")
 
@@ -128,6 +128,7 @@ def _job_to_schedule(
     trigger = job.trigger
     trigger_name = type(trigger).__name__
 
+    kind: ImportedKind
     if trigger_name == "CronTrigger":
         kind = "cron"
         expression = _render_cron_trigger(trigger)

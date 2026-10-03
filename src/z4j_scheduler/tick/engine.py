@@ -49,7 +49,7 @@ from z4j_scheduler.tick._entry import (
 from z4j_scheduler.tick.catch_up import plan_catch_up
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
     from z4j_scheduler.storage._models import CursorTransitionResult, FireResult
     from z4j_scheduler.storage.cache import LocalQuarantine, ScheduleCache
@@ -120,7 +120,7 @@ _schedule_definition_changed = schedule_definition_changed
 #: jitter, and small clock skew between scheduler instances. A fire
 #: that's >5s late genuinely indicates the scheduler was down or
 #: behind, and catch-up policy is the right behaviour.
-_ON_TIME_GRACE_SECONDS = 5.0
+_ON_TIME_GRACE_SECONDS = 30.0
 
 #: How many iterations may fail BACK TO BACK before the loop stops absorbing and
 #: lets the exception out. Absorbing forever would trade a loud crash for a
@@ -286,6 +286,7 @@ class TickEngine:
         leader_heartbeat_seconds: float = 2.0,
         on_time_grace_seconds: float = _ON_TIME_GRACE_SECONDS,
         quarantine_reporter: QuarantineSink | None = None,
+        renegotiate: Callable[[], Awaitable[bool]] | None = None,
     ) -> None:
         self._cache = cache
         self._leader_gate = leader_gate
@@ -295,6 +296,29 @@ class TickEngine:
         self._max_consecutive_iteration_errors = max_consecutive_iteration_errors
         self._iteration_error_backoff_seconds = iteration_error_backoff_seconds
         self._quarantine_reporter = quarantine_reporter
+        # Re-runs the Brain protocol negotiation and answers whether both
+        # sides still agree on the exact current contract, cadence runtime
+        # fingerprint included. Asked once after a fire comes back refused as
+        # a cadence mismatch, before that refusal is allowed to mean anything
+        # durable. ``None`` (tests, single-process fixtures) means nobody can
+        # answer, and a mismatch then stays latched until the Watch stream
+        # delivers a new control generation or the process restarts.
+        self._renegotiate = renegotiate
+        # Schedules stopped locally after a cadence mismatch, keyed by id to
+        # the control token the stop was taken under, waiting for a
+        # renegotiation to say the contract still holds.
+        self._cadence_mismatch_latched: dict[UUID, UUID] = {}
+        # Schedules whose mismatch stop was lifted by a successful
+        # renegotiation. The next fire is the retry; a second mismatch on it
+        # was refused under a contract both sides just agreed on, and that is
+        # the durable fault. Cleared by an accepted fire.
+        self._cadence_renegotiated: set[UUID] = set()
+        # Set while no dispatch fan-out is running. Cleared the instant due
+        # entries are claimed for a fan-out and set again once every worker has
+        # finished, so :meth:`drain` can wait for in-flight fires to land
+        # without knowing anything about the workers.
+        self._fan_out_idle = asyncio.Event()
+        self._fan_out_idle.set()
         # The promotion-scoped grace is derived from the DEPLOYMENT's
         # configured leader heartbeat, so a slow-heartbeat cluster (the supported
         # maximum is 60s) does not drop a slot this instance parked as a follower.
@@ -505,9 +529,57 @@ class TickEngine:
     async def stop(self) -> None:
         """Signal the loop to exit on its next iteration.
 
-        Idempotent. Safe to call from any coroutine.
+        Idempotent. Safe to call from any coroutine. Stops the admission of
+        new slots only: a fire already in flight runs to its acknowledgement,
+        and :meth:`drain` is how a caller waits for that.
         """
         self._stop_event.set()
+
+    @property
+    def in_flight_count(self) -> int:
+        """How many schedules currently have a dispatch in progress."""
+        return len(self._in_flight)
+
+    async def drain(self, *, grace_seconds: float) -> bool:
+        """Wait for in-flight dispatches to finish, up to ``grace_seconds``.
+
+        Call after :meth:`stop`. Returns True once no fan-out is running, or
+        False when the grace passed with fires still in flight; the caller
+        decides what to do with the ones it then abandons. Returns at once
+        when nothing is in flight.
+        """
+        if self._fan_out_idle.is_set():
+            return True
+        try:
+            await asyncio.wait_for(self._fan_out_idle.wait(), timeout=max(0.0, grace_seconds))
+        except TimeoutError:
+            return False
+        return True
+
+    def _claim_for_dispatch(self, runnable: list[ScheduleEntry]) -> None:
+        """Mark ``runnable`` in flight and the fan-out as running.
+
+        Both happen synchronously, before any await, so a drain started at any
+        point after this sees the fan-out as in progress.
+        """
+        for entry in runnable:
+            self._in_flight.add(entry.id)
+        if runnable:
+            self._fan_out_idle.clear()
+
+    def _release_undispatched(self, queue: asyncio.Queue[ScheduleEntry]) -> None:
+        """Release entries a fan-out never reached and mark it finished.
+
+        engine:344 + engine:328: any entry still queued was never dispatched
+        (a graceful stop drained early, or the gather was cancelled). Its id
+        was pre-added to _in_flight; release it so a reused engine does not
+        leak it and it is re-evaluated on the next run. Runs single-threaded,
+        so this drain cannot race a worker.
+        """
+        while not queue.empty():
+            with contextlib.suppress(asyncio.QueueEmpty):
+                self._in_flight.discard(queue.get_nowait().id)
+        self._fan_out_idle.set()
 
     # ------------------------------------------------------------------
     # Iteration
@@ -581,8 +653,7 @@ class TickEngine:
             # next (immediate, since something is still due) iteration.
             if len(runnable) > _MAX_DISPATCH_PER_TICK:
                 runnable = runnable[:_MAX_DISPATCH_PER_TICK]
-            for e in runnable:
-                self._in_flight.add(e.id)
+            self._claim_for_dispatch(runnable)
             if runnable:
                 # RM13: bound the number of SPAWNED coroutines, not just the
                 # number that hold a semaphore. The old
@@ -659,15 +730,7 @@ class TickEngine:
                     if errors := [result for result in results if isinstance(result, Exception)]:
                         raise ExceptionGroup("dispatch workers failed", errors)
                 finally:
-                    # engine:344 + engine:328: any entry still queued was never
-                    # dispatched (a graceful stop drained early, or the gather was
-                    # cancelled). Its id was pre-added to _in_flight; release it so
-                    # a reused engine does not leak it and it is re-evaluated on the
-                    # next run. Runs single-threaded, so this drain cannot race a
-                    # worker.
-                    while not queue.empty():
-                        with contextlib.suppress(asyncio.QueueEmpty):
-                            self._in_flight.discard(queue.get_nowait().id)
+                    self._release_undispatched(queue)
 
         # Step 3: sleep until the next schedule OR a cache change OR
         # stop signal.
@@ -695,9 +758,12 @@ class TickEngine:
             or self._follower_parked
             or self._follower_handoff
             or self._slot_entitled
+            or self._cadence_mismatch_latched
+            or self._cadence_renegotiated
         ):
             return
         live_by_id = {entry.id: entry for entry in snapshot}
+        self._prune_cadence_mismatch_state(live_by_id)
         # Drop a parked marker once the entry is GONE, or once its
         # next_fire_at no longer matches the parked slot (the leader advanced it,
         # or a fired one_shot's success echo set next_fire_at=None). Both the
@@ -751,6 +817,20 @@ class TickEngine:
         # expression it logs once more.
         for sid in [s for s in self._compute_quarantined if s not in live_by_id]:
             self._compute_quarantined.pop(sid, None)
+
+    def _prune_cadence_mismatch_state(self, live_by_id: dict[UUID, ScheduleEntry]) -> None:
+        """Drop mismatch bookkeeping for rows that are gone or regenerated.
+
+        A mismatch stop follows the row: once it is gone, or under a new
+        control generation, there is nothing left to release or to hold
+        durable.
+        """
+        for sid, token in list(self._cadence_mismatch_latched.items()):
+            live = live_by_id.get(sid)
+            if live is None or live.control_token != token:
+                self._cadence_mismatch_latched.pop(sid, None)
+        for sid in [s for s in self._cadence_renegotiated if s not in live_by_id]:
+            self._cadence_renegotiated.discard(sid)
 
     async def _compute_pending_next_fires(self) -> None:
         """Compute next_fire_at for any entry that lacks one.
@@ -1346,10 +1426,9 @@ class TickEngine:
                     )
                     return False
                 if fire_result.disposition == "cadence_semantics_mismatch":
-                    await self._record_local_quarantine(
+                    await self._handle_cadence_mismatch(
                         entry,
-                        code="cadence_semantics_mismatch",
-                        detail="Brain and scheduler cadence runtimes differ",
+                        expected_control_token=expected_control_token,
                     )
                     return True
                 if fire_result.disposition in {
@@ -1425,6 +1504,9 @@ class TickEngine:
                     return True
                 if fire_result.live_revision != fire_result.acceptance_revision:
                     return True
+                # An accepted fire proves the cadence contract holds for this
+                # schedule; a later mismatch gets a fresh renegotiation.
+                self._cadence_renegotiated.discard(entry.id)
             last_dispatched = moment
             # This counts successful dispatches, not loop iterations; enumerate
             # would incorrectly include aborted or failed slots.
@@ -1730,6 +1812,123 @@ class TickEngine:
             refused_at_revision if refused_at_revision > 0 else "(a new control generation)",
         )
         return True
+
+    async def _handle_cadence_mismatch(
+        self,
+        entry: ScheduleEntry,
+        *,
+        expected_control_token: UUID | None,
+    ) -> None:
+        """Decide what a cadence mismatch refusal means before it becomes durable.
+
+        The refusal says the Brain computes cadence differently from this
+        process. Mid-flight that is usually not true of the deployment, only
+        of the moment: a brain restarted during a fire's retry window answers
+        from a runtime this scheduler never negotiated with, and the same fire
+        a second later would be accepted. Reporting that moment through
+        QuarantineSchedule disables the schedule on the Brain, where it stays
+        disabled after both sides agree again, and an operator has to find
+        and lift every one by hand.
+
+        So the first mismatch is held locally, with the same stop the refresh
+        dispositions use, and the protocol is renegotiated. Agreement lifts
+        the stop and the slot is retried on the next tick. A mismatch on that
+        retry was refused under a contract both sides just confirmed, and that
+        one is reported as the durable quarantine it is. No agreement keeps the
+        stop: the Watch stream is renegotiating on the same terms and lifts it
+        through :meth:`on_cadence_contract_renegotiated` when the Brain comes
+        back on the negotiated contract.
+        """
+        durable_detail = "Brain and scheduler cadence runtimes differ"
+        if entry.id in self._cadence_renegotiated:
+            self._cadence_renegotiated.discard(entry.id)
+            logger.warning(
+                "z4j.scheduler.tick: schedule_id=%s refused as a cadence mismatch "
+                "again after a renegotiation agreed the contract; reporting a "
+                "durable quarantine",
+                entry.id,
+            )
+            await self._record_local_quarantine(
+                entry,
+                code="cadence_semantics_mismatch",
+                detail=durable_detail,
+            )
+            return
+        if expected_control_token is None:
+            # Not a current-protocol row; there is no generation to stop.
+            await self._record_local_quarantine(
+                entry,
+                code="cadence_semantics_mismatch",
+                detail=durable_detail,
+            )
+            return
+        latched = await self._cache.latch_current_stop(
+            entry.id,
+            expected_control_token=expected_control_token,
+            # Zero: nothing the Brain streams for this row ends the stop
+            # short of a new control generation. The renegotiation does.
+            refused_at_revision=0,
+        )
+        if latched:
+            self._cadence_mismatch_latched[entry.id] = expected_control_token
+        logger.warning(
+            "z4j.scheduler.tick: schedule_id=%s refused as a cadence mismatch "
+            "mid-flight; stopped locally (not reported to the Brain) pending "
+            "cadence contract renegotiation",
+            entry.id,
+        )
+        if await self._request_renegotiation():
+            await self.on_cadence_contract_renegotiated()
+
+    async def _request_renegotiation(self) -> bool:
+        """Ask the wired negotiation whether the current contract still holds."""
+        if self._renegotiate is None:
+            logger.warning(
+                "z4j.scheduler.tick: no renegotiation hook is wired; the cadence "
+                "mismatch stop holds until the Watch stream renegotiates",
+            )
+            return False
+        try:
+            agreed = bool(await self._renegotiate())
+        except Exception:
+            logger.warning(
+                "z4j.scheduler.tick: cadence contract renegotiation failed; the "
+                "mismatch stop holds until the Watch stream renegotiates",
+                exc_info=True,
+            )
+            return False
+        if not agreed:
+            logger.warning(
+                "z4j.scheduler.tick: the Brain no longer agrees the negotiated "
+                "cadence contract; stopped schedules hold until it does or this "
+                "scheduler is upgraded to match",
+            )
+        return agreed
+
+    async def on_cadence_contract_renegotiated(self) -> None:
+        """Lift every mismatch stop: both sides agree on the contract again.
+
+        Called by the engine's own renegotiation and by the Watch stream's
+        reconnect negotiation (wired through the protocol selector), so a
+        Brain that comes back on the negotiated contract resumes the stopped
+        schedules without a scheduler restart. Each resumed schedule retries
+        its slot on the next tick; a second mismatch on that retry is durable.
+        """
+        if not self._cadence_mismatch_latched:
+            return
+        for schedule_id, token in list(self._cadence_mismatch_latched.items()):
+            self._cadence_mismatch_latched.pop(schedule_id, None)
+            self._cadence_renegotiated.add(schedule_id)
+            released = await self._cache.release_current_stop(
+                schedule_id,
+                expected_control_token=token,
+            )
+            logger.info(
+                "z4j.scheduler.tick: cadence contract renegotiated; schedule_id=%s "
+                "%s and retries its slot on the next tick",
+                schedule_id,
+                "resumed" if released else "was already released",
+            )
 
     async def _record_local_quarantine(
         self,

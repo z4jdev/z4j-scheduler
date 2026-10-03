@@ -190,16 +190,13 @@ def _cron_job_to_cron_string(job: Any) -> str:
     hour = _arq_field_to_cron(getattr(job, "hour", None))
     day = _arq_field_to_cron(getattr(job, "day", None))
     month = _arq_field_to_cron(getattr(job, "month", None))
-    weekday = _arq_field_to_cron(getattr(job, "weekday", None))
-    # arq's weekday accepts string aliases (``"mon"``); croniter
-    # accepts them too but we rendered the safe-mode parser to
-    # reject letters. Strip aliases - if the user had ``"mon"`` they
-    # probably want ``1`` in cron (Mon = 1 in cron's Sun-0..Sat-6
-    # ordering).
-    weekday = _arq_weekday_alias(weekday)
+    weekday = _arq_weekday_to_cron(getattr(job, "weekday", None))
     return f"{minute} {hour} {day} {month} {weekday}"
 
 
+#: arq's weekday aliases (its own spellings, matched case-insensitively at
+#: run time) in cron's Sunday-first numbering. The safe-mode cron parser
+#: rejects letters, so an alias is rendered as its number.
 _WEEKDAY_ALIASES: dict[str, str] = {
     "mon": "1",
     "tues": "2",
@@ -212,9 +209,27 @@ _WEEKDAY_ALIASES: dict[str, str] = {
 
 
 def _arq_weekday_alias(value: str) -> str:
-    if value in _WEEKDAY_ALIASES:
-        return _WEEKDAY_ALIASES[value]
-    return value
+    return _WEEKDAY_ALIASES.get(value.strip().lower(), value)
+
+
+def _arq_weekday_to_cron(value: Any) -> str:
+    """Render arq's ``weekday`` field in cron's numbering.
+
+    arq matches ``dt.weekday()``, so its integers count from Monday
+    (``0``) to Sunday (``6``); cron counts from Sunday (``0``) to
+    Saturday (``6``). Each integer shifts up by one, modulo seven, so
+    ``weekday=0`` is Monday on both sides and ``{0, 1, 2, 3, 4}`` stays
+    Monday to Friday. A string alias names the day and maps directly.
+    """
+    if value is None:
+        return "*"
+    if isinstance(value, str):
+        return _arq_weekday_alias(value)
+    if isinstance(value, (set, list, tuple, frozenset)):
+        return ",".join(sorted({_arq_weekday_to_cron(v) for v in value}))
+    if isinstance(value, int):
+        return str((value + 1) % 7)
+    return str(value)
 
 
 def _arq_field_to_cron(value: Any) -> str:

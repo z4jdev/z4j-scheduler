@@ -72,6 +72,47 @@ def _runtime_settings(**overrides: object) -> Settings:
     return Settings(**values, _env_file=None)  # type: ignore[arg-type,call-arg]
 
 
+@pytest.mark.parametrize(
+    ("leader_backend", "bind_host", "environment", "expect_warning"),
+    [
+        ("single", "0.0.0.0", "production", True),
+        ("single", "0.0.0.0", "staging", True),
+        ("single", "127.0.0.1", "production", False),
+        ("single", "localhost", "production", False),
+        ("single", "0.0.0.0", "dev", False),
+        ("postgres", "0.0.0.0", "production", False),
+        ("postgres_per_project", "0.0.0.0", "production", False),
+    ],
+)
+def test_single_leader_misuse_warning_names_the_networked_non_dev_case_only(
+    leader_backend: str,
+    bind_host: str,
+    environment: str,
+    expect_warning: bool,
+) -> None:
+    """``single`` is not an election. The settings cannot see a second
+    replica, but they can see a process set up like one: a non-loopback
+    bind outside dev. That case, and only that case, gets the warning."""
+    settings = Settings(  # type: ignore[call-arg]
+        brain_grpc_url="brain:7701",
+        brain_rest_url="https://brain:7700",
+        environment=environment,
+        leader_backend=leader_backend,
+        bind_host=bind_host,
+        metrics_auth_token="t" * 32,
+        tls_cert="/t/c.pem",
+        tls_key="/t/k.pem",
+        tls_ca="/t/ca.pem",
+        _env_file=None,
+    )
+    warning = settings.single_leader_misuse_warning()
+    assert (warning is not None) is expect_warning
+    if warning is not None:
+        assert "not an election" in warning
+        assert "double-dispatch" in warning
+        assert bind_host in warning
+
+
 def test_settings_requires_brain_grpc_url(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("Z4J_SCHEDULER_BRAIN_GRPC_URL", raising=False)
     monkeypatch.delenv("Z4J_SCHEDULER_BRAIN_REST_URL", raising=False)

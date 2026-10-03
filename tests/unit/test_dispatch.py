@@ -357,6 +357,72 @@ class TestDispatchRetry:
         # No retry on PERMISSION_DENIED - only 1 attempt.
         assert len(client.fire_calls) == 1
 
+    async def test_retry_withheld_while_the_watch_stream_is_down(
+        self,
+        settings: Settings,
+    ) -> None:
+        """The brain restart that produced the transient error also drops
+        the watch stream. Until the stream has reconnected, and with it
+        renegotiated the protocol, the brain a retry would reach is not the
+        one this process negotiated with, so the retry is not made."""
+        client = FakeBrainClient(
+            fire_responses=[
+                _FakeAioRpcError(grpc.StatusCode.UNAVAILABLE),
+                FireResult(
+                    command_id=uuid4(),
+                    error_code=None,
+                    error_message=None,
+                    buffered=False,
+                ),
+            ],
+        )
+        dispatcher = FireDispatcher(
+            client=client,  # type: ignore[arg-type]
+            settings=settings,
+            # Healthy for the first attempt, down once the brain has answered
+            # UNAVAILABLE.
+            watch_healthy=lambda: not client.fire_calls,
+        )
+        with pytest.raises(grpc.aio.AioRpcError):
+            await dispatcher.dispatch(
+                schedule_id=uuid4(),
+                scheduled_for=datetime(2026, 4, 26, 15, 0, tzinfo=UTC),
+            )
+        assert len(client.fire_calls) == 1
+        # The engine retries the same slot after the stream is back; the
+        # acceptance the brain had ready was never consumed here.
+        assert len(client.fire_responses) == 1
+        assert client.ack_calls == []
+
+    async def test_retry_proceeds_while_the_watch_stream_is_healthy(
+        self,
+        settings: Settings,
+    ) -> None:
+        """Positive control for the gate above: the same script with a
+        healthy stream retries and succeeds."""
+        client = FakeBrainClient(
+            fire_responses=[
+                _FakeAioRpcError(grpc.StatusCode.UNAVAILABLE),
+                FireResult(
+                    command_id=uuid4(),
+                    error_code=None,
+                    error_message=None,
+                    buffered=False,
+                ),
+            ],
+        )
+        dispatcher = FireDispatcher(
+            client=client,  # type: ignore[arg-type]
+            settings=settings,
+            watch_healthy=lambda: True,
+        )
+        await dispatcher.dispatch(
+            schedule_id=uuid4(),
+            scheduled_for=datetime(2026, 4, 26, 15, 0, tzinfo=UTC),
+        )
+        assert len(client.fire_calls) == 2
+        assert [ack.status for ack in client.ack_calls] == ["success"]
+
 
 @pytest.mark.asyncio
 class TestAckBestEffort:

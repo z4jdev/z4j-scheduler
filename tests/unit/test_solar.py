@@ -1,6 +1,6 @@
 """Tests for solar schedule support.
 
-docs/SCHEDULER.md §5.1 lists ``solar`` as one of the four v1
+docs/historical/SCHEDULER-DESIGN-DRAFT-2026-04.md §5.1 lists ``solar`` as one of the four v1
 schedule kinds. Pre-1.1 we shipped only cron / interval / one_shot
 and the celery importer rejected solar with a warning. v1.1 adds
 end-to-end support: importer translates ``celery.schedules.solar``,

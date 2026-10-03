@@ -1,5 +1,80 @@
 # Changelog
 
+## 1.12.0 (2026-10-03)
+
+* Report watch-stream health where operators look. The
+  `z4j_scheduler_watch_healthy{project}` gauge follows the watch stream's
+  health transitions; `/ready` answers 503 with `watch_unhealthy` once the
+  stream has been down longer than `on_time_grace_seconds` and 200 again
+  after recovery; `/info` reports `watch_stream_healthy`.
+* Emit the two metrics that were declared and never set:
+  `z4j_scheduler_schedules_loaded` follows the cache after every sync and
+  membership change, and `z4j_scheduler_grpc_calls_total{method,status}`
+  counts every RPC. A dropped project retires its `is_leader` series.
+* Hold a mid-flight cadence mismatch instead of quarantining it. A
+  `FIRE_CADENCE_SEMANTICS_MISMATCH` answered during a retry holds the
+  schedule locally and asks for renegotiation; only a mismatch that survives
+  an agreed renegotiation is the durable quarantine, and the dispatcher
+  withholds transient retries while the watch stream is down so a retry
+  never reaches an unnegotiated brain.
+* Drain fires on shutdown. Shutdown stops admitting slots, awaits in-flight
+  dispatches up to `fire_timeout_seconds`, and only then releases the leader
+  gate and closes the channel, which the module docstring had claimed since
+  1.4.
+* Tombstone pressure that pauses a project's cadence logs a WARNING naming
+  the project and count and requests an immediate snapshot resync instead of
+  waiting for the periodic one.
+* A single leader backend bound off loopback outside `dev` logs once that it
+  is not an election.
+* The default `on_time_grace_seconds` moves from 5 to 30 (the maximum stays
+  300): a brain restart takes seconds, and a slot that comes due inside that
+  window is late, not missed. The two fallbacks that still named five
+  seconds say thirty.
+* The watch stream's reconnect penalty, which never reset so that any later
+  drop cost up to thirty seconds, clears once the stream has been healthy for
+  one reconcile interval; a flap shorter than that keeps the penalty, so a
+  flapping brain still backs off.
+* `import --from` and `export --to` accept huey, arq, taskiq and dramatiq;
+  the modules existed, were tested, and were reachable from nothing. Huey,
+  arq and taskiq imports take `--huey-app`, `--arq-settings` and
+  `--taskiq-broker` to locate the app, settings class or broker; `--from
+  dramatiq`, which has no scheduler store, prints migration guidance and
+  exits 2, and `--to dramatiq` renders guidance only. The optional extras
+  `huey-import`, `arq-import` and `taskiq-import` carry the adapters' engine
+  floors.
+* The watch outage clock no longer restarts on a stream the brain refused or
+  dropped before its first frame. A stream that delivered nothing and lasted
+  less than the reconnect ceiling hands the outage its original start back,
+  so a brain that lists schedules but refuses every Watch trips `/ready`
+  with `watch_unhealthy` after the grace; before, each reconnect's
+  successful full sync reset the clock and readiness never tripped.
+* `z4j_scheduler_schedules_loaded` moves one count per membership-changing
+  event instead of walking the whole cache on each; a ten-thousand-row
+  import streamed as events no longer costs the watch task a minute of CPU.
+* arq counts weekdays from Monday and cron from Sunday. The arq importer now
+  shifts integer weekdays by one on the way in and the exporter shifts them
+  back, so `weekday=0` is Monday on both sides; it imported as Sunday and
+  cron Monday exported as arq Tuesday. The exporter also expands a cron
+  weekday range into an arq set.
+* The taskiq importer carries a label's `cron_offset` as the schedule
+  timezone and the exporter emits the schedule timezone as `cron_offset`.
+  Both dropped it, so a `Europe/Berlin` schedule imported as UTC and
+  exported without a zone.
+* One handler on the root logger renders every record, stdlib or structlog,
+  so under `log_json` the whole `z4j.scheduler` tree is JSON; the leader,
+  watch and tick lines came out as stdlib text beside the JSON.
+* The serving line of a trigger server with an empty CN allow-list is a
+  WARNING naming the open CA, as the docs promised; it restated the open
+  state at INFO.
+* `export` with the brain unreachable prints a one-line refusal naming the
+  brain URL and exits 2 instead of an httpx traceback.
+* Version references removed from the `check`, `status` and `restart` help
+  text.
+* Remove `leader/pg_advisory.py`, a seven-line stub with no importer.
+* Type annotations across the package so that mypy strict gates it beside
+  z4j-core, and an import-linter contract that scheduler source never
+  imports the brain. No behaviour changed.
+
 ## 1.11.0 (2026-09-10)
 
 * Stop starting new catch-up slots when the watch becomes unhealthy, leadership

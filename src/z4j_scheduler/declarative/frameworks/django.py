@@ -68,11 +68,15 @@ In ``apps.py``::
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover
+    from z4j_scheduler.importers._core import ImportSummary
 
 logger = logging.getLogger("z4j.scheduler.declarative.django")
 
 
-def reconcile_from_settings() -> dict[str, int] | None:
+def reconcile_from_settings() -> ImportSummary | None:
     """Read ``settings.Z4J_SCHEDULES`` + reconcile against brain.
 
     Returns the brain summary dict (``inserted`` / ``updated`` /

@@ -41,6 +41,8 @@ import grpc
 from z4j_scheduler.observability import metrics as m
 
 if TYPE_CHECKING:  # pragma: no cover
+    from collections.abc import Callable
+
     from z4j_scheduler.settings import Settings
     from z4j_scheduler.storage._models import CursorTransitionResult, FireResult
     from z4j_scheduler.storage.brain_client import BrainClient
@@ -138,9 +140,20 @@ class FireDispatcher:
         *,
         client: BrainClient,
         settings: Settings,
+        watch_healthy: Callable[[], bool] | None = None,
     ) -> None:
         self._client = client
         self._settings = settings
+        # The same probe the tick engine reads before dispatching. A retry is
+        # a fresh RPC to whichever brain answers next, and while the watch
+        # stream is down that brain may be one this process never negotiated
+        # with (it restarted, possibly upgraded, between the attempts). The
+        # retry loop withholds the retry until the stream is back, which only
+        # happens after the reconnect has renegotiated the protocol. ``None``
+        # means always healthy, for callers without a watch stream.
+        self._watch_healthy: Callable[[], bool] = (
+            watch_healthy if watch_healthy is not None else (lambda: True)
+        )
 
     async def trigger_now(
         self,
@@ -495,12 +508,32 @@ class FireDispatcher:
         prepared_fire: PreparedFire | None = None,
         scheduler_protocol_epoch: int = 0,
     ) -> FireResult:
-        """Single fire with retry on transient gRPC errors."""
+        """Single fire with retry on transient gRPC errors.
+
+        A retry is withheld while the watch stream is unhealthy: the brain a
+        retry would reach is then not known to be the one this process
+        negotiated its cadence contract with, and a fire that lands on a
+        restarted, upgraded brain comes back refused as a cadence mismatch.
+        The transient error is raised instead, and the engine retries the
+        same slot once the stream has reconnected and renegotiated.
+        """
         attempt = 0
         max_attempts = max(1, 1 + self._settings.fire_retry_max)
         backoff = self._settings.fire_retry_backoff_seconds
+        pending: grpc.aio.AioRpcError | None = None
 
         while True:
+            if pending is not None and not self._watch_healthy():
+                logger.warning(
+                    "z4j.scheduler.dispatch: withholding retry after transient "
+                    "gRPC error %s (attempt %d/%d): the watch stream is down, so "
+                    "the brain this retry would reach has not been negotiated "
+                    "with; the slot is retried once the stream reconnects",
+                    pending.code(),
+                    attempt,
+                    max_attempts,
+                )
+                raise pending
             attempt += 1
             try:
                 if schedule_entry is None:
@@ -530,6 +563,11 @@ class FireDispatcher:
                         max_attempts,
                     )
                     raise
+                pending = exc
+                if not self._watch_healthy():
+                    # Checked here as well as at the top of the loop so an
+                    # already-down stream costs no backoff sleep.
+                    continue
                 # Capped exponential + small jitter so a flock of
                 # retrying schedulers don't all retry at the same
                 # instant.

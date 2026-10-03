@@ -8,9 +8,9 @@ dramatiq-native scheduler should:
 1. **APScheduler:** use ``z4j-scheduler export --to apscheduler``
    - the rendered APScheduler config can fire dramatiq actors.
 2. **dramatiq-cron / hand-roll:** the rendered output for these
-   has no standard shape; write a small adapter using the JSONL
-   from ``z4j-scheduler export --to jsonl`` (the operator-
-   readable export).
+   has no standard shape; write a small adapter over the JSON
+   from ``z4j-scheduler schedules list --json`` (the operator-
+   readable listing).
 
 This module exists so the CLI's ``--to dramatiq`` flag returns a
 clear guidance message instead of an ImportError.
@@ -29,9 +29,9 @@ Dramatiq has no native scheduler config to export to. Two options:
      The rendered output is a Python module the operator wires
      into their startup.
 
-  2. Use --to jsonl (the operator-readable export) and write a
-     small adapter that consumes the JSONL into your custom
-     dramatiq-cron / hand-rolled scheduler.
+  2. Use `z4j-scheduler schedules list --json` (the operator-
+     readable listing) and write a small adapter that feeds it
+     into your custom dramatiq-cron / hand-rolled scheduler.
 """
 
 

@@ -128,11 +128,45 @@ def _render_one(sched: ExportedSchedule) -> list[str]:
             f"hour={_arq_field(hour)}, "
             f"day={_arq_field(day)}, "
             f"month={_arq_field(month)}, "
-            f"weekday={_arq_field(dow)}"
+            f"weekday={_arq_weekday_field(dow)}"
             f"))"
         ),
         "",
     ]
+
+
+_WEEKDAY_RANGE = re.compile(r"^(\d)-(\d)$")
+
+
+def _arq_weekday_field(value: str) -> str:
+    """Render the cron weekday field as an arq ``weekday`` argument.
+
+    cron counts from Sunday (``0``, also written ``7``) and arq from
+    Monday (``0``), so every day shifts down by one, modulo seven: cron's
+    ``1`` (Monday) is arq's ``0``, and cron's ``0`` or ``7`` (Sunday) is
+    arq's ``6``. A single day renders as an int, a list as a set, and a
+    range such as ``1-5`` as the set of its days, since arq has no range
+    form. ``*`` is ``None``. Anything else (a step) has no arq equivalent
+    and is passed through as a string, which arq refuses when the module
+    is imported, so the operator sees it.
+    """
+    if value == "*":
+        return "None"
+    match = _WEEKDAY_RANGE.match(value)
+    if match is not None:
+        first, last = int(match.group(1)), int(match.group(2))
+        days = list(range(first, last + 1)) if first <= last else []
+        if not days:
+            return json.dumps(value)
+    else:
+        try:
+            days = [int(v) for v in value.split(",")]
+        except ValueError:
+            return json.dumps(value)
+    shifted = sorted({(day - 1) % 7 for day in days})
+    if len(shifted) == 1 and len(days) == 1:
+        return str(shifted[0])
+    return "{" + ", ".join(str(day) for day in shifted) + "}"
 
 
 def _arq_field(value: str) -> str:

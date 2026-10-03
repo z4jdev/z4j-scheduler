@@ -22,7 +22,7 @@ logger = logging.getLogger("z4j.scheduler.django_app")
 try:
     from django.apps import AppConfig
 except ImportError:  # pragma: no cover - module is no-op outside Django
-    AppConfig = object  # type: ignore[misc,assignment]
+    AppConfig = object
 
 
 class Z4JSchedulerConfig(AppConfig):  # type: ignore[misc]

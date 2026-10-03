@@ -31,8 +31,25 @@ in this scenario which we catch and translate.
 from __future__ import annotations
 
 from collections import deque
-from datetime import UTC, date, datetime, timedelta
-from typing import Final
+from datetime import UTC, date, datetime, timedelta, tzinfo
+from typing import Final, Protocol
+
+
+class _DayEventFunc(Protocol):
+    """Call shape shared by astral's per-event functions (dawn, sunrise, ...).
+
+    ``dawn`` and ``dusk`` take an extra positional ``depression`` before
+    ``tzinfo``, so ``tzinfo`` is keyword-only here to fit every entry.
+    """
+
+    def __call__(
+        self,
+        observer: Observer,
+        date: date | None = ...,
+        *,
+        tzinfo: str | tzinfo = ...,
+    ) -> datetime: ...
+
 
 # Lazy-import astral so a base scheduler install without solar
 # schedules doesn't pay the library load cost. The error message
@@ -53,7 +70,7 @@ try:
     # computable; sun() would then raise and skip the WHOLE day, dropping a
     # valid occurrence until the polar season ends. Per-event calls isolate the
     # failure to the events that genuinely have none.
-    _DAY_EVENT_FUNCS = {
+    _DAY_EVENT_FUNCS: dict[str, _DayEventFunc] = {
         "dawn": _astral_dawn,
         "sunrise": _astral_sunrise,
         "noon": _astral_noon,
@@ -63,11 +80,11 @@ try:
     }
     _ASTRAL_AVAILABLE = True
 except ImportError:  # pragma: no cover - exercised in degraded mode
-    LocationInfo = None  # type: ignore[assignment]
-    Observer = None  # type: ignore[assignment]
+    LocationInfo = None  # type: ignore[misc, assignment]
+    Observer = None  # type: ignore[misc, assignment]
     sun = None  # type: ignore[assignment]
     _astral_midnight = None  # type: ignore[assignment]
-    _DAY_EVENT_FUNCS = {}  # type: ignore[assignment]
+    _DAY_EVENT_FUNCS = {}
     _ASTRAL_AVAILABLE = False
 
 

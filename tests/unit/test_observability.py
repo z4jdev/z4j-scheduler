@@ -8,7 +8,10 @@ definitions and logger config wire correctly. The behavior
 from __future__ import annotations
 
 import io
+import json
+import logging
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -77,12 +80,77 @@ class TestMetricDefinitions:
 
 
 class TestLoggingConfig:
+    @pytest.fixture(autouse=True)
+    def _restore_root_logging(self) -> Iterator[None]:
+        """``configure_logging`` now owns the root handlers; give them back."""
+        root = logging.getLogger()
+        handlers, level = list(root.handlers), root.level
+        try:
+            yield
+        finally:
+            root.handlers = handlers
+            root.setLevel(level)
+            reset_for_tests()
+            structlog.reset_defaults()
+
     def test_configure_idempotent(self, settings: Settings) -> None:
         reset_for_tests()
         configure_logging(settings)
         # Second call should not raise; should return without
         # reconfiguring.
         configure_logging(settings)
+
+    def test_json_mode_renders_the_whole_scheduler_tree_once(
+        self,
+        settings: Settings,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """With ``log_json`` every ``z4j.scheduler`` line is JSON, written once.
+
+        ``basicConfig`` attached a plain stdlib handler, so the container
+        logged ``INFO:z4j.scheduler.leader...: became LEADER`` beside the
+        brain's JSON. The settings fixture leaves ``log_json`` at its
+        default, which is on.
+        """
+        assert settings.log_json is True
+        stream = io.StringIO()
+        monkeypatch.setattr(sys, "stderr", stream)
+        # A stale handler from an earlier configuration must not survive as
+        # a second writer.
+        root = logging.getLogger()
+        root.handlers = [logging.StreamHandler(stream)]
+        reset_for_tests()
+        configure_logging(settings)
+
+        assert len(root.handlers) == 1
+        (handler,) = root.handlers
+        assert isinstance(handler, logging.StreamHandler)
+        assert isinstance(handler.formatter, structlog.stdlib.ProcessorFormatter)
+        leader = logging.getLogger("z4j.scheduler.leader.postgres")
+        assert leader.handlers == [] and leader.propagate
+
+        leader.info("became LEADER (project=%s)", "p1")
+        try:
+            _raise_scheduler_logger_failure()
+        except RuntimeError:
+            logging.getLogger("z4j.scheduler.watch").exception("stream loop error")
+        structlog.get_logger("z4j.scheduler.main").info("starting", instance_id="s-1")
+
+        lines = [line for line in stream.getvalue().splitlines() if line.strip()]
+        assert len(lines) == 3, lines
+        records = [json.loads(line) for line in lines]
+        assert records[0]["event"] == "became LEADER (project=p1)"
+        assert records[0]["level"] == "info"
+        assert records[0]["logger"] == "z4j.scheduler.leader.postgres"
+        assert records[0]["timestamp"].endswith("Z")
+        assert "RuntimeError: scheduler logger failure" in records[1]["exception"]
+        assert records[2] == {
+            **{k: records[2][k] for k in ("timestamp",)},
+            "event": "starting",
+            "instance_id": "s-1",
+            "level": "info",
+            "logger": "z4j.scheduler.main",
+        }
 
     def test_configure_console_mode(
         self,

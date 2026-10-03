@@ -22,12 +22,28 @@ import json
 import logging
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, NotRequired, TypedDict
 
 logger = logging.getLogger("z4j.scheduler.importers")
 
-ImportedKind = Literal["cron", "interval", "clocked", "solar"]
+ImportedKind = Literal["cron", "interval", "clocked", "one_shot", "solar"]
 ImportedCatchUp = Literal["skip", "fire_one_missed", "fire_all_missed"]
+
+
+class ImportSummary(TypedDict):
+    """Per-batch summary returned by brain's ``schedules:import`` endpoint.
+
+    ``deleted`` is reported by the declarative replace-for-source path
+    and ``errors`` (row index -> message) is omitted only when the batch
+    was empty and nothing was sent.
+    """
+
+    inserted: int
+    updated: int
+    unchanged: int
+    failed: int
+    deleted: NotRequired[int]
+    errors: NotRequired[dict[str, str]]
 
 
 @dataclass(slots=True)
@@ -168,7 +184,7 @@ class BrainImportClient:
         *,
         project_slug: str,
         schedules: list[ImportedSchedule],
-    ) -> dict[str, int]:
+    ) -> ImportSummary:
         """Upload schedules to brain. Returns the per-batch summary.
 
         The summary keys (``inserted`` / ``updated`` / ``unchanged``
@@ -214,12 +230,13 @@ class BrainImportClient:
             "updated": int(data.get("updated", 0)),
             "unchanged": int(data.get("unchanged", 0)),
             "failed": int(data.get("failed", 0)),
-            "errors": data.get("errors", {}),  # type: ignore[dict-item]
+            "errors": data.get("errors", {}),
         }
 
 
 __all__ = [
     "BrainImportClient",
+    "ImportSummary",
     "ImportedCatchUp",
     "ImportedKind",
     "ImportedSchedule",

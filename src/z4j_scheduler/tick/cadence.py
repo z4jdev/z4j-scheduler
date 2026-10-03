@@ -26,6 +26,7 @@ def canonical_next_run_at(
 ) -> datetime | None:
     """Return the scheduler's canonical UTC successor."""
 
+    result: datetime | None
     if kind == "cron":
         result = cron.next_fire(
             expression,

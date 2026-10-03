@@ -6,6 +6,9 @@ Configured once at process startup based on
 In production (``log_json=True``), emits one JSON object per log
 entry with ISO timestamp, level, logger name, event message, and
 any bound contextual fields. Pipes cleanly into log aggregators.
+Every record goes through one root handler, whichever API wrote it:
+the scheduler's own loggers are stdlib loggers, and so are grpcio's
+and asyncpg's.
 
 In development (``log_json=False``), emits a colourised
 console-friendly format for grep-by-eye.
@@ -38,8 +41,12 @@ def configure_logging(settings: Settings) -> None:
 
     level_value = getattr(logging, settings.log_level, logging.INFO)
 
+    # Run on every record: the scheduler's own ``z4j.scheduler.*`` loggers
+    # are stdlib loggers, and so are grpcio's and asyncpg's, so these are
+    # the formatter's ``foreign_pre_chain`` as well as structlog's chain.
     shared_processors: list[structlog.types.Processor] = [
         structlog.contextvars.merge_contextvars,
+        structlog.stdlib.add_logger_name,
         structlog.processors.add_log_level,
         structlog.processors.TimeStamper(fmt="iso", utc=True),
         structlog.processors.StackInfoRenderer(),
@@ -61,15 +68,35 @@ def configure_logging(settings: Settings) -> None:
         )
 
     structlog.configure(
-        processors=[*shared_processors, renderer],
+        processors=[
+            *shared_processors,
+            structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
+        ],
         wrapper_class=structlog.make_filtering_bound_logger(level_value),
         context_class=dict,
-        logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
+        logger_factory=structlog.stdlib.LoggerFactory(),
         cache_logger_on_first_use=True,
     )
-    # Mirror to stdlib so libraries that use logging (grpcio, asyncpg)
-    # show up in the same stream.
-    logging.basicConfig(level=level_value, stream=sys.stderr)
+    # One handler on the root logger renders every record, stdlib or
+    # structlog, through the same processors and the same renderer, so with
+    # ``log_json`` the whole ``z4j.scheduler`` tree is JSON like the brain's.
+    # ``basicConfig`` did not do this: it attached a plain ``%(levelname)s:
+    # %(name)s: %(message)s`` handler, and only when the root had none, so
+    # the leader, watch and tick lines came out as stdlib text next to the
+    # JSON. Replacing the root's handlers, rather than adding one, is what
+    # keeps each line from being written twice.
+    formatter = structlog.stdlib.ProcessorFormatter(
+        foreign_pre_chain=shared_processors,
+        processors=[
+            structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+            renderer,
+        ],
+    )
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(formatter)
+    root = logging.getLogger()
+    root.handlers = [handler]
+    root.setLevel(level_value)
 
     _configured = True
 

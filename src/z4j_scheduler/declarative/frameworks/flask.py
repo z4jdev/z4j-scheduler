@@ -45,18 +45,21 @@ in brain by the time the app starts serving) and registers a
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING
 
 from z4j_scheduler.declarative._reconciler import (
     ScheduleSpec,
     reconcile_sync,
 )
 
+if TYPE_CHECKING:  # pragma: no cover
+    from flask import Flask
+
 logger = logging.getLogger("z4j.scheduler.declarative.flask")
 
 
 def register_z4j_schedules(
-    app: Any,  # flask.Flask
+    app: Flask,
     *,
     schedules: list[ScheduleSpec] | dict[str, ScheduleSpec],
     project: str,

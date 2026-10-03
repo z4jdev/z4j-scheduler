@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Iterable
+from typing import Any
 
 from z4j_scheduler.exporters._client import ExportedSchedule
 
@@ -94,7 +95,12 @@ def _render_one(sched: ExportedSchedule) -> list[str]:
         if len(parts) == 6:
             parts = parts[:5]
         cron_str = " ".join(parts)
-        label_entry = {"cron": cron_str}
+        label_entry: dict[str, str | list[Any] | dict[str, Any]] = {"cron": cron_str}
+        # taskiq evaluates the cron expression in UTC unless the label names
+        # a zone in ``cron_offset``; the schedule's timezone goes there so the
+        # exported label fires at the same wall-clock time.
+        if sched.timezone:
+            label_entry["cron_offset"] = sched.timezone
     elif sched.kind in ("clocked", "one_shot"):
         label_entry = {"time": sched.expression}
     else:

@@ -19,10 +19,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 import grpc
 
+from z4j_scheduler.observability import metrics as m
 from z4j_scheduler.proto import scheduler_pb2 as pb
 from z4j_scheduler.proto import scheduler_pb2_grpc as pb_grpc
 from z4j_scheduler.storage._convert import (
@@ -43,7 +45,7 @@ from z4j_scheduler.storage._convert import (
 )
 
 if TYPE_CHECKING:  # pragma: no cover
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Iterator
     from datetime import datetime
     from uuid import UUID
 
@@ -76,6 +78,35 @@ _SNAPSHOT_TIMEOUT_SECONDS = 30.0
 _STATE_TIMEOUT_SECONDS = 5.0
 _QUARANTINE_TIMEOUT_SECONDS = 5.0
 _CURSOR_TIMEOUT_SECONDS = 10.0
+
+
+def _rpc_status(exc: BaseException) -> str:
+    """The ``status`` label for a failed RPC: the gRPC status name when there is one."""
+    if isinstance(exc, grpc.RpcError):
+        code = getattr(exc, "code", None)
+        name = getattr(code(), "name", None) if callable(code) else None
+        return name if isinstance(name, str) else "UNKNOWN"
+    if isinstance(exc, (asyncio.CancelledError, GeneratorExit)):
+        return "CANCELLED"
+    return "ERROR"
+
+
+@contextmanager
+def _counted(method: str) -> Iterator[None]:
+    """Count one call to ``method`` under ``z4j_scheduler_grpc_calls_total``.
+
+    A streaming RPC is one call for the life of its iterator: ``OK`` when
+    the server ends it, the status name when it fails, and ``CANCELLED``
+    when this side stops consuming it.
+    """
+    status = "OK"
+    try:
+        yield
+    except BaseException as exc:
+        status = _rpc_status(exc)
+        raise
+    finally:
+        m.grpc_calls_total.labels(method=method, status=status).inc()
 
 
 def _build_credentials(settings: Settings) -> grpc.ChannelCredentials:
@@ -166,7 +197,7 @@ class BrainClient:
                 credentials,
                 options=options,
             )
-        self._stub = pb_grpc.SchedulerServiceStub(self._channel)
+        self._stub = pb_grpc.SchedulerServiceStub(self._channel)  # type: ignore[no-untyped-call]  # generated grpcio-tools code is untyped
         logger.info(
             "z4j.scheduler.brain_client: connected to %s",
             self._settings.brain_grpc_url,
@@ -218,11 +249,12 @@ class BrainClient:
             project_id=str(project_id) if project_id is not None else "",
             page_size=page_size,
         )
-        async for message in stub.ListSchedules(
-            request,
-            timeout=_LIST_TIMEOUT_SECONDS,
-        ):
-            yield entry_from_pb(message)
+        with _counted("ListSchedules"):
+            async for message in stub.ListSchedules(
+                request,
+                timeout=_LIST_TIMEOUT_SECONDS,
+            ):
+                yield entry_from_pb(message)
 
     async def watch_schedules(
         self,
@@ -241,8 +273,9 @@ class BrainClient:
             project_id=str(project_id) if project_id is not None else "",
             resume_token=resume_token,
         )
-        async for message in stub.WatchSchedules(request):
-            yield event_from_pb(message)
+        with _counted("WatchSchedules"):
+            async for message in stub.WatchSchedules(request):
+                yield event_from_pb(message)
 
     async def fire_schedule(
         self,
@@ -272,10 +305,11 @@ class BrainClient:
             prepared_fire=prepared_fire,
             scheduler_protocol_epoch=scheduler_protocol_epoch,
         )
-        response = await stub.FireSchedule(
-            request,
-            timeout=float(self._settings.fire_timeout_seconds),
-        )
+        with _counted("FireSchedule"):
+            response = await stub.FireSchedule(
+                request,
+                timeout=float(self._settings.fire_timeout_seconds),
+            )
         return parse_fire_response(response)
 
     async def acknowledge_result(
@@ -296,18 +330,20 @@ class BrainClient:
             new_task_id=new_task_id,
             error=error,
         )
-        await stub.AcknowledgeFireResult(
-            request,
-            timeout=_ACK_TIMEOUT_SECONDS,
-        )
+        with _counted("AcknowledgeFireResult"):
+            await stub.AcknowledgeFireResult(
+                request,
+                timeout=_ACK_TIMEOUT_SECONDS,
+            )
 
     async def ping(self) -> PingInfo:
         """Liveness check. Returns brain version + clock."""
         stub = self._require_stub()
-        response = await stub.Ping(
-            pb.PingRequest(),
-            timeout=_PING_TIMEOUT_SECONDS,
-        )
+        with _counted("Ping"):
+            response = await stub.Ping(
+                pb.PingRequest(),
+                timeout=_PING_TIMEOUT_SECONDS,
+            )
         return parse_ping_response(response)
 
     async def negotiate_protocol(
@@ -317,12 +353,13 @@ class BrainClient:
         """Ask the authenticated Brain channel to select an exact tuple."""
 
         stub = self._require_stub()
-        response = await stub.NegotiateSchedulerProtocol(
-            pb.NegotiateSchedulerProtocolRequest(
-                offered=capabilities_to_pb(offered),
-            ),
-            timeout=_NEGOTIATE_TIMEOUT_SECONDS,
-        )
+        with _counted("NegotiateSchedulerProtocol"):
+            response = await stub.NegotiateSchedulerProtocol(
+                pb.NegotiateSchedulerProtocolRequest(
+                    offered=capabilities_to_pb(offered),
+                ),
+                timeout=_NEGOTIATE_TIMEOUT_SECONDS,
+            )
         return capabilities_from_pb(response.selected)
 
     async def list_schedule_snapshot(
@@ -345,11 +382,12 @@ class BrainClient:
             page_size=page_size,
             snapshot_format_version=SNAPSHOT_FORMAT_VERSION,
         )
-        async for frame in stub.ListScheduleSnapshot(
-            request,
-            timeout=_SNAPSHOT_TIMEOUT_SECONDS,
-        ):
-            assembler.accept(frame)
+        with _counted("ListScheduleSnapshot"):
+            async for frame in stub.ListScheduleSnapshot(
+                request,
+                timeout=_SNAPSHOT_TIMEOUT_SECONDS,
+            ):
+                assembler.accept(frame)
         return assembler.finish()
 
     async def watch_schedules_v2(
@@ -368,8 +406,9 @@ class BrainClient:
             after_revision=after_revision,
             watch_format_version=WATCH_FORMAT_VERSION,
         )
-        async for frame in stub.WatchSchedulesV2(request):
-            yield watch_frame_from_pb(frame)
+        with _counted("WatchSchedulesV2"):
+            async for frame in stub.WatchSchedulesV2(request):
+                yield watch_frame_from_pb(frame)
 
     async def get_schedule_state(
         self,
@@ -381,14 +420,15 @@ class BrainClient:
         """Read an explicit row/absence observation meeting a revision floor."""
 
         stub = self._require_stub()
-        response = await stub.GetScheduleState(
-            pb.GetScheduleStateRequest(
-                project_id=str(project_id),
-                schedule_id=str(schedule_id),
-                minimum_observed_revision=minimum_observed_revision,
-            ),
-            timeout=_STATE_TIMEOUT_SECONDS,
-        )
+        with _counted("GetScheduleState"):
+            response = await stub.GetScheduleState(
+                pb.GetScheduleStateRequest(
+                    project_id=str(project_id),
+                    schedule_id=str(schedule_id),
+                    minimum_observed_revision=minimum_observed_revision,
+                ),
+                timeout=_STATE_TIMEOUT_SECONDS,
+            )
         return schedule_state_from_pb(
             response,
             expected_project_id=project_id,
@@ -409,17 +449,18 @@ class BrainClient:
         """Persist a local deterministic quarantine by exact token CAS."""
 
         stub = self._require_stub()
-        response = await stub.QuarantineSchedule(
-            make_quarantine_request(
-                project_id=project_id,
-                schedule_id=schedule_id,
-                observed_control_token=observed_control_token,
-                reason_code=reason_code,
-                detail=detail,
-                scheduler_protocol_epoch=scheduler_protocol_epoch,
-            ),
-            timeout=_QUARANTINE_TIMEOUT_SECONDS,
-        )
+        with _counted("QuarantineSchedule"):
+            response = await stub.QuarantineSchedule(
+                make_quarantine_request(
+                    project_id=project_id,
+                    schedule_id=schedule_id,
+                    observed_control_token=observed_control_token,
+                    reason_code=reason_code,
+                    detail=detail,
+                    scheduler_protocol_epoch=scheduler_protocol_epoch,
+                ),
+                timeout=_QUARANTINE_TIMEOUT_SECONDS,
+            )
         return parse_quarantine_response(response)
 
     async def advance_schedule_cursor(
@@ -441,23 +482,24 @@ class BrainClient:
         """Persist one prepared zero-work cursor transition."""
 
         stub = self._require_stub()
-        response = await stub.AdvanceScheduleCursor(
-            make_advance_cursor_request(
-                project_id=project_id,
-                schedule_id=schedule_id,
-                observed_control_token=observed_control_token,
-                definition_digest=definition_digest,
-                expected_schedule_revision=expected_schedule_revision,
-                expected_last_run_at=expected_last_run_at,
-                expected_next_run_at=expected_next_run_at,
-                skipped_through=skipped_through,
-                prepared_next_run_at=prepared_next_run_at,
-                scheduler_protocol_epoch=scheduler_protocol_epoch,
-                cadence_semantics_version=cadence_semantics_version,
-                cadence_runtime_fingerprint=cadence_runtime_fingerprint,
-            ),
-            timeout=_CURSOR_TIMEOUT_SECONDS,
-        )
+        with _counted("AdvanceScheduleCursor"):
+            response = await stub.AdvanceScheduleCursor(
+                make_advance_cursor_request(
+                    project_id=project_id,
+                    schedule_id=schedule_id,
+                    observed_control_token=observed_control_token,
+                    definition_digest=definition_digest,
+                    expected_schedule_revision=expected_schedule_revision,
+                    expected_last_run_at=expected_last_run_at,
+                    expected_next_run_at=expected_next_run_at,
+                    skipped_through=skipped_through,
+                    prepared_next_run_at=prepared_next_run_at,
+                    scheduler_protocol_epoch=scheduler_protocol_epoch,
+                    cadence_semantics_version=cadence_semantics_version,
+                    cadence_runtime_fingerprint=cadence_runtime_fingerprint,
+                ),
+                timeout=_CURSOR_TIMEOUT_SECONDS,
+            )
         return parse_advance_cursor_response(response)
 
     # ------------------------------------------------------------------

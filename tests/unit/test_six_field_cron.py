@@ -1,6 +1,6 @@
 """Tests for the optional 6-field cron expression with seconds.
 
-docs/SCHEDULER.md §5.1: *"cron - any standard 5-field expression
+docs/historical/SCHEDULER-DESIGN-DRAFT-2026-04.md §5.1: *"cron - any standard 5-field expression
 (with optional 6th seconds field for higher resolution where the
 engine supports it)."*
 

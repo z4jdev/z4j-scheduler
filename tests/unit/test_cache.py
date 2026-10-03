@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
@@ -530,6 +531,185 @@ class TestBoundaryDStableSnapshot:
     async def test_tombstone_cap_must_be_positive(self) -> None:
         with pytest.raises(ValueError, match="must be positive"):
             ScheduleCache(max_post_watermark_tombstones=0)
+
+
+class TestTombstonePressureVisibility:
+    """Reaching the tombstone cap pauses every schedule in the project. That
+    used to happen silently, and recovery waited for the periodic resync. The
+    pause now says so at WARNING, naming the project and the count, and asks
+    for an immediate snapshot resync the moment it is taken."""
+
+    async def test_production_cap_is_ten_thousand(self) -> None:
+        # The behaviour below is exercised at a small cap because each
+        # tombstone costs a scan of the project's absence records; the cap
+        # itself is pinned here so the test and the product agree on it.
+        assert ScheduleCache()._max_post_watermark_tombstones == 10_000
+
+    async def test_reaching_the_cap_logs_and_requests_an_immediate_resync(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        requests: list[tuple[UUID, int]] = []
+        cache = ScheduleCache(
+            max_post_watermark_tombstones=3,
+            on_snapshot_required=lambda project_id, count: requests.append((project_id, count)),
+        )
+        project_id = uuid4()
+
+        def _pressure_records() -> list[logging.LogRecord]:
+            return [r for r in caplog.records if "tombstone pressure" in r.getMessage()]
+
+        with caplog.at_level(logging.WARNING, logger="z4j.scheduler.cache"):
+            for revision in (1, 2):
+                await cache.apply_tombstone(
+                    schedule_id=uuid4(),
+                    project_id=project_id,
+                    revision=revision,
+                )
+            assert requests == []
+            assert _pressure_records() == []
+
+            # The delete that reaches the cap is the one that reports it, in the
+            # same call: no tick, no timer in between.
+            await cache.apply_tombstone(schedule_id=uuid4(), project_id=project_id, revision=3)
+
+            assert await cache.requires_stable_snapshot(project_id)
+            assert requests == [(project_id, 3)]
+            [record] = _pressure_records()
+            assert record.levelno == logging.WARNING
+            assert str(project_id) in record.getMessage()
+            assert "3 deletes" in record.getMessage()
+            assert "cap 3" in record.getMessage()
+
+            # Already paused: further deletes neither re-log nor re-request.
+            await cache.apply_tombstone(schedule_id=uuid4(), project_id=project_id, revision=4)
+            assert len(requests) == 1
+            assert len(_pressure_records()) == 1
+
+            # The covering snapshot the request asked for lifts the pause.
+            await cache.apply_completed_snapshot(
+                _snapshot(project_id=project_id, watermark=4, rows=()),
+            )
+            assert not await cache.requires_stable_snapshot(project_id)
+
+            # Fresh pressure after that is a new incident and asks again.
+            for revision in (5, 6, 7):
+                await cache.apply_tombstone(
+                    schedule_id=uuid4(),
+                    project_id=project_id,
+                    revision=revision,
+                )
+            assert requests == [(project_id, 3), (project_id, 3)]
+            assert len(_pressure_records()) == 2
+
+    async def test_a_noncovering_global_snapshot_reports_a_project_it_leaves_paused(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The other path that can take the pause: a global snapshot whose
+        watermark does not cover a project's deletes."""
+        requests: list[tuple[UUID, int]] = []
+        cache = ScheduleCache(
+            max_post_watermark_tombstones=1,
+            on_snapshot_required=lambda project_id, count: requests.append((project_id, count)),
+        )
+        project_id = uuid4()
+        with caplog.at_level(logging.WARNING, logger="z4j.scheduler.cache"):
+            await cache.apply_tombstone(schedule_id=uuid4(), project_id=project_id, revision=20)
+            assert requests == [(project_id, 1)]
+            # A global snapshot behind that delete leaves the project paused and
+            # does not re-report a pause it did not take.
+            await cache.apply_completed_snapshot(
+                _snapshot(project_id=None, watermark=10, rows=()),
+            )
+            assert await cache.requires_stable_snapshot(project_id)
+            assert len(requests) == 1
+
+    async def test_a_failing_resync_request_does_not_break_the_tombstone(self) -> None:
+        def _broken(project_id: UUID, count: int) -> None:
+            raise RuntimeError("no watch stream")
+
+        cache = ScheduleCache(max_post_watermark_tombstones=1, on_snapshot_required=_broken)
+        project_id = uuid4()
+        assert await cache.apply_tombstone(
+            schedule_id=uuid4(),
+            project_id=project_id,
+            revision=1,
+        )
+        # The pause holds and the periodic resync remains the backstop.
+        assert await cache.requires_stable_snapshot(project_id)
+
+
+class TestReleaseCurrentStop:
+    """A stop taken for a mid-flight cadence mismatch ends by local decision
+    (a successful renegotiation), not by a superseding Brain update, so the
+    cache has to hand the row back with the Brain's own enabled value."""
+
+    async def test_release_restores_the_brains_enabled_value(self) -> None:
+        cache = ScheduleCache()
+        token = uuid4()
+        now = datetime(2026, 4, 26, tzinfo=UTC)
+        entry = _entry(next_fire_at=now, control_token=token, schedule_revision=8)
+        await cache.upsert(entry)
+
+        assert await cache.latch_current_stop(
+            entry.id,
+            expected_control_token=token,
+            refused_at_revision=0,
+        )
+        stopped = await cache.get(entry.id)
+        assert stopped is not None and stopped.is_enabled is False
+
+        assert await cache.release_current_stop(entry.id, expected_control_token=token)
+        released = await cache.get(entry.id)
+        assert released is not None and released.is_enabled is True
+        # Released once; a second release has nothing to end.
+        assert not await cache.release_current_stop(entry.id, expected_control_token=token)
+
+    async def test_release_keeps_a_pause_the_operator_took_meanwhile(self) -> None:
+        cache = ScheduleCache()
+        token = uuid4()
+        now = datetime(2026, 4, 26, tzinfo=UTC)
+        entry = _entry(next_fire_at=now, control_token=token, schedule_revision=8)
+        await cache.upsert(entry)
+        assert await cache.latch_current_stop(
+            entry.id,
+            expected_control_token=token,
+            refused_at_revision=0,
+        )
+        # While stopped, the Brain streams the row paused by an operator. The
+        # stop clamps the echo, as it must, but remembers what the Brain said.
+        paused = _entry(
+            schedule_id=entry.id,
+            project_id=entry.project_id,
+            next_fire_at=now,
+            is_enabled=False,
+            control_token=token,
+            schedule_revision=9,
+        )
+        await cache.apply_watch_update(paused)
+
+        assert await cache.release_current_stop(entry.id, expected_control_token=token)
+
+        released = await cache.get(entry.id)
+        assert released is not None
+        assert released.is_enabled is False, "a release is not a blanket re-enable"
+
+    async def test_release_refuses_another_control_generation(self) -> None:
+        cache = ScheduleCache()
+        token = uuid4()
+        now = datetime(2026, 4, 26, tzinfo=UTC)
+        entry = _entry(next_fire_at=now, control_token=token, schedule_revision=8)
+        await cache.upsert(entry)
+        assert await cache.latch_current_stop(
+            entry.id,
+            expected_control_token=token,
+            refused_at_revision=0,
+        )
+
+        assert not await cache.release_current_stop(entry.id, expected_control_token=uuid4())
+        still_stopped = await cache.get(entry.id)
+        assert still_stopped is not None and still_stopped.is_enabled is False
 
 
 class TestBoundaryDCursorTransition:

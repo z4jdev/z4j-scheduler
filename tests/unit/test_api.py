@@ -7,6 +7,7 @@ per test and asserts on the four endpoints' responses.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from contextlib import closing
 from pathlib import Path
 
@@ -14,8 +15,10 @@ import pytest
 from fastapi.testclient import TestClient
 from z4j_scheduler.api._state import SchedulerState
 from z4j_scheduler.api.app import create_app
+from z4j_scheduler.observability import metrics as m
 from z4j_scheduler.settings import Settings
 from z4j_scheduler.storage.cache import ScheduleCache
+from z4j_scheduler.storage.watch import WatchStream
 
 
 @pytest.fixture
@@ -42,14 +45,37 @@ def settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Settings:
     return Settings(_env_file=None)  # type: ignore[call-arg]
 
 
-def _make_client(settings: Settings, *, ready: bool = True) -> TestClient:
+def _make_state(settings: Settings, *, ready: bool = True) -> SchedulerState:
     state = SchedulerState(settings=settings)
     if ready:
         state.brain_client_connected = True
         state.cache_initial_sync_complete = True
         state.leader_gate_initialised = True
     state.cache = ScheduleCache()
-    return TestClient(create_app(state))
+    return state
+
+
+def _make_client(settings: Settings, *, ready: bool = True) -> TestClient:
+    return TestClient(create_app(_make_state(settings, ready=ready)))
+
+
+def _attach_watch(state: SchedulerState, clock: Callable[[], float]) -> WatchStream:
+    """Give the state a real watch stream whose outage clock the test controls."""
+    watch = WatchStream(
+        client=object(),  # type: ignore[arg-type]
+        cache=ScheduleCache(),
+        full_resync_interval_seconds=0,
+        clock=clock,
+    )
+    state.watch = watch
+    return watch
+
+
+def _watch_gauge(watch: WatchStream) -> float | None:
+    return m.default_registry.get_sample_value(
+        "z4j_scheduler_watch_healthy",
+        {"project": watch.project_label},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +135,95 @@ class TestReady:
                 "cache_initial_sync",
                 "leader_gate",
             }
+
+
+class TestReadyWatchHealth:
+    """A watch outage that outlasts the on-time grace must take /ready down.
+
+    Before this gate, readiness flipped to ready once and never back, so a
+    scheduler whose stream had failed for good kept reporting ready while
+    dispatching nothing. The watch stream keeps the outage clock; the state
+    compares it against ``on_time_grace_seconds``.
+    """
+
+    def test_sustained_outage_returns_503_then_recovers(self, settings: Settings) -> None:
+        now = [1_000.0]
+        state = _make_state(settings)
+        watch = _attach_watch(state, lambda: now[0])
+        grace = settings.on_time_grace_seconds
+        with closing(TestClient(create_app(state))) as client:
+            watch._mark_healthy()
+            assert client.get("/ready").status_code == 200
+            assert _watch_gauge(watch) == 1.0
+            assert client.get("/info").json()["subsystems"]["watch_stream_healthy"] is True
+
+            watch._mark_unhealthy()
+            now[0] += grace + 1.0
+            response = client.get("/ready")
+            assert response.status_code == 503
+            body = response.json()
+            assert body["status"] == "not_ready"
+            assert body["missing"] == ["watch_unhealthy"]
+            assert body["watch_unhealthy_seconds"] == pytest.approx(grace + 1.0)
+            assert _watch_gauge(watch) == 0.0
+            info = client.get("/info").json()
+            assert info["ready"] is False
+            assert info["subsystems"]["watch_stream_healthy"] is False
+
+            watch._mark_healthy()
+            response = client.get("/ready")
+            assert response.status_code == 200
+            assert response.json() == {"status": "ready"}
+            assert _watch_gauge(watch) == 1.0
+            info = client.get("/info").json()
+            assert info["ready"] is True
+            assert info["subsystems"]["watch_stream_healthy"] is True
+
+    def test_blip_under_the_grace_keeps_ready(self, settings: Settings) -> None:
+        now = [1_000.0]
+        state = _make_state(settings)
+        watch = _attach_watch(state, lambda: now[0])
+        with closing(TestClient(create_app(state))) as client:
+            watch._mark_healthy()
+            watch._mark_unhealthy()
+            now[0] += settings.on_time_grace_seconds / 2
+            response = client.get("/ready")
+            assert response.status_code == 200
+            assert response.json() == {"status": "ready"}
+            # The blip is still visible where operators look for it.
+            assert _watch_gauge(watch) == 0.0
+            assert client.get("/info").json()["subsystems"]["watch_stream_healthy"] is False
+
+    def test_repeated_failures_are_one_outage(self, settings: Settings) -> None:
+        """Each failed reconnect must not restart the grace."""
+        now = [1_000.0]
+        state = _make_state(settings)
+        watch = _attach_watch(state, lambda: now[0])
+        grace = settings.on_time_grace_seconds
+        with closing(TestClient(create_app(state))) as client:
+            watch._mark_healthy()
+            watch._mark_unhealthy()
+            now[0] += grace * 0.75
+            watch._mark_unhealthy()
+            now[0] += grace * 0.75
+            response = client.get("/ready")
+            assert response.status_code == 503
+            assert response.json()["watch_unhealthy_seconds"] == pytest.approx(grace * 1.5)
+
+    def test_watch_that_has_not_failed_yet_does_not_gate(self, settings: Settings) -> None:
+        """Before the first failure the initial sync flag already covers startup."""
+        now = [1_000.0]
+        state = _make_state(settings)
+        _attach_watch(state, lambda: now[0])
+        now[0] += settings.on_time_grace_seconds * 10
+        with closing(TestClient(create_app(state))) as client:
+            assert client.get("/ready").status_code == 200
+            assert client.get("/info").json()["subsystems"]["watch_stream_healthy"] is False
+
+    def test_no_watch_attached_does_not_gate(self, settings: Settings) -> None:
+        with closing(_make_client(settings)) as client:
+            assert client.get("/ready").status_code == 200
+            assert client.get("/info").json()["subsystems"]["watch_stream_healthy"] is False
 
 
 # ---------------------------------------------------------------------------

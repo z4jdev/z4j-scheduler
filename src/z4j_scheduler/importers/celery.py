@@ -46,7 +46,7 @@ import logging
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
-from z4j_scheduler.importers._core import ImportedSchedule
+from z4j_scheduler.importers._core import ImportedKind, ImportedSchedule
 
 if TYPE_CHECKING:  # pragma: no cover
     pass
@@ -251,6 +251,7 @@ def _periodic_task_to_schedule(
     """Convert one django-celery-beat ``PeriodicTask`` row."""
     import json as _json
 
+    kind: ImportedKind
     if task.crontab is not None:
         c = task.crontab
         expression = " ".join(
@@ -286,7 +287,7 @@ def _periodic_task_to_schedule(
         # SolarSchedule -> z4j solar kind. Encoded as
         # ``"<event>:<lat>:<lon>"``. The event vocabulary is shared
         # with celery (sunrise / sunset / dawn / dusk / noon /
-        # solar_noon / midnight / solar_midnight). docs/SCHEDULER.md
+        # solar_noon / midnight / solar_midnight). docs/historical/SCHEDULER-DESIGN-DRAFT-2026-04.md
         # §5.1 lists solar in the v1 surface.
         sol = task.solar
         kind = "solar"
@@ -320,7 +321,7 @@ def _periodic_task_to_schedule(
 def _classify_schedule(
     raw: Any,
     default_timezone: str,
-) -> tuple[str, str, str]:
+) -> tuple[ImportedKind, str, str]:
     """Identify a celery schedule object and return (kind, expr, tz).
 
     Imports ``celery.schedules`` lazily so this module remains
@@ -347,9 +348,9 @@ def _classify_schedule(
             solar as celery_solar,
         )
     except ImportError:
-        crontab = None  # type: ignore[assignment]
-        celery_schedule = None  # type: ignore[assignment]
-        celery_solar = None  # type: ignore[assignment]
+        crontab = None
+        celery_schedule = None
+        celery_solar = None
 
     if celery_solar is not None and isinstance(raw, celery_solar):
         # SolarSchedule - encode as ``"event:lat:lon"``. UTC because

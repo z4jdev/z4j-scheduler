@@ -1,6 +1,6 @@
 """Head-to-head benchmark: z4j-scheduler vs celery-beat.
 
-Phase 0 deliverable per ``docs/SCHEDULER.md §25`` and §29 GA
+Phase 0 deliverable per ``docs/historical/SCHEDULER-DESIGN-DRAFT-2026-04.md §25`` and §29 GA
 criterion: *"Benchmarks published comparing tick accuracy + fire
 latency vs celery-beat."* The harness measures the metrics where
 the two schedulers spend their time on identical workloads:

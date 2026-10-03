@@ -31,8 +31,8 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from datetime import UTC, datetime, timedelta, tzinfo
+from typing import TYPE_CHECKING, Any
 
 from croniter import croniter
 
@@ -90,8 +90,8 @@ class PredictedFire:
     schedule_name: str
     fire_time: datetime
     task_name: str
-    args: tuple = ()
-    kwargs: tuple = ()  # tuple of (key, value) pairs - hashable
+    args: tuple[Any, ...] = ()
+    kwargs: tuple[tuple[str, Any], ...] = ()  # (key, value) pairs - hashable
     queue: str | None = None
 
     @property
@@ -99,7 +99,7 @@ class PredictedFire:
         return (self.schedule_name, self.fire_time)
 
 
-def _kwargs_tuple(kwargs: dict) -> tuple:
+def _kwargs_tuple(kwargs: dict[str, Any]) -> tuple[tuple[str, Any], ...]:
     """Hashable, sort-stable representation of a kwargs dict."""
     return tuple(sorted(kwargs.items()))
 
@@ -276,7 +276,7 @@ def _predict_one_shot(
     return []
 
 
-def _resolve_tz(name: str):
+def _resolve_tz(name: str) -> tzinfo:
     """Resolve a timezone name to a tzinfo. Falls through to UTC.
 
     Resolution goes through :func:`packaged_zoneinfo`, the same
@@ -402,8 +402,8 @@ def compare_predicted_fires(
     ``args_diverge`` divergence so the operator sees the timing was
     correct but the importer dropped data.
     """
-    source_by_key: dict[tuple, PredictedFire] = {f.key: f for f in source}
-    target_by_key: dict[tuple, PredictedFire] = {f.key: f for f in target}
+    source_by_key: dict[tuple[str, datetime], PredictedFire] = {f.key: f for f in source}
+    target_by_key: dict[tuple[str, datetime], PredictedFire] = {f.key: f for f in target}
 
     divergences: list[FireDivergence] = []
     matched = 0

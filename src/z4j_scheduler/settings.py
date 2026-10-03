@@ -18,6 +18,11 @@ from typing import Literal
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+#: Bind hosts that reach this process from the same machine only. A loopback
+#: bind is the one topology signal the settings can read: nothing else on the
+#: network is being served, so nothing else is expected to be a replica.
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
+
 
 def _default_instance_id() -> str:
     """Hostname-based default instance id.
@@ -195,10 +200,15 @@ class Settings(BaseSettings):
     #: and the brain. A slot later than this is classified missed and the
     #: schedule's catch_up policy decides its fate, so raising it makes a busy
     #: or slow deployment less likely to treat its own latency as an outage.
-    #: The promotion-scoped grace applied to a slot inherited at failover is
-    #: derived from this value plus the failover timings, so it moves with it.
+    #: The default is 30 seconds because a brain restart takes seconds, not
+    #: minutes: a slot that comes due while the watch stream reconnects is
+    #: late, not missed, and it fires rather than being handed to catch-up.
+    #: The readiness gate waits out the same window before /ready reports a
+    #: watch outage. The promotion-scoped grace applied to a slot inherited at
+    #: failover is derived from this value plus the failover timings, so it
+    #: moves with it.
     on_time_grace_seconds: float = Field(
-        default=5.0,
+        default=30.0,
         ge=0.0,
         le=300.0,
     )
@@ -332,6 +342,46 @@ class Settings(BaseSettings):
         # carrying it forward silently was the mistake.
         return self.environment == "dev"
 
+    @property
+    def binds_loopback(self) -> bool:
+        """Whether the HTTP surface is reachable from this machine only."""
+        return self.bind_host.strip().lower() in _LOOPBACK_HOSTS
+
+    def single_leader_misuse_warning(self) -> str | None:
+        """The WARNING to log once at startup when ``single`` stands where an
+        election is expected, or ``None`` when the configuration is coherent.
+
+        ``single`` is not an election. It answers "am I the leader" with yes,
+        unconditionally, so a second replica started against the same brain
+        dispatches every slot too. The brain fences the duplicates (the fire
+        id is deterministic and the revision CAS admits one acceptance per
+        slot), so no task runs twice, but every FireSchedule round trip is made
+        twice and each replica applies the catch-up policy to its own clock,
+        so under skew the two can disagree about whether a slot was missed.
+
+        The configuration cannot see a second replica. What it can see is
+        whether this one is set up like one: a non-loopback bind outside
+        ``dev`` is a networked deployment, which is where replicas live. A
+        loopback bind is a single-host signal and ``dev`` is where this is
+        done on purpose, so neither is told. Read by the application at
+        startup rather than raised here: it is a warning, not a refusal, and
+        the settings object is also built by commands that never schedule.
+        """
+        if self.leader_backend != "single" or self.is_dev or self.binds_loopback:
+            return None
+        return (
+            "z4j-scheduler: leader_backend='single' with "
+            f"bind_host='{self.bind_host}' (non-loopback) outside environment='dev'. "
+            "'single' is not an election: every replica started with it "
+            "considers itself the leader, so a second replica double-dispatches "
+            "every slot. The brain fences the duplicates (no task runs twice), "
+            "but the FireSchedule load doubles and the replicas' catch-up "
+            "decisions can diverge under clock skew. Run exactly one replica, "
+            "or set Z4J_SCHEDULER_LEADER_BACKEND=postgres (or "
+            "postgres_per_project) with Z4J_SCHEDULER_LEADER_PG_DSN for a real "
+            "election."
+        )
+
     @model_validator(mode="after")
     def _enforce_metrics_auth_in_production(self) -> Settings:
         """Refuse to start a production scheduler that exposes
@@ -384,8 +434,7 @@ class Settings(BaseSettings):
             # Metrics endpoint won't be mounted (see ``api/app.py``);
             # auth token is irrelevant.
             return self
-        loopback_hosts = {"127.0.0.1", "localhost", "::1", "[::1]"}
-        if self.bind_host.strip().lower() in loopback_hosts:
+        if self.binds_loopback:
             # Loopback exposure: operator's choice; reverse-proxy
             # in front owns the auth layer.
             return self

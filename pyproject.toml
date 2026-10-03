@@ -1,6 +1,6 @@
 [project]
 name = "z4j-scheduler"
-version = "1.11.0"
+version = "1.12.0"
 description = "Engine-agnostic dynamic scheduler for the z4j stack (Apache 2.0)"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -47,7 +47,7 @@ dependencies = [
     # api_key_id) don't fail/downgrade. z4j-scheduler doesn't
     # depend on any 1.2-specific API surface, so the broader
     # range is safe.
-    "z4j-core>=1.11.0,<2",
+    "z4j-core>=1.12.0,<2",
     # Async HTTP server for /health, /ready, /metrics, /info.
     # Same FastAPI as z4j-brain so contributors carry over patterns.
     "fastapi>=0.135",
@@ -96,7 +96,7 @@ dependencies = [
     "six==1.17.0",
     # Astronomical event computation for solar schedules
     # (sunrise / sunset / dawn / dusk / noon / midnight at a given
-    # lat/lon). docs/SCHEDULER.md §5.1 lists solar in the v1 kind
+    # lat/lon). docs/historical/SCHEDULER-DESIGN-DRAFT-2026-04.md §5.1 lists solar in the v1 kind
     # surface. Pure Python, ~50KB, no native deps.
     "astral==3.2",
     # Pinned IANA tzdata so deployments are deterministic across
@@ -122,13 +122,21 @@ dependencies = [
 celery-import = ["celery>=5.6", "django-celery-beat>=2.7"]
 rq-import = ["rq>=2.0", "rq-scheduler>=0.14"]
 apscheduler-import = ["apscheduler[sqlalchemy]>=3.10,<4"]
+# Floors match the engine ranges the z4j-huey, z4j-arq and z4j-taskiq
+# adapters declare, so an importer never resolves an engine release the
+# adapter for that engine refuses. There is no dramatiq-import extra:
+# ``--from dramatiq`` prints migration guidance and imports nothing,
+# because Dramatiq has no native scheduler to read.
+huey-import = ["huey>=2.4,<3"]
+arq-import = ["arq>=0.26,<1"]
+taskiq-import = ["taskiq>=0.11,<1"]
 
 [project.scripts]
 z4j-scheduler = "z4j_scheduler.cli:main"
 
 [project.urls]
 Changelog = "https://github.com/z4jdev/z4j-scheduler/blob/main/CHANGELOG.md"
-Documentation = "https://z4j.dev/scheduler"
+Documentation = "https://docs.z4j.com/scheduler"
 Homepage = "https://z4j.com"
 Issues = "https://github.com/z4jdev/z4j-scheduler/issues"
 Source = "https://github.com/z4jdev/z4j-scheduler"

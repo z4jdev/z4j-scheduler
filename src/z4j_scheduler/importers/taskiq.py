@@ -136,7 +136,7 @@ def _resolve_taskiq_broker(broker_path: str) -> Any:
 def _label_entry_to_schedule(
     *,
     task_name: str,
-    entry: dict[str, Any],
+    entry: object,
     idx: int,
     project_slug: str,
     engine: str,
@@ -164,7 +164,11 @@ def _label_entry_to_schedule(
             kind="cron",
             expression=cron_str,
             task_name=task_name,
-            timezone=default_timezone,
+            timezone=_cron_offset_timezone(
+                entry.get("cron_offset"),
+                task_name=task_name,
+                default_timezone=default_timezone,
+            ),
             queue=default_queue,
             args=list(label_args),
             kwargs=dict(label_kwargs),
@@ -200,6 +204,34 @@ def _label_entry_to_schedule(
         sorted(entry.keys()),
     )
     return None
+
+
+def _cron_offset_timezone(
+    value: object,
+    *,
+    task_name: str,
+    default_timezone: str,
+) -> str:
+    """The schedule timezone a label's ``cron_offset`` names.
+
+    taskiq evaluates a cron label in the zone ``cron_offset`` names (a
+    ``zoneinfo`` key such as ``Europe/Berlin``) and in UTC without one, so
+    the name is the schedule's timezone and is carried as such. taskiq also
+    accepts a ``timedelta`` there; that has no zone name, so it is logged
+    and the importer's default applies.
+    """
+    if value is None or value == "":
+        return default_timezone
+    if isinstance(value, str):
+        return value.strip() or default_timezone
+    logger.warning(
+        "z4j.scheduler.importers.taskiq: %r has cron_offset=%r, which names "
+        "no timezone; importing with timezone=%r",
+        task_name,
+        value,
+        default_timezone,
+    )
+    return default_timezone
 
 
 __all__ = ["read_taskiq_broker"]

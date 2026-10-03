@@ -19,6 +19,14 @@ from z4j_scheduler.leader.postgres import (
     PerProjectLeaderGate,
     _project_key,
 )
+from z4j_scheduler.observability import metrics as m
+
+
+def _leader_sample(project_id: uuid.UUID) -> float | None:
+    return m.default_registry.get_sample_value(
+        "z4j_scheduler_is_leader",
+        {"project": str(project_id)},
+    )
 
 
 class FakeBackend:
@@ -116,6 +124,34 @@ class TestStaticProjectSet:
             assert gate.is_leader(dropped) is False
             # Backend saw a release for that key.
             assert backend.release_calls >= 1
+        finally:
+            await gate.stop()
+
+    @pytest.mark.asyncio
+    async def test_dropping_a_project_retires_its_is_leader_series(self) -> None:
+        """The gauge is sampled from ``is_leader`` checks, which stop once a
+        project leaves scope, so the gate retires the series itself."""
+        projects = [uuid.uuid4() for _ in range(2)]
+        gate = PerProjectLeaderGate(
+            backend=FakeBackend(),
+            project_source=lambda: list(projects),
+            heartbeat_seconds=0.05,
+        )
+        await gate.start()
+        try:
+            await gate.wait_for_first_cycle(timeout=2.0)
+            # What the engine's gauge-publishing wrapper does on each check.
+            for pid in projects:
+                m.is_leader.labels(project=str(pid)).set(1.0)
+
+            dropped = projects.pop(0)
+            for _ in range(20):
+                await asyncio.sleep(0.06)
+                if dropped not in gate.held_projects():
+                    break
+            assert dropped not in gate.held_projects()
+            assert _leader_sample(dropped) is None
+            assert _leader_sample(projects[0]) == 1.0
         finally:
             await gate.stop()
 

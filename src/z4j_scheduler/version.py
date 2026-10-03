@@ -16,6 +16,6 @@ from importlib.metadata import version as _pkg_version
 try:
     __version__: str = _pkg_version("z4j-scheduler")
 except PackageNotFoundError:  # source checkout, no installed metadata
-    from z4j_core.version import __version__  # type: ignore[no-redef]
+    from z4j_core.version import __version__
 
 __all__ = ["__version__"]

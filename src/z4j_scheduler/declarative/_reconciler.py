@@ -21,7 +21,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from z4j_scheduler.importers._core import BrainImportClient, ImportedSchedule
+from z4j_scheduler.importers._core import BrainImportClient, ImportedSchedule, ImportSummary
 
 logger = logging.getLogger("z4j.scheduler.declarative")
 
@@ -81,7 +81,7 @@ async def reconcile(
     brain_url: str,
     api_token: str | None = None,
     timeout_seconds: float = 30.0,
-) -> dict[str, int]:
+) -> ImportSummary:
     """Push the declarative schedule set to brain. Returns the summary.
 
     Args:
@@ -164,7 +164,7 @@ def reconcile_sync(
     brain_url: str,
     api_token: str | None = None,
     timeout_seconds: float = 30.0,
-) -> dict[str, int]:
+) -> ImportSummary:
     """Blocking wrapper around :func:`reconcile` for sync hooks.
 
     Use from Django ``AppConfig.ready()`` or Flask
@@ -235,7 +235,7 @@ async def _upload_with_mode(
     schedules: list[ImportedSchedule],
     mode: str,
     source_filter: str,
-) -> dict[str, int]:
+) -> ImportSummary:
     """Same as ``BrainImportClient.upload`` but with the mode + filter.
 
     The base ``upload`` method always uses ``mode="upsert"``.
@@ -271,7 +271,7 @@ async def _upload_with_mode(
         "unchanged": int(data.get("unchanged", 0)),
         "failed": int(data.get("failed", 0)),
         "deleted": int(data.get("deleted", 0)),
-        "errors": data.get("errors", {}),  # type: ignore[dict-item]
+        "errors": data.get("errors", {}),
     }
 
 

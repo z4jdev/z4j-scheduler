@@ -4,7 +4,9 @@ scheduler definitions and push them into brain's schedules table.
 Each importer:
 
 1. Reads source format (celery-beat config, rq-scheduler Redis
-   sorted set, APScheduler jobstore, system crontab)
+   sorted set, APScheduler jobstore, system crontab, Huey periodic
+   task registry, arq ``WorkerSettings.cron_jobs``, taskiq
+   ``schedule`` labels)
 2. Maps to the brain's Schedule vocabulary (cron / interval / clocked / solar)
 3. Writes to brain via the existing schedule REST API
 4. Tags rows with ``source=imported_<tool>`` for audit visibility
@@ -24,4 +26,9 @@ Submodules:
 - :mod:`~z4j_scheduler.importers.rq` - rq-scheduler
 - :mod:`~z4j_scheduler.importers.apscheduler` - APScheduler jobstores
 - :mod:`~z4j_scheduler.importers.cron` - system crontab
+- :mod:`~z4j_scheduler.importers.huey` - Huey ``periodic_task`` registry
+- :mod:`~z4j_scheduler.importers.arq` - arq ``WorkerSettings.cron_jobs``
+- :mod:`~z4j_scheduler.importers.taskiq` - taskiq ``schedule`` labels
+- :mod:`~z4j_scheduler.importers.dramatiq` - guidance only (Dramatiq has
+  no native scheduler)
 """

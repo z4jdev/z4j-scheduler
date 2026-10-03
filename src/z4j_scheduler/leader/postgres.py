@@ -68,12 +68,19 @@ import asyncio
 import contextlib
 import hashlib
 import logging
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, TypeAlias
+
+from z4j_scheduler.observability import metrics as m
 
 if TYPE_CHECKING:  # pragma: no cover
+    from collections.abc import Callable, Coroutine, Iterable
     from uuid import UUID
 
 logger = logging.getLogger("z4j.scheduler.leader.postgres")
+
+#: ``project_source`` shape for :class:`PerProjectLeaderGate`: a sync or
+#: async zero-arg callable yielding the project ids to compete for.
+ProjectSource: TypeAlias = "Callable[[], Iterable[UUID] | Coroutine[Any, Any, Iterable[UUID]]]"
 
 
 # =====================================================================
@@ -523,7 +530,7 @@ class PerProjectLeaderGate:
         self,
         *,
         backend: LockBackend,
-        project_source,
+        project_source: ProjectSource,
         namespace: str = "z4j-scheduler-projects",
         heartbeat_seconds: float = 2.0,
     ) -> None:
@@ -531,7 +538,7 @@ class PerProjectLeaderGate:
         self._project_source = project_source
         self._namespace = namespace
         self._heartbeat_seconds = heartbeat_seconds
-        self._held: dict[object, int] = {}  # project_id → lock_key
+        self._held: dict[UUID, int] = {}  # project_id → lock_key
         self._stop_event = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
         self._first_cycle = asyncio.Event()
@@ -620,11 +627,11 @@ class PerProjectLeaderGate:
     async def wait_for_first_cycle(self, timeout: float = 5.0) -> None:  # noqa: ASYNC109  public API timeout param delegated to asyncio.wait_for
         await asyncio.wait_for(self._first_cycle.wait(), timeout=timeout)
 
-    def is_leader(self, project_id) -> bool:
+    def is_leader(self, project_id: UUID) -> bool:
         """Synchronous read of whether we currently hold this project's lock."""
         return project_id in self._held
 
-    def held_projects(self) -> set:
+    def held_projects(self) -> set[UUID]:
         """Snapshot of project_ids this instance currently leads.
 
         Used by observability / dashboard to show "instance X leads
@@ -639,7 +646,7 @@ class PerProjectLeaderGate:
                     projects = await _resolve_project_source(
                         self._project_source,
                     )
-                    desired: dict[object, int] = {
+                    desired: dict[UUID, int] = {
                         pid: _project_key(self._namespace, pid) for pid in projects
                     }
 
@@ -672,6 +679,11 @@ class PerProjectLeaderGate:
                                 timeout=_BACKEND_OP_TIMEOUT_SECONDS,
                             )
                             del self._held[pid]
+                            # The ``is_leader`` gauge is sampled from the
+                            # engine's checks, which stop for a project that
+                            # left scope; retire its series so the last
+                            # sample does not stand forever.
+                            m.forget_leader_series(str(pid))
                             logger.info(
                                 "z4j.scheduler.leader.postgres: "
                                 "released project=%s (no longer in scope)",
@@ -709,7 +721,7 @@ class PerProjectLeaderGate:
             raise
 
 
-def _project_key(namespace: str, project_id) -> int:
+def _project_key(namespace: str, project_id: UUID) -> int:
     """Derive a 63-bit lock key from (namespace, project_id).
 
     Includes the namespace so a single Postgres instance can host
@@ -720,7 +732,7 @@ def _project_key(namespace: str, project_id) -> int:
     return _namespace_to_key(seed)
 
 
-async def _resolve_project_source(source) -> list:
+async def _resolve_project_source(source: ProjectSource) -> list[UUID]:
     """Call ``project_source`` accepting both sync and async callables.
 
     The cache exposes ``snapshot()`` as a coroutine; tests prefer

@@ -1,6 +1,6 @@
 """Typer CLI entry point.
 
-Subcommands (per ``docs/SCHEDULER.md §15.4``):
+Subcommands (per ``docs/historical/SCHEDULER-DESIGN-DRAFT-2026-04.md §15.4``):
 
     z4j-scheduler serve                   Run the scheduler process
     z4j-scheduler version                 Print the installed version
@@ -9,7 +9,7 @@ Subcommands (per ``docs/SCHEDULER.md §15.4``):
     z4j-scheduler schedules list ...      List schedules
     z4j-scheduler schedules trigger ...   Manual trigger
     z4j-scheduler schedules disable ...   Disable a schedule
-    z4j-scheduler import --from <tool>    Migrate from celery-beat / rq / aps / cron
+    z4j-scheduler import --from <tool>    Migrate from celery-beat / rq / aps / cron / huey / arq / taskiq
     z4j-scheduler export --to <tool>      Reverse migration
 
 ``serve``, ``version``, ``info``, and the ``schedules`` +
@@ -22,10 +22,17 @@ from __future__ import annotations
 import asyncio
 import sys
 import tempfile
+from typing import TYPE_CHECKING, Any
 
 import typer
 
 from z4j_scheduler.version import __version__
+
+if TYPE_CHECKING:  # pragma: no cover
+    from collections.abc import Callable, Iterable
+
+    from z4j_scheduler.exporters._client import ExportedSchedule
+    from z4j_scheduler.importers._core import ImportedSchedule
 
 app = typer.Typer(
     name="z4j-scheduler",
@@ -43,7 +50,7 @@ def serve() -> None:
     """Run the scheduler process.
 
     Reads configuration from ``Z4J_SCHEDULER_*`` environment variables
-    (see ``docs/SCHEDULER.md §20`` for the full reference). Connects
+    (see ``docs/historical/SCHEDULER-DESIGN-DRAFT-2026-04.md §20`` for the full reference). Connects
     to brain via the gRPC URL, populates the schedule cache from the
     initial sync, then ticks until SIGTERM.
 
@@ -77,7 +84,7 @@ def serve() -> None:
                 loc = ".".join(str(p) for p in err["loc"])
                 typer.echo(f"  - {loc}: {err['msg']}", err=True)
             typer.echo(
-                "\nSee docs/SCHEDULER.md §20 for the env-var reference.",
+                "\nSee docs/historical/SCHEDULER-DESIGN-DRAFT-2026-04.md §20 for the env-var reference.",
                 err=True,
             )
         else:
@@ -121,7 +128,7 @@ def check(
         help="brain REST URL for /health probe",
     ),
 ) -> None:
-    """Compact pass/fail health check (1.1.2+).
+    """Compact pass/fail health check.
 
     Same brain-reachability probes as ``doctor`` but emits one
     line per failed check (or a single OK line) - suitable for
@@ -170,7 +177,7 @@ def check(
 
 @app.command()
 def status() -> None:
-    """One-line introspection (1.1.2+).
+    """One-line introspection.
 
     Reports the installed z4j-scheduler version, configured brain
     URLs (from env), and process supervisor hint. Doesn't probe
@@ -199,7 +206,7 @@ def status() -> None:
 
 @app.command()
 def restart() -> None:
-    """Stub for symmetry (1.1.2+).
+    """Stub for symmetry.
 
     z4j-scheduler runs as a standalone process (or as a supervised
     subprocess of z4j-brain when ``Z4J_EMBEDDED_SCHEDULER=true``);
@@ -405,7 +412,7 @@ def doctor(  # noqa: PLR0912, PLR0915  flat CLI diagnostics dispatch
     # 2. TLS material
     typer.echo("\nmTLS material:")
     cert_paths = {"cert": tls_cert, "key": tls_key, "ca": tls_ca}
-    pem_data: dict = {}
+    pem_data: dict[str, bytes] = {}
     for label, path_str in cert_paths.items():
         if not path_str:
             _print(f"TLS_{label.upper()}", "FAIL", "unset")
@@ -872,7 +879,7 @@ def schedules_edit(  # noqa: PLR0912  flat CLI option dispatch
         project=project,
         name=name,
     )
-    body: dict = {}
+    body: dict[str, Any] = {}
     if expression is not None:
         body["expression"] = expression
     if task_name is not None:
@@ -1041,7 +1048,8 @@ def _resolve_schedule_id_by_name(
     )
     for r in rows:
         if r["name"] == name:
-            return r["id"]
+            schedule_id: str = r["id"]
+            return schedule_id
     raise typer.BadParameter(
         f"no schedule named {name!r} in project {project!r}",
     )
@@ -1052,7 +1060,7 @@ def _brain_get(
     brain_url: str,
     api_token: str | None,
     path: str,
-) -> object:
+) -> list[dict[str, Any]]:
     """Synchronous httpx GET wrapper for the schedules CLI.
 
     The CLI is short-lived + sync-shaped (typer); using sync httpx
@@ -1075,7 +1083,8 @@ def _brain_get(
         raise typer.Exit(code=1) from typer.BadParameter(
             f"brain GET {path} failed: {exc}",
         )
-    return response.json()
+    rows: list[dict[str, Any]] = response.json()
+    return rows
 
 
 def _brain_patch(
@@ -1083,8 +1092,8 @@ def _brain_patch(
     brain_url: str,
     api_token: str | None,
     path: str,
-    body: dict,
-) -> dict:
+    body: dict[str, Any],
+) -> dict[str, Any]:
     """Sync httpx PATCH wrapper. Used by ``schedules edit``.
 
     Mirrors ``_brain_post`` but for PATCH; the brain's update
@@ -1117,9 +1126,9 @@ def _brain_post(
     brain_url: str,
     api_token: str | None,
     path: str,
-    body: dict,
+    body: dict[str, Any],
     expect_status: tuple[int, ...],
-) -> dict:
+) -> dict[str, Any]:
     """Sync httpx POST wrapper. Raises typer.Exit on unexpected status."""
     import httpx
 
@@ -1140,7 +1149,8 @@ def _brain_post(
         raise typer.Exit(code=1)
     if response.status_code == 204 or not response.content:
         return {}
-    return response.json()
+    result: dict[str, Any] = response.json()
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1153,7 +1163,10 @@ def import_(
     source: str = typer.Option(
         ...,
         "--from",
-        help=("source format: celery | django-celery-beat | rq | apscheduler | cron"),
+        help=(
+            "source format: celery | django-celery-beat | rq | apscheduler | "
+            "cron | huey | arq | taskiq | dramatiq"
+        ),
     ),
     project: str = typer.Option(
         ...,
@@ -1254,6 +1267,24 @@ def import_(
             "user field between the schedule and the command"
         ),
     ),
+    # ---- huey -----
+    huey_app: str | None = typer.Option(
+        None,
+        "--huey-app",
+        help="(--from huey) module:attr pointing at the Huey instance",
+    ),
+    # ---- arq -----
+    arq_settings: str | None = typer.Option(
+        None,
+        "--arq-settings",
+        help="(--from arq) module:ClassName pointing at the arq WorkerSettings class",
+    ),
+    # ---- taskiq -----
+    taskiq_broker: str | None = typer.Option(
+        None,
+        "--taskiq-broker",
+        help="(--from taskiq) module:attr pointing at the taskiq AsyncBroker",
+    ),
     # ---- shared options -----
     queue: str | None = typer.Option(
         None,
@@ -1263,7 +1294,10 @@ def import_(
     timezone: str = typer.Option(
         "UTC",
         "--timezone",
-        help=("timezone tag applied to schedules whose source has none (cron, rq) - default UTC"),
+        help=(
+            "timezone tag applied to schedules whose source has none "
+            "(cron, rq, huey, arq, taskiq) - default UTC"
+        ),
     ),
     engine: str | None = typer.Option(
         None,
@@ -1277,9 +1311,11 @@ def import_(
     """Import existing schedules from another scheduler into z4j.
 
     Reads from one of celery-beat / django-celery-beat / rq-scheduler
-    / APScheduler / system crontab, normalises into z4j's schedule
+    / APScheduler / system crontab / Huey periodic tasks / arq cron
+    jobs / taskiq schedule labels, normalises into z4j's schedule
     shape, and either prints the JSONL view (``--dry-run``) or POSTs
-    to brain's import endpoint.
+    to brain's import endpoint. ``--from dramatiq`` prints migration
+    guidance and exits 2: Dramatiq has no native scheduler to read.
     """
     schedules = _do_import(
         source=source,
@@ -1295,6 +1331,9 @@ def import_(
         queue=queue,
         timezone=timezone,
         engine=engine,
+        huey_app=huey_app,
+        arq_settings=arq_settings,
+        taskiq_broker=taskiq_broker,
     )
 
     from z4j_scheduler.importers._core import (
@@ -1374,7 +1413,10 @@ def export(
     target: str = typer.Option(
         ...,
         "--to",
-        help="reverse-export target: celery | rq | apscheduler | cron",
+        help=(
+            "reverse-export target: celery | rq | apscheduler | cron | "
+            "huey | arq | taskiq | dramatiq"
+        ),
     ),
     project: str = typer.Option(
         ...,
@@ -1420,8 +1462,10 @@ def export(
 ) -> None:
     """Reverse-export z4j schedules back to another scheduler's format.
 
-    Lets operators back out to celery-beat / rq / APScheduler / cron
-    if they decide z4j-scheduler is not the right fit. The export is
+    Lets operators back out to celery-beat / rq / APScheduler / cron /
+    Huey / arq / taskiq if they decide z4j-scheduler is not the right
+    fit (``--to dramatiq`` renders guidance only, since Dramatiq has
+    no native scheduler config). The export is
     *advisory*: we generate the source-shaped file, the operator
     reviews and applies it. We deliberately do NOT auto-write into
     the operator's deployment artefacts - you copy the printed
@@ -1434,15 +1478,37 @@ def export(
     target = target.lower()
     renderer = _select_renderer(target)
 
-    schedules = asyncio.run(
-        fetch_schedules(
-            brain_url=brain_url,
-            project_slug=project,
-            api_token=api_token,
-            scheduler_filter=scheduler_filter or None,
-            source_filter=source_filter,
-        ),
-    )
+    import httpx
+
+    try:
+        schedules = asyncio.run(
+            fetch_schedules(
+                brain_url=brain_url,
+                project_slug=project,
+                api_token=api_token,
+                scheduler_filter=scheduler_filter or None,
+                source_filter=source_filter,
+            ),
+        )
+    except httpx.TransportError as exc:
+        # Connection refused, DNS, TLS, timeout: the brain is not there to
+        # ask. This used to be an httpx traceback with the brain down.
+        typer.echo(
+            f"export: brain not reachable at {brain_url} ({type(exc).__name__}) - "
+            "is `z4j serve` running and bound to this address?",
+            err=True,
+        )
+        raise typer.Exit(code=2) from None
+    except httpx.HTTPStatusError as exc:
+        typer.echo(
+            f"export: brain answered {exc.response.status_code} for project {project!r}",
+            err=True,
+        )
+        raise typer.Exit(code=2) from None
+    except RuntimeError as exc:
+        # fetch_schedules' own refusal (404: wrong slug or token lacks access).
+        typer.echo(f"export: {exc}", err=True)
+        raise typer.Exit(code=2) from None
     rendered = renderer(schedules)
 
     if out == "-":
@@ -1459,7 +1525,7 @@ def export(
 
 def _print_verify_diff(
     *,
-    schedules: list,
+    schedules: list[ImportedSchedule],
     brain_url: str,
     api_token: str | None,
     project: str,
@@ -1545,7 +1611,7 @@ def _print_verify_diff(
 
 def _print_shadow_comparison(
     *,
-    schedules: list,
+    schedules: list[ImportedSchedule],
     duration: str,
 ) -> None:
     """Refuse the not-yet-implemented two-sided cutover comparison.
@@ -1567,7 +1633,9 @@ def _print_shadow_comparison(
     raise typer.Exit(code=2)
 
 
-def _select_renderer(target: str):
+def _select_renderer(  # noqa: PLR0911  one literal branch per --to value; tests/release reads them
+    target: str,
+) -> Callable[[Iterable[ExportedSchedule]], str]:
     """Resolve --to value to a renderer callable. Lazy imports keep
     extras only loaded for the path the user picked."""
     if target == "celery":
@@ -1586,12 +1654,29 @@ def _select_renderer(target: str):
         from z4j_scheduler.exporters import cron as _cron
 
         return _cron.render
+    if target == "huey":
+        from z4j_scheduler.exporters import huey as _huey
+
+        return _huey.render
+    if target == "arq":
+        from z4j_scheduler.exporters import arq as _arq
+
+        return _arq.render
+    if target == "taskiq":
+        from z4j_scheduler.exporters import taskiq as _taskiq
+
+        return _taskiq.render
+    if target == "dramatiq":
+        from z4j_scheduler.exporters import dramatiq as _dramatiq
+
+        return _dramatiq.render
     raise typer.BadParameter(
-        f"unknown --to {target!r} (expected celery, rq, apscheduler, or cron)",
+        f"unknown --to {target!r} (expected celery, rq, apscheduler, cron, "
+        "huey, arq, taskiq, or dramatiq)",
     )
 
 
-def _do_import(
+def _do_import(  # noqa: PLR0911, PLR0912  one literal branch per --from value; tests/release reads them
     *,
     source: str,
     project: str,
@@ -1606,7 +1691,10 @@ def _do_import(
     queue: str | None,
     timezone: str,
     engine: str | None,
-) -> list:
+    huey_app: str | None = None,
+    arq_settings: str | None = None,
+    taskiq_broker: str | None = None,
+) -> list[ImportedSchedule]:
     """Dispatch to the right importer based on ``--from`` value.
 
     Lives in a separate function so the CLI body stays linear and
@@ -1695,10 +1783,70 @@ def _do_import(
             timezone=timezone,
             has_user_column=has_user_column,
         )
+    if src == "huey":
+        if not huey_app:
+            raise typer.BadParameter("--huey-app is required for --from huey")
+        from z4j_scheduler.importers.huey import (
+            read_huey_app,
+        )
+
+        return read_huey_app(
+            app_path=huey_app,
+            project_slug=project,
+            engine=engine or "huey",
+            default_queue=queue,
+            default_timezone=timezone,
+        )
+    if src == "arq":
+        if not arq_settings:
+            raise typer.BadParameter(
+                "--arq-settings is required for --from arq",
+            )
+        from z4j_scheduler.importers.arq import (
+            read_arq_settings,
+        )
+
+        return read_arq_settings(
+            settings_path=arq_settings,
+            project_slug=project,
+            engine=engine or "arq",
+            default_queue=queue,
+            default_timezone=timezone,
+        )
+    if src == "taskiq":
+        if not taskiq_broker:
+            raise typer.BadParameter(
+                "--taskiq-broker is required for --from taskiq",
+            )
+        from z4j_scheduler.importers.taskiq import (
+            read_taskiq_broker,
+        )
+
+        return read_taskiq_broker(
+            broker_path=taskiq_broker,
+            project_slug=project,
+            engine=engine or "taskiq",
+            default_queue=queue,
+            default_timezone=timezone,
+        )
+    if src == "dramatiq":
+        # Dramatiq has no native scheduler primitive. The importer
+        # module always raises with operator guidance; surface that
+        # guidance as a clean usage failure instead of a traceback.
+        from z4j_scheduler.importers.dramatiq import (
+            read_dramatiq,
+        )
+
+        try:
+            return read_dramatiq()
+        except RuntimeError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=2) from exc
 
     raise typer.BadParameter(
         f"unknown --from {source!r} (expected celery, "
-        "django-celery-beat, rq, apscheduler, or cron)",
+        "django-celery-beat, rq, apscheduler, cron, huey, arq, taskiq, "
+        "or dramatiq)",
     )
 
 

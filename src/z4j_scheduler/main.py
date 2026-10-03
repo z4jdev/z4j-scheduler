@@ -14,8 +14,10 @@ Composes every subsystem into a single asyncio-driven process:
 10. Starts uvicorn for the HTTP surface
 11. Starts the watch stream + tick engine in an asyncio.TaskGroup
 12. Wires SIGTERM / SIGINT for graceful shutdown
-13. On stop: drains in-flight fires, closes streams, closes the gRPC
-    channel, stops uvicorn
+13. On stop: stops admitting new slots, waits up to
+    ``fire_timeout_seconds`` for in-flight fires to be acknowledged,
+    closes streams, releases the leader gate, closes the gRPC channel,
+    stops uvicorn
 
 Stop order is the inverse of start order so dependencies don't
 break mid-shutdown.
@@ -47,9 +49,11 @@ from z4j_scheduler.storage.cache import ScheduleCache
 from z4j_scheduler.storage.quarantine import QuarantineReporter
 from z4j_scheduler.storage.watch import WatchStream
 from z4j_scheduler.tick.cadence import cadence_runtime_fingerprint
-from z4j_scheduler.tick.engine import TickEngine
+from z4j_scheduler.tick.engine import LeaderGate, TickEngine
 
 if TYPE_CHECKING:  # pragma: no cover
+    from uuid import UUID
+
     from z4j_scheduler.settings import Settings
 
 logger = logging.getLogger("z4j.scheduler.main")
@@ -85,6 +89,26 @@ async def _select_protocol_mode(
     return "current"
 
 
+async def _cadence_contract_agrees(client: BrainClient) -> bool:
+    """Whether the Brain still selects this scheduler's exact current contract.
+
+    The tick engine asks this after a fire comes back refused as a cadence
+    mismatch, before it lets that refusal mean anything durable. It is the
+    startup negotiation run again: the same offered tuple, the same exact
+    comparison, so "agrees" here means what it meant at startup. A refusal,
+    a contradictory tuple, or an unreachable brain all answer no.
+    """
+    try:
+        selected = await _select_protocol_mode(client)
+    except (ProtocolNegotiationError, grpc.RpcError):
+        logger.warning(
+            "z4j.scheduler.main: cadence contract renegotiation did not agree",
+            exc_info=True,
+        )
+        return False
+    return selected == "current"
+
+
 class SchedulerApp:
     """The scheduler process lifecycle.
 
@@ -111,7 +135,7 @@ class SchedulerApp:
         # The leader gate may be either implementation; the
         # ``stop()`` path checks for an async ``stop`` method to
         # decide whether to await teardown.
-        self._leader_gate: object | None = None
+        self._leader_gate: LeaderGate | None = None
         self._tick_engine: TickEngine | None = None
         self._watch: WatchStream | None = None
         self._quarantine_reporter: QuarantineReporter | None = None
@@ -123,6 +147,9 @@ class SchedulerApp:
         self._trigger_server: object | None = None
         self._stop_event = asyncio.Event()
         self._started = False
+        # Strong references to immediate snapshot resync tasks requested by
+        # the cache under tombstone pressure; see _request_snapshot_resync.
+        self._resync_tasks: set[asyncio.Task[None]] = set()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -138,6 +165,12 @@ class SchedulerApp:
             "z4j.scheduler.main: starting (instance_id=%s)",
             self.settings.instance_id,
         )
+        # Said once, here, after logging is configured and only for a process
+        # that is about to schedule: the settings object is also built by the
+        # import, export and verify commands, where the leader backend is moot.
+        leader_misuse = self.settings.single_leader_misuse_warning()
+        if leader_misuse is not None:
+            logger.warning(leader_misuse)
 
         # --- Subsystems (order matters for dependency direction) ---
 
@@ -172,11 +205,24 @@ class SchedulerApp:
         # busy-spinning / replaying after failover).
         self._cache.is_leader = self._leader_gate.is_leader
 
-        # 4. Dispatcher - uses brain client for fire delivery.
+        # 4. Dispatcher - uses brain client for fire delivery. It reads the
+        #    watch's health probe so a transient-error retry is withheld while
+        #    the stream is down and the brain it would reach is unnegotiated.
         self._dispatcher = FireDispatcher(
             client=client,
             settings=self.settings,
+            watch_healthy=lambda: self._watch.is_healthy if self._watch else True,
         )
+
+        # The watch renegotiates the protocol on every reconnect. Route a
+        # successful one to the engine so schedules it stopped after a
+        # mid-flight cadence mismatch resume once the brain is back on the
+        # negotiated contract, without a scheduler restart.
+        async def _reselect_protocol() -> Literal["legacy", "current"]:
+            selected = await _select_protocol_mode(client)
+            if selected == "current" and self._tick_engine is not None:
+                await self._tick_engine.on_cadence_contract_renegotiated()
+            return selected
 
         # 5. Tick engine - reads cache, calls dispatcher when leader.
         # Wrap the gate so every is_leader() call updates the
@@ -199,7 +245,7 @@ class SchedulerApp:
                 self.settings.grpc_reconnect_backoff_max_seconds,
             ),
             protocol_mode=protocol_mode,
-            protocol_selector=lambda: _select_protocol_mode(client),
+            protocol_selector=_reselect_protocol,
         )
 
         # 5b. Tick engine. The engine receives the watch's
@@ -218,8 +264,9 @@ class SchedulerApp:
             # heartbeat (supported up to 60s) does not make a promoted leader
             # classify the slot it parked as a follower as "missed" and drop it.
             leader_heartbeat_seconds=getattr(self.settings, "leader_heartbeat_seconds", 2.0),
-            on_time_grace_seconds=getattr(self.settings, "on_time_grace_seconds", 5.0),
+            on_time_grace_seconds=getattr(self.settings, "on_time_grace_seconds", 30.0),
             quarantine_reporter=self._quarantine_reporter,
+            renegotiate=lambda: _cadence_contract_agrees(client),
         )
 
         # 6.5 Legacy TriggerSchedule reverse gRPC server. Off by default.
@@ -234,6 +281,7 @@ class SchedulerApp:
             settings=self.settings,
             cache=self._cache,
             client=self._client,
+            watch=self._watch,
         )
         # Mark subsystems up - the watch stream will flip
         # cache_initial_sync_complete when its first sync finishes.
@@ -304,9 +352,11 @@ class SchedulerApp:
         1. Signal stop_event - wakes the run() loop's TaskGroup
            shutdown watcher
         2. Tell uvicorn to stop accepting new requests
-        3. Stop the tick engine (no new dispatches)
+        3. Stop the tick engine (no new slots admitted) and wait up to
+           ``fire_timeout_seconds`` for in-flight fires to be acknowledged
         4. Stop the watch stream (no new cache mutations)
-        5. Close the brain client gRPC channel
+        5. Release the leader gate, then close the brain client gRPC
+           channel
         """
         self._stop_event.set()
         if self._uvicorn_server is not None:
@@ -318,6 +368,7 @@ class SchedulerApp:
                 await self._trigger_server.stop()  # type: ignore[attr-defined]
         if self._tick_engine is not None:
             await self._tick_engine.stop()
+            await self._drain_in_flight_fires()
         if self._quarantine_reporter is not None:
             await self._quarantine_reporter.stop()
         if self._watch is not None:
@@ -334,6 +385,80 @@ class SchedulerApp:
                 await self._client.close()
         logger.info("z4j.scheduler.main: stopped")
 
+    async def _drain_in_flight_fires(self) -> None:
+        """Wait for fires already sent to the brain to be acknowledged.
+
+        Bounded by ``fire_timeout_seconds``, the deadline of a single
+        FireSchedule attempt, so a brain that has stopped answering cannot
+        hold the process open; a fire still in flight past that is logged
+        and abandoned, and the revision CAS fences it if it lands later.
+        Idempotent: both shutdown paths call it, and it returns at once when
+        nothing is in flight.
+        """
+        if self._tick_engine is None:
+            return
+        in_flight = self._tick_engine.in_flight_count
+        timeout = float(self.settings.fire_timeout_seconds)
+        if in_flight:
+            logger.info(
+                "z4j.scheduler.main: waiting up to %.0fs for %d in-flight fire(s)",
+                timeout,
+                in_flight,
+            )
+        drained = await self._tick_engine.drain(grace_seconds=timeout)
+        if not drained:
+            logger.warning(
+                "z4j.scheduler.main: %d fire(s) still in flight after %.0fs; "
+                "abandoning them (the brain fences a late acceptance)",
+                self._tick_engine.in_flight_count,
+                timeout,
+            )
+
+    def _request_snapshot_resync(self, project_id: UUID, tombstone_count: int) -> None:
+        """Run the watch's full resync now for a project under tombstone pressure.
+
+        The cache calls this synchronously, outside its lock, the moment a
+        project's unsnapshotted deletes reach the cap. The coroutine scheduled
+        here is the one the periodic timer and the reconnect path already run;
+        it serialises behind the watch's own sync lock, so running it early is
+        the same operation one timer tick sooner. One resync in flight covers
+        every project, so a request that arrives while one runs is not queued.
+        The periodic resync remains the backstop if this one fails.
+        """
+        watch = self._watch
+        if watch is None or self._stop_event.is_set():
+            return
+        if any(not task.done() for task in self._resync_tasks):
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(
+            self._resync_now(watch, project_id, tombstone_count),
+            name="z4j-scheduler-snapshot-resync",
+        )
+        self._resync_tasks.add(task)
+        task.add_done_callback(self._resync_tasks.discard)
+
+    @staticmethod
+    async def _resync_now(watch: WatchStream, project_id: UUID, tombstone_count: int) -> None:
+        logger.info(
+            "z4j.scheduler.main: immediate snapshot resync for project_id=%s "
+            "(%d unsnapshotted deletes)",
+            project_id,
+            tombstone_count,
+        )
+        try:
+            await watch._full_sync()
+        except Exception:
+            logger.warning(
+                "z4j.scheduler.main: immediate snapshot resync for project_id=%s "
+                "failed; the periodic resync will lift the pause",
+                project_id,
+                exc_info=True,
+            )
+
     # ------------------------------------------------------------------
     # Internals (overridable in tests)
     # ------------------------------------------------------------------
@@ -342,7 +467,7 @@ class SchedulerApp:
         """Construct the brain client. Override in tests to inject a fake."""
         return BrainClient(self.settings)
 
-    async def _build_leader_gate(self) -> object:
+    async def _build_leader_gate(self) -> LeaderGate:
         """Construct + start the leader gate per ``leader_backend`` setting.
 
         - ``single``: always-true gate. No async work, no infra.
@@ -372,6 +497,7 @@ class SchedulerApp:
             lock_backend = AsyncpgLockBackend(
                 dsn=self.settings.leader_pg_dsn.get_secret_value(),
             )
+            gate: PostgresAdvisoryLockLeaderGate | PerProjectLeaderGate
             if backend == "postgres":
                 gate = PostgresAdvisoryLockLeaderGate(
                     backend=lock_backend,
@@ -386,7 +512,7 @@ class SchedulerApp:
                 # gracefully (no projects → no locks held).
                 assert self._cache is not None
 
-                async def _project_source() -> list:
+                async def _project_source() -> list[UUID]:
                     snap = await self._cache.snapshot()  # type: ignore[union-attr]
                     return list({entry.project_id for entry in snap})
 
@@ -470,9 +596,13 @@ class SchedulerApp:
         """
         await self._stop_event.wait()
         logger.info("z4j.scheduler.main: stop signalled, cancelling tasks")
-        # Tell each subsystem to wind down gracefully.
+        # Tell each subsystem to wind down gracefully. The tick task is a
+        # sibling in this TaskGroup, so it must be drained BEFORE the group
+        # is unwound: the cancellation below would otherwise interrupt a fire
+        # between its FireSchedule call and its acknowledgement.
         if self._tick_engine is not None:
             await self._tick_engine.stop()
+            await self._drain_in_flight_fires()
         if self._watch is not None:
             await self._watch.stop()
         if self._uvicorn_server is not None:

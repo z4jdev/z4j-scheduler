@@ -137,8 +137,10 @@ def next_fire(
     # ``get_next(datetime)`` returns a tz-aware datetime in the same
     # tz as ``base`` (so, the requested tz). Strict ``>`` semantics:
     # if ``after`` happens to coincide with a fire time, the NEXT
-    # fire is returned.
-    return itr.get_next(datetime)
+    # fire is returned. croniter ships no stubs, so the return type is
+    # pinned at this boundary.
+    successor: datetime = itr.get_next(datetime)
+    return successor
 
 
 def fires_between(  # noqa: PLR0912 -- validation and DST branches are explicit safety gates
