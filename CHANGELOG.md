@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.12.1 (2026-10-05)
+
+* The cadence closure moves to `croniter==6.2.4` and `tzdata==2026.5` (IANA
+  2026e), together with `z4j`. Under IANA 2026c fire times are an hour wrong
+  from 2026-11-01 for America/Winnipeg, Canada/Central, America/Rainy_River
+  and America/Inuvik. A 1.12.1 scheduler and a 1.12.0 brain refuse each other
+  until both are upgraded; schedules are held, not lost, and resume under
+  their catch-up policy.
+* The import extras no longer cap a major: `apscheduler[sqlalchemy]>=3.10`,
+  `huey>=2.4`, `arq>=0.26`, `taskiq>=0.11`. The Huey importer and exporter run
+  on Huey 3.
+
 ## 1.12.0 (2026-10-03)
 
 * Report watch-stream health where operators look. The

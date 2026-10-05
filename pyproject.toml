@@ -1,6 +1,6 @@
 [project]
 name = "z4j-scheduler"
-version = "1.12.0"
+version = "1.12.1"
 description = "Engine-agnostic dynamic scheduler for the z4j stack (Apache 2.0)"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -76,22 +76,22 @@ dependencies = [
     # independent implementation.  These exact pins are the complete
     # cadence-affecting closure and intentionally match z4j.
     #
-    # tzdata is IANA 2026c. 2026a computes fire times an hour wrong for seven
-    # zones with future effect: Africa/Casablanca and Africa/El_Aaiun from
-    # 2026-09-20, and America/Edmonton, America/Vancouver, America/Yellowknife,
-    # Canada/Mountain and Canada/Pacific from 2026-11-01.
+    # tzdata is IANA 2026e. Zones load only from this wheel, never from the
+    # host tzdb, so the pin decides every local fire time: 2026c computes them
+    # an hour wrong from 2026-11-01 for America/Winnipeg, Canada/Central,
+    # America/Rainy_River and America/Inuvik.
     #
     # A change to this closure changes the cadence runtime fingerprint, and the
     # rollback compatibility carrier must keep computing the same value or the
     # prepare-runtime-rollback ceremony cannot honestly restamp a cursor. The
-    # carrier therefore carries this same tzdata, so the sealed rollback target
-    # stays byte-equal to this closure. Published 1.8 is untouched: its own
-    # bytes are unchanged and it is never asked to agree with this closure
-    # except through that ceremony.
+    # carrier therefore carries this same croniter and tzdata, so the sealed
+    # rollback target stays byte-equal to this closure. Published 1.8 is
+    # untouched: its own bytes are unchanged and it is never asked to agree
+    # with this closure except through that ceremony.
     #
     # Both distributions move together or the closure is not exact, and the
     # carrier moves with them or the rollback target is not reachable.
-    "croniter==6.2.2",
+    "croniter==6.2.4",
     "python-dateutil==2.9.0.post0",
     "six==1.17.0",
     # Astronomical event computation for solar schedules
@@ -101,7 +101,7 @@ dependencies = [
     "astral==3.2",
     # Pinned IANA tzdata so deployments are deterministic across
     # base images that may ship stale /usr/share/zoneinfo.
-    "tzdata==2026.3",
+    "tzdata==2026.5",
     # Same logging stack as the rest of z4j - structured JSON in
     # prod, pretty console in dev.
     "structlog>=25.1",
@@ -121,15 +121,17 @@ dependencies = [
 # celery itself, which is heavyweight.
 celery-import = ["celery>=5.6", "django-celery-beat>=2.7"]
 rq-import = ["rq>=2.0", "rq-scheduler>=0.14"]
-apscheduler-import = ["apscheduler[sqlalchemy]>=3.10,<4"]
-# Floors match the engine ranges the z4j-huey, z4j-arq and z4j-taskiq
-# adapters declare, so an importer never resolves an engine release the
-# adapter for that engine refuses. There is no dramatiq-import extra:
-# ``--from dramatiq`` prints migration guidance and imports nothing,
-# because Dramatiq has no native scheduler to read.
-huey-import = ["huey>=2.4,<3"]
-arq-import = ["arq>=0.26,<1"]
-taskiq-import = ["taskiq>=0.11,<1"]
+apscheduler-import = ["apscheduler[sqlalchemy]>=3.10"]
+# Floors match the engine floors the z4j-huey, z4j-arq and z4j-taskiq
+# adapters declare, so an importer never resolves an engine release older
+# than the adapter for that engine accepts. None carries an upper cap: an
+# importer runs where the application module and its engine already
+# resolve, and reads whatever engine release that environment holds. There
+# is no dramatiq-import extra: ``--from dramatiq`` prints migration guidance
+# and imports nothing, because Dramatiq has no native scheduler to read.
+huey-import = ["huey>=2.4"]
+arq-import = ["arq>=0.26"]
+taskiq-import = ["taskiq>=0.11"]
 
 [project.scripts]
 z4j-scheduler = "z4j_scheduler.cli:main"
