@@ -50,8 +50,9 @@ service SchedulerService {
 
     // Scheduler tells brain to fire a schedule. Brain creates a
     // Command row and dispatches via the existing CommandDispatcher
-    // through the agent's WebSocket. Returns the command_id; the
-    // agent's actual completion comes back via AcknowledgeFireResult.
+    // through the agent's WebSocket. Returns the command_id after
+    // acceptance. AcknowledgeFireResult reports the scheduler's handoff;
+    // actual task completion arrives separately through agent events.
     rpc FireSchedule(FireScheduleRequest) returns (FireScheduleResponse);
 
     // Legacy operator-initiated manual-fire path from Brain to scheduler.

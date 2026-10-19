@@ -154,7 +154,7 @@ def postgres_url() -> Iterator[str]:
 
     try:
         container = postgres_container_class(
-            "postgres:18.6@sha256:06cad38a5d9f5d24b4d83d86def30795d5e4b757fedbf5281172b576dedcd941"
+            "postgres:18.6@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336"
         )
         container.start()
     except Exception as exc:

@@ -50,10 +50,10 @@ fires, so its surface is operational rather than user-facing:
   metrics on a non-loopback bind without an auth token; keep the listener on
   loopback, configure the token, or disable metrics.
 - **Importers**: `z4j-scheduler import` reads schedule definitions
-  from operator-supplied sources and pushes them to the brain. The Celery and
-  django-celery-beat paths execute the configured Python import path. The RQ
-  and APScheduler paths use their upstream clients to inspect native job
-  records; those records can contain pickle-backed payloads, so reading an
+  from operator-supplied sources and pushes them to the brain. The Celery,
+  django-celery-beat, Huey, arq, and TaskIQ paths execute the configured
+  Python import path. The RQ and APScheduler paths use their upstream clients
+  to inspect native job records; those records can contain pickle-backed payloads, so reading an
   attacker-writable Redis database or APScheduler jobstore can execute code in
   the importer process. The crontab path parses text. Treat source code,
   source stores, and their credentials as trusted. `--dry-run` prevents writes

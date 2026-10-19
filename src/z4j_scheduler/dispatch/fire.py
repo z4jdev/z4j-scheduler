@@ -15,10 +15,10 @@ Per-fire responsibilities:
    with capped exponential backoff. Permanent failures
    (PERMISSION_DENIED, FAILED_PRECONDITION) raise immediately.
 
-3. **Acknowledge** - on terminal result (success OR final failure),
-   call ``brain.acknowledge_result`` so the schedule's last_run_at
-   updates in brain. The ack is fire-and-forget from the engine's
-   perspective - if the ack fails, we log + drop and move on.
+3. **Acknowledge** - after the fire handoff succeeds or finally fails,
+   call ``brain.acknowledge_result`` for history, audit and notifications.
+   Current cadence state is committed during durable acceptance; this
+   receipt does not report task execution. If the ack fails, log and move on.
 
 4. **Metrics** - increment fires_total per fire, observe
    fire_latency_seconds histogram. Driven by
@@ -600,10 +600,10 @@ class FireDispatcher:
     ) -> None:
         """Send acknowledge_result. Failures are logged and swallowed.
 
-        The ack lets brain stamp ``schedules.last_run_at`` for the
-        operator's view. A missed ack means brain's view is mildly
-        stale until the next fire; never worth raising back to the
-        engine for.
+        Current cadence state was committed during durable acceptance.
+        This receipt contributes history, audit and notifications; only
+        legacy schedules advance ``last_run_at`` here. It does not report
+        task completion, which arrives separately from the agent.
         """
         try:
             await self._client.acknowledge_result(

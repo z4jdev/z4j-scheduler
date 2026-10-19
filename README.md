@@ -35,8 +35,8 @@ that matter day to day:
   and arq for a FastAPI rewrite uses the same scheduler for both,
   with one dashboard and one audit trail.
 - **Live editing.** Schedules live in the brain's database.
-  Create, edit, pause, resume, rename, and delete from the dashboard
-  or REST API without restarting the scheduler service.
+  Create, edit, pause, resume, and delete from the dashboard or REST
+  API without restarting the scheduler service.
 - **HMAC-chained audit log.** Every schedule mutation that goes
   through z4j records the actor, change, and time (plus the source IP
   for request-originated changes) in an
@@ -76,7 +76,7 @@ that matter day to day:
 | HA leader election | Postgres advisory locks; global or per-project leadership, with warm followers |
 | Audit log | every mutation through z4j is HMAC-chained; the database refuses a schedule change with no matching change-log entry, though a role holding direct write access to those tables can supply both |
 | Catch-up policy | per-schedule: skip, fire one missed, fire all missed |
-| Timezones | IANA zones validated at the boundary; DST fall-back fold fixed (no double-fires); spring-forward gap handled |
+| Timezones | IANA zones validated at the boundary; on DST fall-back an ambiguous wall-clock slot is two distinct instants and fires once at each (choose an hour outside the overlap for a single daily fire); a spring-forward gap fires at the next valid time |
 | Trigger surface | brain validates and dispatches operator-triggered fires directly; manual fires do not advance the cadence cursor |
 
 ## Install
@@ -160,14 +160,13 @@ You probably don't need it if:
 
 ## Documentation
 
-Full docs at [docs.z4j.com/scheduler/](https://docs.z4j.com/scheduler/).
-The migration guide at
-[docs.z4j.com/scheduler/migrating-from-celery-beat/](https://docs.z4j.com/scheduler/migrating-from-celery-beat/)
-walks the importer + dashboard verification path step by step.
+Full docs at [docs.z4j.com/schedulers/z4j-scheduler/](https://docs.z4j.com/schedulers/z4j-scheduler/).
+Its [Replacing celery-beat](https://docs.z4j.com/schedulers/z4j-scheduler/#replacing-celery-beat---concrete-steps)
+section walks the importer + dashboard verification path step by step.
 
 ## License
 
-Apache-2.0, see [LICENSE](LICENSE). `z4j-scheduler` is independently
+Apache-2.0, see [LICENSE](https://github.com/z4jdev/z4j-scheduler/blob/main/LICENSE). `z4j-scheduler` is independently
 installable from the AGPL-licensed `z4j` server distribution; consult the
 license terms for the obligations that apply to your deployment.
 The accepted `Z4J_SCHEDULER_PRO_LICENSE_KEY` setting is a reserved, inert
@@ -179,5 +178,5 @@ compatibility field; setting it enables no feature.
 - Documentation: https://docs.z4j.com
 - PyPI: https://pypi.org/project/z4j-scheduler/
 - Issues: https://github.com/z4jdev/z4j-scheduler/issues
-- Changelog: [CHANGELOG.md](CHANGELOG.md)
-- Security: security@z4j.com (see [SECURITY.md](SECURITY.md))
+- Changelog: [CHANGELOG.md](https://github.com/z4jdev/z4j-scheduler/blob/main/CHANGELOG.md)
+- Security: security@z4j.com (see [SECURITY.md](https://github.com/z4jdev/z4j-scheduler/blob/main/SECURITY.md))

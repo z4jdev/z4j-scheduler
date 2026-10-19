@@ -1,6 +1,6 @@
 [project]
 name = "z4j-scheduler"
-version = "1.12.1"
+version = "1.13.0"
 description = "Engine-agnostic dynamic scheduler for the z4j stack (Apache 2.0)"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -47,7 +47,7 @@ dependencies = [
     # api_key_id) don't fail/downgrade. z4j-scheduler doesn't
     # depend on any 1.2-specific API surface, so the broader
     # range is safe.
-    "z4j-core>=1.12.0,<2",
+    "z4j-core>=1.13.0,<2",
     # Async HTTP server for /health, /ready, /metrics, /info.
     # Same FastAPI as z4j-brain so contributors carry over patterns.
     "fastapi>=0.135",
@@ -138,7 +138,7 @@ z4j-scheduler = "z4j_scheduler.cli:main"
 
 [project.urls]
 Changelog = "https://github.com/z4jdev/z4j-scheduler/blob/main/CHANGELOG.md"
-Documentation = "https://docs.z4j.com/scheduler"
+Documentation = "https://docs.z4j.com/schedulers/z4j-scheduler/"
 Homepage = "https://z4j.com"
 Issues = "https://github.com/z4jdev/z4j-scheduler/issues"
 Source = "https://github.com/z4jdev/z4j-scheduler"

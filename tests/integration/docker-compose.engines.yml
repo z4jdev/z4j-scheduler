@@ -48,7 +48,7 @@ services:
   # in-process StubBroker test in test_engine_matrix_live_e2e.py
   # already covers the in-memory case).
   rabbitmq:
-    image: rabbitmq:4.3.4-management-alpine@sha256:44bf7eb50fe1765885659e49ccfdc775f8e531964d979321aee380a071f49f94
+    image: rabbitmq:4.3.6-management-alpine@sha256:3505b6096cdbc083bcc363e74366f575ecd0c1a55be4dadcbc60fa08e34647e1
     container_name: z4j-engine-test-rabbitmq
     ports:
       - "5680:5672"   # AMQP
