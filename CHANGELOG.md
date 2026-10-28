@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.13.2 (2026-10-29)
+
+- The cadence closure moves to `python-dateutil==3.0.0` and `tzdata==2026.6`
+  (IANA 2026f: Cuba stays on UTC-4 from 2026-11-01), together with `z4j`.
+  The cadence fingerprint changes: upgrade the brain and the scheduler
+  together, stopping the scheduler first. A scheduler and a brain on
+  different closures hold their schedules until both match; nothing is lost.
+
 ## 1.13.0 (2026-10-19)
 
 - Align package version and sibling dependency floors with the coordinated 1.13.0 release. No additional adapter behavior changes in this wave.
